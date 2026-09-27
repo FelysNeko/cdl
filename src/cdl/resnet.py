@@ -1,6 +1,6 @@
 from torch import nn
 
-from cdl.model import CdlQuant, QConv2d, QLinear
+from cdl.model import CdlQuantForActivation, QConv2d, QLinear
 
 
 class QBasicBlock(nn.Module):
@@ -14,7 +14,7 @@ class QBasicBlock(nn.Module):
         topk_act: int,
     ):
         super().__init__()
-        self.q_in = CdlQuant(bits, False, relaxed, topk_act)
+        self.q_in = CdlQuantForActivation(bits, relaxed, topk_act)
         self.conv1 = QConv2d(
             in_planes,
             planes,
@@ -22,7 +22,7 @@ class QBasicBlock(nn.Module):
             stride=stride,
             padding=1,
             bias=False,
-            bits=bits,
+            w_bits=bits,
             relaxed=relaxed,
             quantize_act=False,
         )
@@ -33,7 +33,7 @@ class QBasicBlock(nn.Module):
             3,
             padding=1,
             bias=False,
-            bits=bits,
+            w_bits=bits,
             relaxed=relaxed,
             quantize_act=True,
             topk_act=topk_act,
@@ -47,7 +47,7 @@ class QBasicBlock(nn.Module):
                     1,
                     stride=stride,
                     bias=False,
-                    bits=bits,
+                    w_bits=bits,
                     relaxed=relaxed,
                     quantize_act=False,
                 ),
@@ -85,7 +85,7 @@ class QResNet(nn.Module):
             3,
             padding=1,
             bias=False,
-            bits=bits_edge,
+            w_bits=bits_edge,
             relaxed=relaxed,
             quantize_act=False,
         )
@@ -98,7 +98,7 @@ class QResNet(nn.Module):
         self.fc = QLinear(
             64,
             num_classes,
-            bits=bits_edge,
+            w_bits=bits_edge,
             relaxed=relaxed,
             quantize_act=True,
             topk_act=topk_act,
@@ -122,7 +122,7 @@ class QResNet(nn.Module):
         return self.fc(self.avgpool(x).flatten(1))
 
 
-def resnet(
+def get_cifar_resnet(
     num_layers: int,
     num_classes: int = 100,
     relaxed: bool = False,
