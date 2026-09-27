@@ -8,14 +8,62 @@ dependencies = []
 
 [project.optional-dependencies]
 cpu = ["torch==2.12.1", "torchvision==0.27.1"]
+cu126 = ["torch==2.12.1", "torchvision==0.27.1"]
+cu130 = ["torch==2.12.1", "torchvision==0.27.1"]
+cu132 = ["torch==2.12.1", "torchvision==0.27.1"]
+rocm72 = ["torch==2.12.1", "torchvision==0.27.1", "triton-rocm==3.7.1"]
+
+[tool.uv]
+conflicts = [
+    [
+        { extra = "cpu" },
+        { extra = "cu126" },
+        { extra = "cu130" },
+        { extra = "cu132" },
+        { extra = "rocm72" },
+    ],
+]
 
 [tool.uv.sources]
-torch = [{ index = "pytorch-cpu", extra = "cpu" }]
-torchvision = [{ index = "pytorch-cpu", extra = "cpu" }]
+torch = [
+    { index = "pytorch-cpu", extra = "cpu" },
+    { index = "pytorch-cu126", extra = "cu126" },
+    { index = "pytorch-cu130", extra = "cu130" },
+    { index = "pytorch-cu132", extra = "cu132" },
+    { index = "pytorch-rocm72", extra = "rocm72" },
+]
+torchvision = [
+    { index = "pytorch-cpu", extra = "cpu" },
+    { index = "pytorch-cu126", extra = "cu126" },
+    { index = "pytorch-cu130", extra = "cu130" },
+    { index = "pytorch-cu132", extra = "cu132" },
+    { index = "pytorch-rocm72", extra = "rocm72" },
+]
+triton-rocm = [{ index = "pytorch-rocm72", extra = "rocm72" }]
 
 [[tool.uv.index]]
 name = "pytorch-cpu"
 url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu132"
+url = "https://download.pytorch.org/whl/cu132"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-rocm72"
+url = "https://download.pytorch.org/whl/rocm7.2"
 explicit = true
 
 [build-system]
@@ -23,6 +71,4 @@ requires = ["uv_build>=0.12.5,<0.13.0"]
 build-backend = "uv_build"
 
 [dependency-groups]
-dev = [
-    "ruff>=0.16.9",
-]
+dev = ["ruff>=0.16.9"]
