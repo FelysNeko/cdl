@@ -79,31 +79,14 @@ class CdlQuantForActivation(CdlQuant):
 
 
 class QConv2d(nn.Conv2d):
-    def __init__(
-        self,
-        *args,
-        w_bits: int,
-        relaxed: bool,
-        quantize_act: bool,
-        topk_act: int = 5,
-        act_bits: int | None = None,
-        **kwargs,
-    ):
+    def __init__(self, *args, w_bits: int, relaxed: bool, **kwargs):
         super().__init__(*args, **kwargs)
         self.weight_quant = CdlQuantForWeight(w_bits, self.weight, relaxed)
-        self.activation_quant = (
-            CdlQuantForActivation(act_bits or w_bits, relaxed, topk_act)
-            if quantize_act
-            else None
-        )
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
-        if self.activation_quant is not None:
-            input = self.activation_quant(input)
-        weight = self.weight_quant(self.weight)
         return F.conv2d(
             input,
-            weight,
+            self.weight_quant(self.weight),
             self.bias,
             self.stride,
             self.padding,
@@ -113,29 +96,12 @@ class QConv2d(nn.Conv2d):
 
 
 class QLinear(nn.Linear):
-    def __init__(
-        self,
-        *args,
-        w_bits: int,
-        relaxed: bool,
-        quantize_act: bool,
-        topk_act: int = 5,
-        act_bits: int | None = None,
-        **kwargs,
-    ):
+    def __init__(self, *args, w_bits: int, relaxed: bool, **kwargs):
         super().__init__(*args, **kwargs)
         self.weight_quant = CdlQuantForWeight(w_bits, self.weight, relaxed)
-        self.activation_quant = (
-            CdlQuantForActivation(act_bits or w_bits, relaxed, topk_act)
-            if quantize_act
-            else None
-        )
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
-        if self.activation_quant is not None:
-            input = self.activation_quant(input)
-        weight = self.weight_quant(self.weight)
-        return F.linear(input, weight, self.bias)
+        return F.linear(input, self.weight_quant(self.weight), self.bias)
 
 
 @torch.no_grad()

@@ -15,6 +15,7 @@ class QBasicBlock(nn.Module):
     ):
         super().__init__()
         self.q_in = CdlQuantForActivation(bits, relaxed, topk_act)
+        self.q_mid = CdlQuantForActivation(bits, relaxed, topk_act)
         self.conv1 = QConv2d(
             in_planes,
             planes,
@@ -24,7 +25,6 @@ class QBasicBlock(nn.Module):
             bias=False,
             w_bits=bits,
             relaxed=relaxed,
-            quantize_act=False,
         )
         self.bn1 = nn.BatchNorm2d(planes)
         self.conv2 = QConv2d(
@@ -35,8 +35,6 @@ class QBasicBlock(nn.Module):
             bias=False,
             w_bits=bits,
             relaxed=relaxed,
-            quantize_act=True,
-            topk_act=topk_act,
         )
         self.bn2 = nn.BatchNorm2d(planes)
         self.shortcut = (
@@ -49,7 +47,6 @@ class QBasicBlock(nn.Module):
                     bias=False,
                     w_bits=bits,
                     relaxed=relaxed,
-                    quantize_act=False,
                 ),
                 nn.BatchNorm2d(planes),
             )
@@ -61,6 +58,7 @@ class QBasicBlock(nn.Module):
     def forward(self, x):
         x = self.q_in(x)
         out = self.relu(self.bn1(self.conv1(x)))
+        out = self.q_mid(out)
         return self.relu(self.bn2(self.conv2(out)) + self.shortcut(x))
 
 
@@ -87,23 +85,15 @@ class QResNet(nn.Module):
             bias=False,
             w_bits=bits_edge,
             relaxed=relaxed,
-            quantize_act=False,
         )
         self.bn = nn.BatchNorm2d(16)
         self.in_planes = 16
         self.layer1 = self.make_layer(16, num_blocks[0], 1)
         self.layer2 = self.make_layer(32, num_blocks[1], 2)
         self.layer3 = self.make_layer(64, num_blocks[2], 2)
+        self.q_out = CdlQuantForActivation(bits, relaxed, topk_act)
         self.avgpool = nn.AdaptiveAvgPool2d(1)
-        self.fc = QLinear(
-            64,
-            num_classes,
-            w_bits=bits_edge,
-            relaxed=relaxed,
-            quantize_act=True,
-            topk_act=topk_act,
-            act_bits=bits,
-        )
+        self.fc = QLinear(64, num_classes, w_bits=bits_edge, relaxed=relaxed)
 
     def make_layer(self, planes, num_blocks, stride):
         blocks = []
@@ -119,7 +109,7 @@ class QResNet(nn.Module):
     def forward(self, x):
         x = self.relu(self.bn(self.stem(x)))
         x = self.layer3(self.layer2(self.layer1(x)))
-        return self.fc(self.avgpool(x).flatten(1))
+        return self.fc(self.avgpool(self.q_out(x)).flatten(1))
 
 
 def get_cifar_resnet(

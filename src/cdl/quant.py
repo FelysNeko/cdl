@@ -25,6 +25,15 @@ def q_p(
     return vals.gather(-1, idx).squeeze(-1)
 
 
+def mpmf_entropy(
+    weight: torch.Tensor, q: torch.Tensor, alpha: torch.Tensor, a: torch.Tensor
+) -> torch.Tensor:
+    logits = -alpha * (weight.reshape(-1, 1) - q * a) ** 2
+    mpmf = torch.softmax(logits, -1).mean(0)
+    tiny = torch.finfo(mpmf.dtype).tiny
+    return -(mpmf * mpmf.clamp_min(tiny).log2()).sum()
+
+
 def uniform_quant(theta: torch.Tensor) -> torch.Tensor:
     forward = torch.round(theta)
     backward = theta
