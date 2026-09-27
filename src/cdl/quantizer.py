@@ -1,23 +1,28 @@
 import torch
-from torch.distributions import Categorical
 
 
-def cpmf(theta: torch.Tensor, alpha: torch.Tensor, a_hat: torch.Tensor) -> torch.Tensor:
-    d = (theta[..., None] - a_hat) ** 2  # [..., 1] - [..., K] = [..., K]
-    logits = -alpha * d
-    logits = logits - logits.amax(-1, keepdim=True)  # guards against underflow
-    e = torch.exp(logits)
-    return e / e.sum(-1, keepdim=True)
+def cpmf(
+    theta: torch.Tensor, alpha: torch.Tensor, a_hat: torch.Tensor, topk: int
+) -> tuple[torch.Tensor, torch.Tensor]:
+    logits = -alpha * (theta[..., None] - a_hat) ** 2
+    logits, idx = logits.topk(topk, dim=-1)
+    return torch.softmax(logits, -1), a_hat[idx]
 
 
-def q_d(theta: torch.Tensor, alpha: torch.Tensor, a_hat: torch.Tensor) -> torch.Tensor:
-    return cpmf(theta, alpha, a_hat) @ a_hat
+def q_d(
+    theta: torch.Tensor, alpha: torch.Tensor, a_hat: torch.Tensor, topk: int
+) -> torch.Tensor:
+    pmf, vals = cpmf(theta, alpha, a_hat, topk)
+    return (pmf * vals).sum(-1)
 
 
-def q_p(theta: torch.Tensor, alpha: torch.Tensor, a_hat: torch.Tensor) -> torch.Tensor:
-    pmf = cpmf(theta, alpha, a_hat)
-    idx = Categorical(probs=pmf).sample()
-    return a_hat[idx]
+def q_p(
+    theta: torch.Tensor, alpha: torch.Tensor, a_hat: torch.Tensor, topk: int
+) -> torch.Tensor:
+    pmf, vals = cpmf(theta, alpha, a_hat, topk)
+    u = torch.rand_like(pmf[..., :1])
+    idx = torch.searchsorted(pmf.cumsum(-1), u).clamp_(max=topk - 1)
+    return vals.gather(-1, idx).squeeze(-1)
 
 
 def uniform_quant(theta: torch.Tensor) -> torch.Tensor:
@@ -31,20 +36,25 @@ def probabilistic_quant(
     q: torch.Tensor,
     alpha: torch.Tensor,
     a: torch.Tensor,
+    topk: int,
 ) -> torch.Tensor:
     assert not a.requires_grad
 
     a_hat = q * a
-    forward = q_d(theta, alpha, a_hat)
+    forward = q_d(theta, alpha, a_hat, topk)
 
     with torch.no_grad():
-        backward = q_p(theta, alpha, a_hat)
+        backward = q_p(theta, alpha, a_hat, topk)
 
     return forward + (backward - forward).detach()
 
 
 def soft_deterministic_quant(
-    theta: torch.Tensor, q: torch.Tensor, alpha: torch.Tensor, a: torch.Tensor
+    theta: torch.Tensor,
+    q: torch.Tensor,
+    alpha: torch.Tensor,
+    a: torch.Tensor,
+    topk: int,
 ) -> torch.Tensor:
     assert not a.requires_grad
-    return q_d(theta, alpha, q * a)
+    return q_d(theta, alpha, q * a, topk)

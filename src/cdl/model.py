@@ -13,6 +13,7 @@ class CdlQuant(nn.Module):
         bits: int,
         symmetric: bool,
         relaxed: bool,
+        topk: int,
     ):
         super().__init__()
         start = -(2 ** (bits - 1)) if symmetric else 0
@@ -20,6 +21,7 @@ class CdlQuant(nn.Module):
 
         self.bits = bits
         self.relaxed = relaxed
+        self.topk = min(topk, 2**bits)
         self.register_buffer("a", a)
         self.q = nn.Parameter(torch.full((), torch.nan))
         self.alpha = nn.Parameter(torch.full((), 500.0))
@@ -34,20 +36,48 @@ class CdlQuant(nn.Module):
             return input
 
         if self.q.isnan():
-            raise RuntimeError("Quantizer not initialized, run `init_q_pass`.")
+            raise RuntimeError("quantizer not initialized")
 
         if self.relaxed:
-            return soft_deterministic_quant(input, self.q, self.alpha, self.a)
-        return probabilistic_quant(input, self.q, self.alpha, self.a)
+            return soft_deterministic_quant(
+                input, self.q, self.alpha, self.a, self.topk
+            )
+        return probabilistic_quant(input, self.q, self.alpha, self.a, self.topk)
+
+
+def make_quantizers(
+    weight: torch.Tensor,
+    bits: int,
+    relaxed: bool,
+    quantize_act: bool,
+    topk_act: int,
+    act_bits: int | None = None,
+) -> tuple[CdlQuant, CdlQuant | None]:
+    weight_quant = CdlQuant(bits, True, relaxed, 2**bits)
+    weight_quant.init_q(weight.detach().abs().mean().item())
+    activation_quant = (
+        CdlQuant(bits if act_bits is None else act_bits, False, relaxed, topk_act)
+        if quantize_act
+        else None
+    )
+    return weight_quant, activation_quant
 
 
 class QConv2d(nn.Conv2d):
-    def __init__(self, *args, bits: int, relaxed: bool, quantize_act: bool, **kwargs):
+    def __init__(
+        self,
+        *args,
+        bits: int,
+        relaxed: bool,
+        quantize_act: bool,
+        topk_act: int = 5,
+        act_bits: int | None = None,
+        **kwargs,
+    ):
         super().__init__(*args, **kwargs)
-        weight_abs_mean = self.weight.detach().abs().mean().item()
-        self.weight_quant = CdlQuant(bits, True, relaxed)
-        self.weight_quant.init_q(weight_abs_mean)
-        self.activation_quant = CdlQuant(bits, False, relaxed) if quantize_act else None
+        self.weight_quant, self.activation_quant = make_quantizers(
+            self.weight, bits, relaxed, quantize_act, topk_act, act_bits
+        )
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         if self.activation_quant is not None:
@@ -64,7 +94,30 @@ class QConv2d(nn.Conv2d):
         )
 
 
-@torch.no_grad
+class QLinear(nn.Linear):
+    def __init__(
+        self,
+        *args,
+        bits: int,
+        relaxed: bool,
+        quantize_act: bool,
+        topk_act: int = 5,
+        act_bits: int | None = None,
+        **kwargs,
+    ):
+        super().__init__(*args, **kwargs)
+        self.weight_quant, self.activation_quant = make_quantizers(
+            self.weight, bits, relaxed, quantize_act, topk_act, act_bits
+        )
+
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        if self.activation_quant is not None:
+            input = self.activation_quant(input)
+        weight = self.weight_quant(self.weight)
+        return F.linear(input, weight, self.bias)
+
+
+@torch.no_grad()
 def init_q_pass(nets: nn.Module, samples: Iterable[torch.Tensor]) -> None:
     modules = [m for m in nets.modules() if isinstance(m, CdlQuant) and m.q.isnan()]
     if not modules:
@@ -95,4 +148,6 @@ def init_q_pass(nets: nn.Module, samples: Iterable[torch.Tensor]) -> None:
 
     for m in modules:
         total, n = mod_to_data_list[m]
+        if n == 0:
+            raise RuntimeError("some quantizers were never reached by samples")
         m.init_q(total / n)
