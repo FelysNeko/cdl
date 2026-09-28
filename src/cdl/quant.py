@@ -26,10 +26,23 @@ def q_p(
 
 
 def mpmf_entropy(
-    weight: torch.Tensor, q: torch.Tensor, alpha: torch.Tensor, a: torch.Tensor
+    theta: torch.Tensor,
+    q: torch.Tensor,
+    alpha: torch.Tensor,
+    a: torch.Tensor,
+    topk: int,
 ) -> torch.Tensor:
-    logits = -alpha * (weight.reshape(-1, 1) - q * a) ** 2
-    mpmf = torch.softmax(logits, -1).mean(0)
+    theta = theta.reshape(-1)
+    logits = -alpha * (theta[:, None] - q * a) ** 2
+
+    if topk < a.numel():
+        logits, idx = logits.topk(topk, dim=-1)
+        probs = logits.new_zeros(theta.numel(), a.numel())
+        probs.scatter_(-1, idx, torch.softmax(logits, -1))
+    else:
+        probs = torch.softmax(logits, -1)
+
+    mpmf = probs.mean(0)
     tiny = torch.finfo(mpmf.dtype).tiny
     return -(mpmf * mpmf.clamp_min(tiny).log2()).sum()
 

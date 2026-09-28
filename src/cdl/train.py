@@ -7,7 +7,13 @@ from torch import nn
 from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 
-from cdl.model import CdlQuant, init_act_q_pass
+from cdl.model import (
+    CdlQuant,
+    CdlQuantForActivation,
+    QConv2d,
+    QLinear,
+    init_act_q_pass,
+)
 from cdl.resnet import get_cifar_resnet
 
 MEAN = (0.5071, 0.4865, 0.4409)
@@ -95,17 +101,37 @@ def evaluate(net: nn.Module, loader: DataLoader, device: torch.device) -> float:
     return correct / total
 
 
+def weight_entropy(net: nn.Module) -> torch.Tensor:
+    total = None
+    for m in net.modules():
+        if isinstance(m, (QConv2d, QLinear)):
+            e = m.compute_entropy()
+            total = e if total is None else total + e
+    if total is None:
+        raise RuntimeError("no quantized weight layers found")
+    return total
+
+
+def activation_entropy(net: nn.Module) -> torch.Tensor:
+    total = None
+    for m in net.modules():
+        if isinstance(m, CdlQuantForActivation):
+            e = m.compute_entropy_and_reset()
+            total = e if total is None else total + e
+    if total is None:
+        raise RuntimeError("no activation quantizers found")
+    return total
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--layers", type=int, default=20)
-    parser.add_argument("--relaxed", action="store_true", help="R-CDL instead of CDL")
+    parser.add_argument("--relaxed", action="store_true")
     parser.add_argument("--bits", type=int, default=6)
     parser.add_argument("--bits-edge", type=int, default=8)
     parser.add_argument("--topk-act", type=int, default=5)
-    parser.add_argument("--lam", type=float, default=0.0, help="weight entropy weight")
-    parser.add_argument(
-        "--gam", type=float, default=0.0, help="activation entropy weight"
-    )
+    parser.add_argument("--lam", type=float, default=0.01)
+    parser.add_argument("--gam", type=float, default=0.01)
     parser.add_argument("--epochs", type=int, default=200)
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--lr", type=float, default=0.1)
@@ -133,9 +159,6 @@ def sanitize_device(device: str) -> torch.device:
 
 def train() -> None:
     args = parse_args()
-    if args.lam or args.gam:
-        raise NotImplementedError("entropy terms not implemented, use --lam 0 --gam 0")
-
     device = sanitize_device(args.device)
     torch.manual_seed(args.seed)
 
@@ -158,21 +181,35 @@ def train() -> None:
     tick = time.perf_counter()
     for epoch in range(args.epochs):
         net.train()
-        running = 0.0
+        ce_sum = 0.0
+        hw_sum = 0.0
+        hx_sum = 0.0
         for x, y in train_loader:
             x, y = x.to(device), y.to(device)
             loss = criterion(net(x), y)
+            ce_sum += loss.item()
+
+            # Objective of (30): L + gamma * H(x) + lambda * H(w). The entropies
+            # are always evaluated, so the activation accumulators are always
+            # drained and --gam 0 / --lam 0 stay valid weights.
+            hx = activation_entropy(net)
+            hw = weight_entropy(net)
+            loss = loss + args.gam * hx + args.lam * hw
+            hx_sum += hx.item()
+            hw_sum += hw.item()
+
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
             optimizer.step()
             floor_quant(net, 1e-8, 1e-8)
-            running += loss.item()
         lr_scheduler.step()
 
         if epoch % args.log_every == 0 or epoch == args.epochs - 1:
             acc = evaluate(net, test_loader, device)
+            batches = len(train_loader)
             print(
-                f"epoch {epoch:3d}  loss {running / len(train_loader):.4f}  "
+                f"epoch {epoch:3d}  loss {ce_sum / batches:.4f}  "
+                f"Hw {hw_sum / batches:.3f}  Hx {hx_sum / batches:.3f}  "
                 f"acc {acc * 100:.2f}  {time.perf_counter() - tick:.0f}s",
                 flush=True,
             )
