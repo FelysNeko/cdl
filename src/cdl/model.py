@@ -5,7 +5,15 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from cdl.quant import mpmf_entropy, probabilistic_quant, soft_deterministic_quant
+from cdl.quant import (
+    cpmf,
+    mpmf_entropy,
+    probabilistic_quant,
+    q_d,
+    quant_from_cpmf,
+    soft_deterministic_quant,
+    weight_mpmf_entropy,
+)
 
 
 class CdlQuant(nn.Module, abc.ABC):
@@ -42,9 +50,6 @@ class CdlQuant(nn.Module, abc.ABC):
             )
         return probabilistic_quant(input, self.q, self.alpha, self.a, self.topk)
 
-    def mpmf_entropy(self, theta: torch.Tensor) -> torch.Tensor:
-        return mpmf_entropy(theta, self.q, self.alpha, self.a, self.topk)
-
 
 class CdlQuantForWeight(CdlQuant):
     def __init__(self, bits: int, weight: torch.Tensor, relaxed: bool):
@@ -56,6 +61,10 @@ class CdlQuantForWeight(CdlQuant):
 
     def scale_q_lr(self, eta: float) -> float:
         return eta / (self.numel * 2 ** (self.bits - 1)) ** 0.5
+
+    def mpmf_entropy(self, theta: torch.Tensor) -> torch.Tensor:
+        """MPMF entropy H(W_hat_l) in bits of this layer's weights."""
+        return weight_mpmf_entropy(theta, self.q, self.alpha, self.a)
 
 
 class CdlQuantForActivation(CdlQuant):
@@ -89,11 +98,15 @@ class CdlQuantForActivation(CdlQuant):
         if not self.initialized:
             raise RuntimeError("quantizer not initialized")
 
+        pmf, vals, idx = cpmf(input, self.alpha, self.q * self.a, self.topk)
+
         if self.training:
-            self.entropy_sum = self.entropy_sum + self.mpmf_entropy(input)
+            self.entropy_sum = self.entropy_sum + mpmf_entropy(pmf, idx, self.a.numel())
             self.forward_count += 1
 
-        return super().forward(input)
+        if self.relaxed:
+            return q_d(pmf, vals)
+        return quant_from_cpmf(pmf, vals, self.topk)
 
     def compute_entropy_and_reset(self) -> torch.Tensor:
         if self.forward_count == 0:
