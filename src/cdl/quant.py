@@ -1,12 +1,34 @@
 import torch
 
 
+def nearest_window(theta: torch.Tensor, a_hat: torch.Tensor, topk: int) -> torch.Tensor:
+    size = a_hat.numel()
+    width = 2 * topk
+    position = torch.searchsorted(a_hat, theta)
+    start = (position - topk).clamp(0, size - width)
+    return start[..., None] + torch.arange(width, device=theta.device)
+
+
 def cpmf(
-    theta: torch.Tensor, alpha: torch.Tensor, a_hat: torch.Tensor, topk: int
+    theta: torch.Tensor,
+    alpha: torch.Tensor,
+    q: torch.Tensor,
+    a: torch.Tensor,
+    topk: int,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    logits = -alpha * (theta[..., None] - a_hat) ** 2
-    logits, idx = logits.topk(topk, dim=-1)
-    return torch.softmax(logits, -1), a_hat[idx], idx
+    size = a.numel()
+    a_hat = q * a
+
+    if size <= 2 * topk:
+        logits = -alpha * (theta[..., None] - a_hat) ** 2
+        logits, idx = logits.topk(topk, dim=-1)
+        return torch.softmax(logits, -1), a_hat[idx], idx
+
+    idx = nearest_window(theta, a_hat, topk)
+    cand = q * a[idx]
+    logits = -alpha * (theta[..., None] - cand) ** 2
+    logits, chosen = logits.topk(topk, dim=-1)
+    return torch.softmax(logits, -1), cand.gather(-1, chosen), idx.gather(-1, chosen)
 
 
 def q_d(pmf: torch.Tensor, vals: torch.Tensor) -> torch.Tensor:
@@ -35,49 +57,3 @@ def mpmf_entropy(pmf: torch.Tensor, idx: torch.Tensor, size: int) -> torch.Tenso
 
     tiny = torch.finfo(mpmf.dtype).tiny
     return -(mpmf * mpmf.clamp_min(tiny).log2()).sum()
-
-
-def weight_mpmf_entropy(
-    theta: torch.Tensor,
-    q: torch.Tensor,
-    alpha: torch.Tensor,
-    a: torch.Tensor,
-) -> torch.Tensor:
-    theta = theta.reshape(-1)
-    logits = -alpha * (theta[:, None] - q * a) ** 2
-    mpmf = torch.softmax(logits, -1).mean(0)
-
-    tiny = torch.finfo(mpmf.dtype).tiny
-    return -(mpmf * mpmf.clamp_min(tiny).log2()).sum()
-
-
-def uniform_quant(theta: torch.Tensor) -> torch.Tensor:
-    forward = torch.round(theta)
-    backward = theta
-    return backward + (forward - backward).detach()
-
-
-def probabilistic_quant(
-    theta: torch.Tensor,
-    q: torch.Tensor,
-    alpha: torch.Tensor,
-    a: torch.Tensor,
-    topk: int,
-) -> torch.Tensor:
-    assert not a.requires_grad
-
-    pmf, vals, _ = cpmf(theta, alpha, q * a, topk)
-    return quant_from_cpmf(pmf, vals, topk)
-
-
-def soft_deterministic_quant(
-    theta: torch.Tensor,
-    q: torch.Tensor,
-    alpha: torch.Tensor,
-    a: torch.Tensor,
-    topk: int,
-) -> torch.Tensor:
-    assert not a.requires_grad
-
-    pmf, vals, _ = cpmf(theta, alpha, q * a, topk)
-    return q_d(pmf, vals)

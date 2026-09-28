@@ -8,11 +8,8 @@ from torch import nn
 from cdl.quant import (
     cpmf,
     mpmf_entropy,
-    probabilistic_quant,
     q_d,
     quant_from_cpmf,
-    soft_deterministic_quant,
-    weight_mpmf_entropy,
 )
 
 
@@ -32,6 +29,8 @@ class CdlQuant(nn.Module, abc.ABC):
         self.register_buffer("a", a)
         self.q = nn.Parameter(torch.full((), q))
         self.alpha = nn.Parameter(torch.full((), 500.0))
+        self.entropy_sum = 0.0
+        self.forward_count = 0
 
     @property
     def bits(self) -> int:
@@ -44,11 +43,29 @@ class CdlQuant(nn.Module, abc.ABC):
         return eta / self.numel**0.5
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
+        pmf, vals, idx = cpmf(input, self.alpha, self.q, self.a, self.topk)
+
+        if self.training:
+            self.entropy_sum = self.entropy_sum + mpmf_entropy(pmf, idx, self.a.numel())
+            self.forward_count += 1
+
         if self.relaxed:
-            return soft_deterministic_quant(
-                input, self.q, self.alpha, self.a, self.topk
-            )
-        return probabilistic_quant(input, self.q, self.alpha, self.a, self.topk)
+            return q_d(pmf, vals)
+        return quant_from_cpmf(pmf, vals, self.topk)
+
+    def compute_entropy_and_reset(self) -> torch.Tensor:
+        """Average MPMF entropy in bits accumulated since the last reset.
+
+        Must be called exactly once per ``loss.backward()`` (before it).
+        Gradient accumulation does not change this cadence: drain follows
+        backward, not optimizer.step.
+        """
+        if self.forward_count == 0:
+            raise RuntimeError("entropy read before any training forward")
+        entropy = self.entropy_sum / self.forward_count
+        self.entropy_sum = 0.0
+        self.forward_count = 0
+        return entropy
 
 
 class CdlQuantForWeight(CdlQuant):
@@ -62,18 +79,12 @@ class CdlQuantForWeight(CdlQuant):
     def scale_q_lr(self, eta: float) -> float:
         return eta / (self.numel * 2 ** (self.bits - 1)) ** 0.5
 
-    def mpmf_entropy(self, theta: torch.Tensor) -> torch.Tensor:
-        """MPMF entropy H(W_hat_l) in bits of this layer's weights."""
-        return weight_mpmf_entropy(theta, self.q, self.alpha, self.a)
-
 
 class CdlQuantForActivation(CdlQuant):
     def __init__(self, bits: int, relaxed: bool, topk: int):
         start = 0
         a = torch.arange(start, start + 2**bits, dtype=torch.float32)
         super().__init__(a, torch.nan, 0, relaxed, topk)
-        self.entropy_sum = 0.0
-        self.forward_count = 0
         self.bypassing = False
         self.initialized = False
 
@@ -98,23 +109,7 @@ class CdlQuantForActivation(CdlQuant):
         if not self.initialized:
             raise RuntimeError("quantizer not initialized")
 
-        pmf, vals, idx = cpmf(input, self.alpha, self.q * self.a, self.topk)
-
-        if self.training:
-            self.entropy_sum = self.entropy_sum + mpmf_entropy(pmf, idx, self.a.numel())
-            self.forward_count += 1
-
-        if self.relaxed:
-            return q_d(pmf, vals)
-        return quant_from_cpmf(pmf, vals, self.topk)
-
-    def compute_entropy_and_reset(self) -> torch.Tensor:
-        if self.forward_count == 0:
-            raise RuntimeError("activation entropy read before any training forward")
-        entropy = self.entropy_sum / self.forward_count
-        self.entropy_sum = 0.0
-        self.forward_count = 0
-        return entropy
+        return super().forward(input)
 
 
 class QConv2d(nn.Conv2d):
@@ -133,10 +128,6 @@ class QConv2d(nn.Conv2d):
             self.groups,
         )
 
-    def compute_entropy(self) -> torch.Tensor:
-        """MPMF entropy H(W_hat_l) in bits of this layer's weight quantizer."""
-        return self.weight_quant.mpmf_entropy(self.weight)
-
 
 class QLinear(nn.Linear):
     def __init__(self, *args, w_bits: int, relaxed: bool, **kwargs):
@@ -145,10 +136,6 @@ class QLinear(nn.Linear):
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         return F.linear(input, self.weight_quant(self.weight), self.bias)
-
-    def compute_entropy(self) -> torch.Tensor:
-        """MPMF entropy H(W_hat_l) in bits of this layer's weight quantizer."""
-        return self.weight_quant.mpmf_entropy(self.weight)
 
 
 @torch.no_grad()

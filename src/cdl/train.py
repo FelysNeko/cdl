@@ -10,8 +10,7 @@ from torchvision import datasets, transforms
 from cdl.model import (
     CdlQuant,
     CdlQuantForActivation,
-    QConv2d,
-    QLinear,
+    CdlQuantForWeight,
     init_act_q_pass,
 )
 from cdl.resnet import get_cifar_resnet
@@ -92,20 +91,24 @@ def floor_quant(net: nn.Module, min_q: float, min_alpha: float) -> None:
 
 @torch.no_grad()
 def evaluate(net: nn.Module, loader: DataLoader, device: torch.device) -> float:
-    net.eval()
-    correct = total = 0
-    for x, y in loader:
-        x, y = x.to(device), y.to(device)
-        correct += (net(x).argmax(-1) == y).sum().item()
-        total += y.numel()
-    return correct / total
+    # fork_rng: keep eval-time Q_p sampling off the global RNG stream, so the
+    # training trajectory does not depend on eval frequency or test-set size.
+    devices = [device] if device.type == "cuda" else []
+    with torch.random.fork_rng(devices=devices):
+        net.eval()
+        correct = total = 0
+        for x, y in loader:
+            x, y = x.to(device), y.to(device)
+            correct += (net(x).argmax(-1) == y).sum().item()
+            total += y.numel()
+        return correct / total
 
 
 def weight_entropy(net: nn.Module) -> torch.Tensor:
     total = None
     for m in net.modules():
-        if isinstance(m, (QConv2d, QLinear)):
-            e = m.compute_entropy()
+        if isinstance(m, CdlQuantForWeight):
+            e = m.compute_entropy_and_reset()
             total = e if total is None else total + e
     if total is None:
         raise RuntimeError("no quantized weight layers found")
