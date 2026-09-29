@@ -54,7 +54,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--momentum", type=float, default=0.9)
     parser.add_argument("--milestones", type=int, nargs="+", default=[60, 120, 160])
     parser.add_argument("--sched-gamma", type=float, default=0.1)
-    parser.add_argument("--calib-batches", type=int, default=4)
+    parser.add_argument("--calib-batches", type=int, default=1)
     parser.add_argument("--log-every", type=int, default=1)
     parser.add_argument("--workers", type=int, default=2)
     parser.add_argument("--seed", type=int, default=0)

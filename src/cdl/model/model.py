@@ -45,7 +45,7 @@ class CdlQuant(nn.Module, abc.ABC):
         pmf, vals, idx = cpmf(input, self.alpha, self.q, self.a, self.topk)
 
         if self.training:
-            entropy = input.numel() * mpmf_entropy(pmf, idx, self.a.numel())
+            entropy = mpmf_entropy(pmf, idx, self.a.numel(), self.numel)
             self.entropy_sum = self.entropy_sum + entropy
             self.forward_count += 1
 
@@ -54,9 +54,7 @@ class CdlQuant(nn.Module, abc.ABC):
         return quant_from_cpmf(pmf, vals, self.topk)
 
     def compute_entropy_and_reset(self) -> torch.Tensor:
-        """Average size-weighted MPMF entropy in bits (the paper's Eq. 26/28),
-        accumulated since the last reset.
-
+        """
         Must be called exactly once per ``loss.backward()`` (before it).
         Gradient accumulation does not change this cadence: drain follows
         backward, not optimizer.step.

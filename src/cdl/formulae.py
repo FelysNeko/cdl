@@ -3,10 +3,9 @@ import torch
 
 def nearest_window(theta: torch.Tensor, a_hat: torch.Tensor, topk: int) -> torch.Tensor:
     size = a_hat.numel()
-    width = 2 * topk
     position = torch.searchsorted(a_hat, theta)
-    start = (position - topk).clamp(0, size - width)
-    return start[..., None] + torch.arange(width, device=theta.device)
+    offset = torch.arange(-topk, topk, device=theta.device)
+    return (position[..., None] + offset) % size
 
 
 def cpmf(
@@ -50,10 +49,19 @@ def quant_from_cpmf(pmf: torch.Tensor, vals: torch.Tensor, topk: int) -> torch.T
     return forward + (backward - forward).detach()
 
 
-def mpmf_entropy(pmf: torch.Tensor, idx: torch.Tensor, size: int) -> torch.Tensor:
-    numel = pmf.numel() // pmf.shape[-1]
-    mpmf = pmf.new_zeros(size).index_add(0, idx.reshape(-1), pmf.reshape(-1))
-    mpmf = mpmf / numel
+def mpmf_entropy(
+    pmf: torch.Tensor, idx: torch.Tensor, size: int, group_size: int
+) -> torch.Tensor:
+    topk = pmf.shape[-1]
+    groups = pmf.numel() // (group_size * topk)
+
+    pmf = pmf.reshape(groups, group_size, topk)
+    idx = idx.reshape(groups, group_size, topk)
+
+    mpmf = pmf.new_zeros(groups, size)
+    mpmf.scatter_add_(1, idx.reshape(groups, -1), pmf.reshape(groups, -1))
+    mpmf = mpmf / group_size
 
     tiny = torch.finfo(mpmf.dtype).tiny
-    return -(mpmf * mpmf.clamp_min(tiny).log2()).sum()
+    entropies = -(mpmf * mpmf.clamp_min(tiny).log2()).sum(-1)
+    return group_size * entropies.mean()
