@@ -1,4 +1,6 @@
 from collections.abc import Iterable
+from contextlib import contextmanager
+from typing import Any
 
 import torch
 from torch import nn
@@ -17,6 +19,37 @@ class Trainer:
     def compile(self) -> None:
         torch._dynamo.config.cache_size_limit = 128
         self.resnet = torch.compile(self.resnet, dynamic=True)
+
+    @contextmanager
+    def batchnorm_batch_stats(self):
+        states: list[
+            tuple[nn.BatchNorm2d, bool, float | None, torch.Tensor | None]
+        ] = []
+
+        for m in self.resnet.modules():
+            if not isinstance(m, nn.BatchNorm2d):
+                continue
+            states.append(
+                (
+                    m,
+                    m.training,
+                    m.momentum,
+                    None
+                    if m.num_batches_tracked is None
+                    else m.num_batches_tracked.clone(),
+                )
+            )
+            m.train(True)
+            m.momentum = 0.0
+
+        try:
+            yield
+        finally:
+            for m, training, momentum, num_batches_tracked in states:
+                m.train(training)
+                m.momentum = momentum
+                if num_batches_tracked is not None:
+                    m.num_batches_tracked.copy_(num_batches_tracked)
 
     @torch.no_grad()
     def init_act_q_pass(self, samples: Iterable[torch.Tensor]) -> None:
@@ -44,9 +77,10 @@ class Trainer:
         for m in modules:
             m.bypassing = True
         try:
-            for x in samples:
-                x = x.to(self.device)
-                self.resnet(x)
+            with self.batchnorm_batch_stats():
+                for x in samples:
+                    x = x.to(self.device)
+                    self.resnet(x)
         finally:
             for h in handles:
                 h.remove()
@@ -85,8 +119,7 @@ class Trainer:
         parameters = []
         customized_param_set = set()
 
-        def register_parameter(ps: nn.Parameter, lr: float, wd: float):
-            customized_param_set.add(ps)
+        def register_parameter(ps: Any, lr: float, wd: float):
             parameters.append({"params": ps, "lr": lr, "weight_decay": wd})
 
         for m in self.resnet.modules():
@@ -98,18 +131,28 @@ class Trainer:
 
             q_lr = m.scale_q_lr(learning_rate)
             register_parameter(m.q, q_lr, 0.0)
+            customized_param_set.add(m.q)
 
             alpha_lr = m.scale_alpha_lr(learning_rate)
             register_parameter(m.alpha, alpha_lr, 0.0)
+            customized_param_set.add(m.alpha)
 
-        params = (x for x in self.resnet.parameters() if x not in customized_param_set)
-        parameters.append(
-            {
-                "params": params,
-                "lr": learning_rate,
-                "weight_decay": weight_decay,
-            }
-        )
+        decay = []
+        no_decay = []
+        for param in self.resnet.parameters():
+            if param in customized_param_set:
+                continue
+            if param.ndim <= 1:
+                no_decay.append(param)
+            else:
+                decay.append(param)
+
+        if decay:
+            register_parameter(decay, learning_rate, weight_decay)
+
+        if no_decay:
+            register_parameter(no_decay, learning_rate, 0.0)
+
         return parameters
 
     @torch.no_grad()
