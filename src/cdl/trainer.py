@@ -175,3 +175,14 @@ class Trainer:
                 correct += (out.argmax(-1) == y).sum().item()
                 total += y.numel()
             return correct / total
+
+    def get_quant_counts(self) -> tuple[int, int]:
+        n_weight = sum(
+            m.numel for m in self.resnet.modules() if isinstance(m, CdlQuantForWeight)
+        )
+        n_activation = sum(
+            m.numel
+            for m in self.resnet.modules()
+            if isinstance(m, CdlQuantForActivation)
+        )
+        return n_weight, n_activation
