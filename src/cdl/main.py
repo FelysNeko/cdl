@@ -1,5 +1,7 @@
 import argparse
 import json
+import logging
+import random
 import sys
 import time
 import uuid
@@ -17,6 +19,8 @@ from cdl.trainer import Trainer
 
 MEAN = (0.5071, 0.4865, 0.4409)
 STD = (0.2673, 0.2564, 0.2762)
+
+logger = logging.getLogger(__name__)
 
 
 def get_loaders(batch_size: int, workers: int) -> tuple[DataLoader, DataLoader]:
@@ -103,11 +107,20 @@ def get_output_dir(output_dir: Path, run_name: str | None) -> Path:
     return output_dir
 
 
-def save_config(output_dir: Path, args: argparse.Namespace) -> None:
+def seed_all(seed: int) -> None:
+    random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+
+def save_config(output_dir: Path, args: argparse.Namespace) -> Path:
     config = vars(args).copy()
     config["argv"] = sys.argv
-    with open(output_dir / "config.json", "w", encoding="utf-8") as f:
+    config_path = output_dir / "config.json"
+    with open(config_path, "w", encoding="utf-8") as f:
         json.dump(config, f, indent=2, default=str)
+    return config_path
 
 
 def current_lr(optimizer: torch.optim.Optimizer) -> float:
@@ -119,21 +132,31 @@ def current_lr(optimizer: torch.optim.Optimizer) -> float:
 def training_pipeline() -> None:
     args = parse_args()
     output_dir = get_output_dir(args.output_dir, args.run_name)
-    save_config(output_dir, args)
+    logger.info(f"output directory at {output_dir}")
 
-    torch.manual_seed(args.seed)
+    config_path = save_config(output_dir, args)
+    logger.info(f"config saved to {config_path}")
+
+    seed_all(args.seed)
+    logger.info(f"seed with {args.seed}")
+
+    device = sanitize_device(args.device)
+    logger.info(f"training on {device}")
 
     cifar_resnet = get_cifar_resnet(
         args.layers, 100, args.relaxed, args.bits, args.bits_edge, args.topk_act
     )
-    device = sanitize_device(args.device)
     trainer = Trainer(cifar_resnet, device)
+    logger.info("trainer initialized")
 
     train_loader, test_loader = get_loaders(args.batch_size, args.workers)
     calibration_batches = (x for x, _ in islice(train_loader, args.calib_batches))
     trainer.init_act_q_pass(calibration_batches)
+    logger.info("quantization steps calibrated")
 
     n_weight, n_activation = trainer.get_quant_counts()
+    logger.info(f"weight quantization counts: {n_weight}")
+    logger.info(f"activation quantization counts: {n_activation}")
 
     param_groups = trainer.get_param_groups(args.lr, args.wd)
     optimizer = torch.optim.SGD(param_groups, momentum=args.momentum)
@@ -143,6 +166,7 @@ def training_pipeline() -> None:
     )
 
     if args.compile:
+        logger.info("torch compile enabled")
         trainer.compile()
 
     writer = SummaryWriter(log_dir=str(output_dir / "tensorboard"))
@@ -221,6 +245,5 @@ def training_pipeline() -> None:
 
             writer.add_scalar("epoch/val_acc", acc, epoch)
             writer.flush()
-
 
     writer.close()
