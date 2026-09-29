@@ -1,8 +1,8 @@
-from cdl.train import train
+from cdl.main import training_pipeline
 
 
 def main():
-    train()
+    training_pipeline()
 
 
 if __name__ == "__main__":

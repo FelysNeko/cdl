@@ -1,6 +1,6 @@
 from torch import nn
 
-from cdl.model import CdlQuantForActivation, QConv2d, QLinear
+from cdl.model.model import CdlQuantForActivation, QConv2d, QLinear
 
 
 class QBasicBlock(nn.Module):

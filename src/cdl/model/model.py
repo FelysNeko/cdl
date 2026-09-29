@@ -1,11 +1,10 @@
 import abc
-from collections.abc import Iterable
 
 import torch
 import torch.nn.functional as F
 from torch import nn
 
-from cdl.quant import (
+from cdl.formulae import (
     cpmf,
     mpmf_entropy,
     q_d,
@@ -46,7 +45,8 @@ class CdlQuant(nn.Module, abc.ABC):
         pmf, vals, idx = cpmf(input, self.alpha, self.q, self.a, self.topk)
 
         if self.training:
-            self.entropy_sum = self.entropy_sum + mpmf_entropy(pmf, idx, self.a.numel())
+            entropy = input.numel() * mpmf_entropy(pmf, idx, self.a.numel())
+            self.entropy_sum = self.entropy_sum + entropy
             self.forward_count += 1
 
         if self.relaxed:
@@ -54,7 +54,8 @@ class CdlQuant(nn.Module, abc.ABC):
         return quant_from_cpmf(pmf, vals, self.topk)
 
     def compute_entropy_and_reset(self) -> torch.Tensor:
-        """Average MPMF entropy in bits accumulated since the last reset.
+        """Average size-weighted MPMF entropy in bits (the paper's Eq. 26/28),
+        accumulated since the last reset.
 
         Must be called exactly once per ``loss.backward()`` (before it).
         Gradient accumulation does not change this cadence: drain follows
@@ -136,43 +137,3 @@ class QLinear(nn.Linear):
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         return F.linear(input, self.weight_quant(self.weight), self.bias)
-
-
-@torch.no_grad()
-def init_act_q_pass(net: nn.Module, samples: Iterable[torch.Tensor]) -> None:
-    modules = [
-        m for m in net.modules() if isinstance(m, CdlQuantForActivation) and m.q.isnan()
-    ]
-    if not modules:
-        return
-
-    stats = {m: [0.0, 0, 0] for m in modules}
-
-    def hook(mod, args):
-        x: torch.Tensor = args[0]
-        s = stats[mod]
-        s[0] += x.abs().sum().item()
-        s[1] += x.numel()
-        s[2] = x.shape[1:].numel()
-
-    handles = [m.register_forward_pre_hook(hook) for m in modules]
-
-    was_training = net.training
-    net.eval()
-    for m in modules:
-        m.bypassing = True
-    try:
-        for x in samples:
-            net(x)
-    finally:
-        for h in handles:
-            h.remove()
-        for m in modules:
-            m.bypassing = False
-        net.train(was_training)
-
-    for m in modules:
-        total, n, dim = stats[m]
-        if n == 0:
-            raise RuntimeError("some quantizers were never reached by samples")
-        m.init_q_and_numel(total / n, dim)
