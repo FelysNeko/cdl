@@ -146,6 +146,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--log-every", type=int, default=1)
     parser.add_argument("--workers", type=int, default=2)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--compile", action="store_true")
     parser.add_argument("--device", default="auto")
     return parser.parse_args()
 
@@ -170,7 +171,9 @@ def train() -> None:
         args.layers, 100, args.relaxed, args.bits, args.bits_edge, args.topk_act
     ).to(device)
 
-    init_act_q_pass(net, (x for x, _ in islice(train_loader, args.calib_batches)))
+    init_act_q_pass(
+        net, (x.to(device) for x, _ in islice(train_loader, args.calib_batches))
+    )
 
     optimizer = torch.optim.SGD(
         get_param_groups(net, args.lr, args.wd),
@@ -180,6 +183,10 @@ def train() -> None:
         optimizer, args.milestones, args.sched_gamma
     )
     criterion = nn.CrossEntropyLoss()
+
+    if args.compile:
+        torch._dynamo.config.cache_size_limit = 128
+        net = torch.compile(net, dynamic=True)
 
     tick = time.perf_counter()
     for epoch in range(args.epochs):
