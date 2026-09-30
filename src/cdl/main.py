@@ -62,6 +62,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--lr", type=float, default=0.1)
     parser.add_argument("--wd", type=float, default=5e-4)
     parser.add_argument("--momentum", type=float, default=0.9)
+    parser.add_argument("--clip", type=float, default=5.0)
     parser.add_argument("--milestones", type=int, nargs="+", default=[60, 120, 160])
     parser.add_argument("--sched-gamma", type=float, default=0.1)
     parser.add_argument("--calib-batches", type=int, default=1)
@@ -169,6 +170,7 @@ def training_pipeline() -> None:
 
     param_groups = trainer.get_param_groups(args.lr, args.wd)
     optimizer = torch.optim.SGD(param_groups, momentum=args.momentum)
+    clip_params = [p for group in param_groups for p in group["params"]]
 
     lr_scheduler = torch.optim.lr_scheduler.MultiStepLR(
         optimizer, args.milestones, args.sched_gamma
@@ -239,6 +241,9 @@ def training_pipeline() -> None:
                         global_step,
                     )
                     torch.cuda.reset_peak_memory_stats()
+
+            if args.clip > 0:
+                torch.nn.utils.clip_grad_norm_(clip_params, args.clip)
 
             optimizer.step()
             trainer.floor_quant(1e-8, 1e-8)

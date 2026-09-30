@@ -17,6 +17,7 @@ class CdlQuant(nn.Module, abc.ABC):
         self,
         a: torch.Tensor,
         q: float,
+        alpha: float,
         numel: int,
         relaxed: bool,
         topk: int,
@@ -27,7 +28,7 @@ class CdlQuant(nn.Module, abc.ABC):
         self.topk = min(topk, a.numel())
         self.register_buffer("a", a)
         self.q = nn.Parameter(torch.full((), q))
-        self.alpha = nn.Parameter(torch.full((), 500.0))
+        self.alpha = nn.Parameter(torch.full((), alpha))
         self.entropy_sum = 0.0
         self.forward_count = 0
 
@@ -73,7 +74,7 @@ class CdlQuantForWeight(CdlQuant):
         a = torch.arange(start, start + 2**bits, dtype=torch.float32)
         q = 2 * weight.detach().abs().mean().item() / 2 ** ((bits - 1) / 2)
         numel = weight.numel()
-        super().__init__(a, q, numel, relaxed, a.numel())
+        super().__init__(a, q, 500.0, numel, relaxed, a.numel())
 
     def scale_q_lr(self, eta: float) -> float:
         return eta / (self.numel * 2 ** (self.bits - 1)) ** 0.5
@@ -83,7 +84,7 @@ class CdlQuantForActivation(CdlQuant):
     def __init__(self, bits: int, relaxed: bool, topk: int):
         start = 0
         a = torch.arange(start, start + 2**bits, dtype=torch.float32)
-        super().__init__(a, torch.nan, 0, relaxed, topk)
+        super().__init__(a, torch.nan, 50.0, 0, relaxed, topk)
         self.bypassing = False
         self.initialized = False
 
