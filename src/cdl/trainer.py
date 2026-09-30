@@ -106,7 +106,7 @@ class Trainer:
                 raise RuntimeError("some quantizers were never reached by samples")
             m.init_q_and_numel(total / n, dim)
 
-    def compute_one_batch_loss(self, x: torch.Tensor, y: torch.Tensor) -> BatchOutput:
+    def forward_one_batch(self, x: torch.Tensor, y: torch.Tensor) -> BatchOutput:
         x, y = x.to(self.device), y.to(self.device)
         out: torch.Tensor = self.resnet(x)
 

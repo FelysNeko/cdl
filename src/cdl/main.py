@@ -123,9 +123,17 @@ def save_config(output_dir: Path, args: argparse.Namespace) -> None:
 
 
 def current_lr(optimizer: torch.optim.Optimizer) -> float:
-    # q/alpha groups use scaled learning rates, so the maximum tracks the
-    # base learning rate of the regular network parameters.
     return max(group["lr"] for group in optimizer.param_groups)
+
+
+def total_grad_norm(optimizer: torch.optim.Optimizer) -> float:
+    grads = [
+        p.grad
+        for group in optimizer.param_groups
+        for p in group["params"]
+        if p.grad is not None
+    ]
+    return torch.nn.utils.get_total_norm(grads).item()
 
 
 def training_pipeline() -> None:
@@ -138,7 +146,11 @@ def training_pipeline() -> None:
     logger.info(f"seeded with {args.seed}")
 
     device = sanitize_device(args.device)
-    logger.info(f"using {device} for device")
+    logger.info(f"using {device} for training device")
+
+    if device.type == "cuda":
+        logger.info("setting float32 matmul precision to high on cuda device")
+        torch.set_float32_matmul_precision("high")
 
     cifar_resnet = get_cifar_resnet(
         args.layers, 100, args.relaxed, args.bits, args.bits_edge, args.topk_act
@@ -173,14 +185,12 @@ def training_pipeline() -> None:
     for epoch in range(args.epochs):
         trainer.resnet.train()
 
-        for x, y in tqdm.tqdm(train_loader):
-            batch_output = trainer.compute_one_batch_loss(x, y)
+        for x, y in tqdm.tqdm(train_loader, desc=f"epoch {epoch}"):
+            batch_output = trainer.forward_one_batch(x, y)
             loss = batch_output.compute_joint_loss(args.lam, args.gam)
 
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
-            optimizer.step()
-            trainer.floor_quant(1e-8, 1e-8)
 
             if args.log_every_steps > 0 and global_step % args.log_every_steps == 0:
                 ce_loss = batch_output.ce_loss.item()
@@ -208,13 +218,37 @@ def training_pipeline() -> None:
                     global_step,
                 )
                 writer.add_scalar("train/lr", current_lr(optimizer), global_step)
+                writer.add_scalar(
+                    "train/grad_norm", total_grad_norm(optimizer), global_step
+                )
 
+                if device.type == "cuda":
+                    writer.add_scalar(
+                        "train/mem_allocated_gb",
+                        torch.cuda.memory_allocated() / 2**30,
+                        global_step,
+                    )
+                    writer.add_scalar(
+                        "train/mem_reserved_gb",
+                        torch.cuda.memory_reserved() / 2**30,
+                        global_step,
+                    )
+                    writer.add_scalar(
+                        "train/mem_peak_gb",
+                        torch.cuda.max_memory_allocated() / 2**30,
+                        global_step,
+                    )
+                    torch.cuda.reset_peak_memory_stats()
+
+            optimizer.step()
+            trainer.floor_quant(1e-8, 1e-8)
             global_step += 1
 
         lr_scheduler.step()
 
         if epoch % args.eval_every_epochs == 0 or epoch == args.epochs - 1:
             acc = trainer.evaluate(test_loader)
+            logger.info(f"epoch {epoch} evaluation accuracy is {acc}")
             writer.add_scalar("eval/acc", acc, epoch)
             writer.flush()
 
