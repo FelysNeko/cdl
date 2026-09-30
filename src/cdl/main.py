@@ -73,7 +73,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--log-every-steps",
         type=int,
-        default=50,
+        default=20,
     )
     parser.add_argument("--workers", type=int, default=2)
     parser.add_argument("--seed", type=int, default=0)
@@ -99,7 +99,7 @@ def get_output_dir(output_dir: Path, run_name: str | None) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     if run_name is None:
-        timestamp = time.strftime("%Y%m%d-%H%M%S")
+        timestamp = time.strftime("%Y-%m-%dT%H-%M-%S")
         run_name = f"{timestamp}-{uuid.uuid4().hex[:6]}"
 
     output_dir = output_dir / run_name
@@ -114,13 +114,12 @@ def seed_all(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
-def save_config(output_dir: Path, args: argparse.Namespace) -> Path:
+def save_config(output_dir: Path, args: argparse.Namespace) -> None:
     config = vars(args).copy()
     config["argv"] = sys.argv
     config_path = output_dir / "config.json"
     with open(config_path, "w", encoding="utf-8") as f:
         json.dump(config, f, indent=2, default=str)
-    return config_path
 
 
 def current_lr(optimizer: torch.optim.Optimizer) -> float:
@@ -132,16 +131,14 @@ def current_lr(optimizer: torch.optim.Optimizer) -> float:
 def training_pipeline() -> None:
     args = parse_args()
     output_dir = get_output_dir(args.output_dir, args.run_name)
+    save_config(output_dir, args)
     logger.info(f"output directory at {output_dir}")
 
-    config_path = save_config(output_dir, args)
-    logger.info(f"config saved to {config_path}")
-
     seed_all(args.seed)
-    logger.info(f"seed with {args.seed}")
+    logger.info(f"seeded with {args.seed}")
 
     device = sanitize_device(args.device)
-    logger.info(f"training on {device}")
+    logger.info(f"using {device} for device")
 
     cifar_resnet = get_cifar_resnet(
         args.layers, 100, args.relaxed, args.bits, args.bits_edge, args.topk_act
@@ -152,11 +149,11 @@ def training_pipeline() -> None:
     train_loader, test_loader = get_loaders(args.batch_size, args.workers)
     calibration_batches = (x for x, _ in islice(train_loader, args.calib_batches))
     trainer.init_act_q_pass(calibration_batches)
-    logger.info("quantization steps calibrated")
+    logger.info("activation quantizers calibrated")
 
     n_weight, n_activation = trainer.get_quant_counts()
-    logger.info(f"weight quantization counts: {n_weight}")
-    logger.info(f"activation quantization counts: {n_activation}")
+    logger.info(f"quantized {n_weight} weight elements")
+    logger.info(f"quantized {n_activation} activation elements per sample")
 
     param_groups = trainer.get_param_groups(args.lr, args.wd)
     optimizer = torch.optim.SGD(param_groups, momentum=args.momentum)
@@ -176,43 +173,38 @@ def training_pipeline() -> None:
     for epoch in range(args.epochs):
         trainer.resnet.train()
 
-        ce_sum = 0.0
-        hw_sum = 0.0
-        hx_sum = 0.0
-        loss_sum = 0.0
-
         for x, y in tqdm.tqdm(train_loader):
-            ce, hw, hx = trainer.compute_one_batch_loss(x, y)
-            loss = ce + args.gam * hx + args.lam * hw
-
-            ce_value = ce.item()
-            hw_value = hw.item()
-            hx_value = hx.item()
-            loss_value = loss.item()
+            batch_output = trainer.compute_one_batch_loss(x, y)
+            loss = batch_output.compute_joint_loss(args.lam, args.gam)
 
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
             optimizer.step()
             trainer.floor_quant(1e-8, 1e-8)
 
-            ce_sum += ce_value
-            hw_sum += hw_value
-            hx_sum += hx_value
-            loss_sum += loss_value
-
             if args.log_every_steps > 0 and global_step % args.log_every_steps == 0:
-                writer.add_scalar("train/ce", ce_value, global_step)
-                writer.add_scalar("train/loss", loss_value, global_step)
-                writer.add_scalar("train/Hw_total", hw_value, global_step)
-                writer.add_scalar("train/Hx_total", hx_value, global_step)
+                ce_loss = batch_output.ce_loss.item()
+                weight_entropy = batch_output.weight_entropy.item()
+                activation_entropy = batch_output.activation_entropy.item()
+
+                writer.add_scalar("train/loss", loss.item(), global_step)
+                writer.add_scalar("train/epoch", epoch, global_step)
+                writer.add_scalar("train/ce_loss", ce_loss, global_step)
+                writer.add_scalar(
+                    "train/error_rate", batch_output.error_rate, global_step
+                )
+                writer.add_scalar("train/weight_entropy", weight_entropy, global_step)
+                writer.add_scalar(
+                    "train/activation_entropy", activation_entropy, global_step
+                )
                 writer.add_scalar(
                     "train/avg_weight_bits",
-                    hw_value / n_weight if n_weight else 0.0,
+                    weight_entropy / n_weight if n_weight else 0.0,
                     global_step,
                 )
                 writer.add_scalar(
                     "train/avg_activation_bits",
-                    hx_value / n_activation if n_activation else 0.0,
+                    activation_entropy / n_activation if n_activation else 0.0,
                     global_step,
                 )
                 writer.add_scalar("train/lr", current_lr(optimizer), global_step)
@@ -221,29 +213,9 @@ def training_pipeline() -> None:
 
         lr_scheduler.step()
 
-        batches = len(train_loader)
-        epoch_loss = loss_sum / batches
-        epoch_ce = ce_sum / batches
-        epoch_hw = hw_sum / batches
-        epoch_hx = hx_sum / batches
-        epoch_avg_weight_bits = epoch_hw / n_weight if n_weight else 0.0
-        epoch_avg_activation_bits = epoch_hx / n_activation if n_activation else 0.0
-        epoch_lr = current_lr(optimizer)
-
-        writer.add_scalar("epoch/train_loss", epoch_loss, epoch)
-        writer.add_scalar("epoch/train_ce", epoch_ce, epoch)
-        writer.add_scalar("epoch/train_Hw_total", epoch_hw, epoch)
-        writer.add_scalar("epoch/train_Hx_total", epoch_hx, epoch)
-        writer.add_scalar("epoch/train_avg_weight_bits", epoch_avg_weight_bits, epoch)
-        writer.add_scalar(
-            "epoch/train_avg_activation_bits", epoch_avg_activation_bits, epoch
-        )
-        writer.add_scalar("epoch/lr", epoch_lr, epoch)
-
         if epoch % args.eval_every_epochs == 0 or epoch == args.epochs - 1:
             acc = trainer.evaluate(test_loader)
-
-            writer.add_scalar("epoch/val_acc", acc, epoch)
+            writer.add_scalar("eval/acc", acc, epoch)
             writer.flush()
 
     writer.close()

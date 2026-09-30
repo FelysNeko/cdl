@@ -1,5 +1,6 @@
 from collections.abc import Iterable
 from contextlib import contextmanager
+from dataclasses import dataclass
 from typing import Any
 
 import torch
@@ -8,6 +9,17 @@ from torch.utils.data import DataLoader
 
 from cdl.model.model import CdlQuant, CdlQuantForActivation, CdlQuantForWeight
 from cdl.model.resnet import QResNet
+
+
+@dataclass(frozen=True, eq=False)
+class BatchOutput:
+    ce_loss: torch.Tensor
+    weight_entropy: torch.Tensor
+    activation_entropy: torch.Tensor
+    error_rate: float
+
+    def compute_joint_loss(self, lam: float, gam: float) -> torch.Tensor:
+        return self.ce_loss + lam * self.weight_entropy + gam * self.activation_entropy
 
 
 class Trainer:
@@ -94,11 +106,9 @@ class Trainer:
                 raise RuntimeError("some quantizers were never reached by samples")
             m.init_q_and_numel(total / n, dim)
 
-    def compute_one_batch_loss(
-        self, x: torch.Tensor, y: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def compute_one_batch_loss(self, x: torch.Tensor, y: torch.Tensor) -> BatchOutput:
         x, y = x.to(self.device), y.to(self.device)
-        out = self.resnet(x)
+        out: torch.Tensor = self.resnet(x)
 
         cross_entropy_loss = self.criterion(out, y)
         weight_entropy_loss = 0.0
@@ -113,7 +123,15 @@ class Trainer:
                 e = m.compute_entropy_and_reset()
                 activation_entropy_loss = activation_entropy_loss + e
 
-        return cross_entropy_loss, weight_entropy_loss, activation_entropy_loss
+        is_error = out.argmax(dim=-1) != y
+        error_rate = is_error.float().mean().item()
+
+        return BatchOutput(
+            ce_loss=cross_entropy_loss,
+            weight_entropy=weight_entropy_loss,
+            activation_entropy=activation_entropy_loss,
+            error_rate=error_rate,
+        )
 
     def get_param_groups(self, learning_rate: float, weight_decay: float) -> list[dict]:
         parameters = []
