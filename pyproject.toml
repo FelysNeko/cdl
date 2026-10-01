@@ -64,4 +64,8 @@ requires = ["uv_build>=0.12.5,<0.13.0"]
 build-backend = "uv_build"
 
 [dependency-groups]
-dev = ["ipykernel", "ruff>=0.16.9"]
+dev = [
+    "ipykernel",
+    "pypdf>=6.19.0",
+    "ruff>=0.16.9",
+]
