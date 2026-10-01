@@ -226,17 +226,17 @@ def training_pipeline() -> None:
 
                 if device.type == "cuda":
                     writer.add_scalar(
-                        "train/mem_allocated_gb",
+                        "cuda/mem_allocated_gb",
                         torch.cuda.memory_allocated() / 2**30,
                         global_step,
                     )
                     writer.add_scalar(
-                        "train/mem_reserved_gb",
+                        "cuda/mem_reserved_gb",
                         torch.cuda.memory_reserved() / 2**30,
                         global_step,
                     )
                     writer.add_scalar(
-                        "train/mem_peak_gb",
+                        "cuda/mem_peak_gb",
                         torch.cuda.max_memory_allocated() / 2**30,
                         global_step,
                     )
