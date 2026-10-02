@@ -1,5 +1,4 @@
 import torch
-from torch.distributions import Categorical
 
 
 def cdl_topk_cpmf(
@@ -21,11 +20,16 @@ def cdl_topk_cpmf(
     return topk_pmf, topk_a_hat, topk_indices
 
 
+@torch.no_grad()
 def cdl_topk_q_p(
     topk_pmf: torch.Tensor,
     topk_a_hat: torch.Tensor,
 ) -> torch.Tensor:
-    sub_indices = Categorical(probs=topk_pmf).sample().unsqueeze(-1)
+    topk = topk_pmf.shape[-1]
+    cdf = topk_pmf.cumsum(-1)
+    quantile = torch.rand(topk_pmf.shape[:-1], dtype=cdf.dtype, device=cdf.device)
+    sub_indices = torch.searchsorted(cdf, quantile.unsqueeze(-1), right=True)
+    sub_indices.clamp_(max=topk - 1)
     return topk_a_hat.gather(dim=-1, index=sub_indices).squeeze(-1)
 
 
@@ -75,8 +79,7 @@ def cdl_topk_train_forward(
     if relaxed:
         return q_d, entropy
 
-    with torch.no_grad():
-        q_p = cdl_topk_q_p(topk_pmf, topk_a_hat)
+    q_p = cdl_topk_q_p(topk_pmf, topk_a_hat)
 
     return q_d + (q_p - q_d).detach(), entropy
 

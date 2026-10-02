@@ -111,8 +111,8 @@ class Trainer:
         out: torch.Tensor = self.resnet(x)
 
         cross_entropy_loss = self.criterion(out, y)
-        weight_entropy_loss = 0.0
-        activation_entropy_loss = 0.0
+        weight_entropy_loss = torch.zeros(())
+        activation_entropy_loss = torch.zeros(())
 
         for m in self.resnet.modules():
             if isinstance(m, CdlQuantForWeight):

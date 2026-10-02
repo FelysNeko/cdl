@@ -74,7 +74,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--log-every-steps",
         type=int,
-        default=20,
+        default=50,
     )
     parser.add_argument("--workers", type=int, default=2)
     parser.add_argument("--seed", type=int, default=0)
@@ -157,7 +157,6 @@ def training_pipeline() -> None:
         args.layers, 100, args.relaxed, args.bits, args.bits_edge, args.topk_act
     )
     trainer = Trainer(cifar_resnet, device)
-    logger.info("trainer initialized")
 
     train_loader, test_loader = get_loaders(args.batch_size, args.workers)
     calibration_batches = (x for x, _ in islice(train_loader, args.calib_batches))
@@ -177,7 +176,7 @@ def training_pipeline() -> None:
     )
 
     if args.compile:
-        logger.info("torch compile enabled")
+        logger.info("torch.compile enabled")
         trainer.compile()
 
     writer = SummaryWriter(log_dir=str(output_dir / "tensorboard"))
@@ -187,6 +186,7 @@ def training_pipeline() -> None:
     for epoch in range(args.epochs):
         trainer.resnet.train()
 
+        start = time.perf_counter()
         for x, y in tqdm.tqdm(train_loader, desc=f"epoch {epoch}"):
             batch_output = trainer.forward_one_batch(x, y)
             loss = batch_output.compute_joint_loss(args.lam, args.gam)
@@ -249,11 +249,14 @@ def training_pipeline() -> None:
             trainer.floor_quant(1e-8, 1e-8)
             global_step += 1
 
+        duration = time.perf_counter() - start
+        logger.info(f"epoch {epoch} completed in {duration:.1f}s")
         lr_scheduler.step()
 
         if epoch % args.eval_every_epochs == 0 or epoch == args.epochs - 1:
             acc = trainer.evaluate(test_loader)
-            logger.info(f"epoch {epoch} evaluation accuracy is {acc}")
+            acc_percent = acc * 100
+            logger.info(f"epoch {epoch} evaluation accuracy is {acc_percent:.1f}%")
             writer.add_scalar("eval/acc", acc, epoch)
             writer.flush()
 
