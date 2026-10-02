@@ -4,11 +4,9 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from cdl.formulae import (
-    cpmf,
-    mpmf_entropy,
-    q_d,
-    quant_from_cpmf,
+from cdl.core import (
+    cdl_topk_infer_sample,
+    cdl_topk_train_forward,
 )
 
 
@@ -43,16 +41,21 @@ class CdlQuant(nn.Module, abc.ABC):
         return eta / self.numel**0.5
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
-        pmf, vals, idx = cpmf(input, self.alpha, self.q, self.a, self.topk)
+        if not self.training:
+            return cdl_topk_infer_sample(self.topk, input, self.a, self.q, self.alpha)
 
-        if self.training:
-            entropy = mpmf_entropy(pmf, idx, self.a.numel(), self.numel)
-            self.entropy_sum = self.entropy_sum + entropy
-            self.forward_count += 1
-
-        if self.relaxed:
-            return q_d(pmf, vals)
-        return quant_from_cpmf(pmf, vals, self.topk)
+        quantized, entropy = cdl_topk_train_forward(
+            self.relaxed,
+            self.numel,
+            self.topk,
+            input,
+            self.a,
+            self.q,
+            self.alpha,
+        )
+        self.entropy_sum = self.entropy_sum + entropy
+        self.forward_count += 1
+        return quantized
 
     def compute_entropy_and_reset(self) -> torch.Tensor:
         """
