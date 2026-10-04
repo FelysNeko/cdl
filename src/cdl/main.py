@@ -14,7 +14,7 @@ from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from torchvision import datasets, transforms
 
-from cdl.model.resnet import get_cifar_resnet
+from cdl.model.resnet import QResNet
 from cdl.trainer import Trainer
 
 MEAN = (0.5071, 0.4865, 0.4409)
@@ -48,9 +48,36 @@ def get_loaders(batch_size: int, workers: int) -> tuple[DataLoader, DataLoader]:
     return train_loader, test_loader
 
 
+def get_q_resnet(
+    num_layers: int,
+    num_classes: int,
+    relaxed: bool,
+    bits: int,
+    bits_edge: int,
+    topk_act: int,
+) -> tuple[QResNet, list[int], int]:
+    n = (num_layers - 2) // 6
+    num_blocks = [n, n, n]
+    q_resnet = QResNet(
+        num_blocks,
+        num_classes,
+        relaxed,
+        bits,
+        bits_edge,
+        topk_act,
+    )
+    num_params = sum(p.numel() for p in q_resnet.parameters())
+    return q_resnet, num_blocks, num_params
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--layers", type=int, default=20)
+    parser.add_argument(
+        "--layers",
+        type=int,
+        default=20,
+        choices=[20, 44, 56, 110],
+    )
     parser.add_argument("--relaxed", action="store_true")
     parser.add_argument("--bits", type=int, default=6)
     parser.add_argument("--bits-edge", type=int, default=8)
@@ -153,10 +180,18 @@ def training_pipeline() -> None:
         logger.info("setting float32 matmul precision to high on cuda device")
         torch.set_float32_matmul_precision("high")
 
-    cifar_resnet = get_cifar_resnet(
-        args.layers, 100, args.relaxed, args.bits, args.bits_edge, args.topk_act
+    cifar_resnet, num_blocks, num_params = get_q_resnet(
+        args.layers,
+        100,
+        args.relaxed,
+        args.bits,
+        args.bits_edge,
+        args.topk_act,
     )
     trainer = Trainer(cifar_resnet, device)
+    logger.info(
+        f"built ResNet-{args.layers} with blocks {num_blocks} and {num_params} parameters"
+    )
 
     train_loader, test_loader = get_loaders(args.batch_size, args.workers)
     calibration_batches = (x for x, _ in islice(train_loader, args.calib_batches))
@@ -182,7 +217,7 @@ def training_pipeline() -> None:
     writer = SummaryWriter(log_dir=str(output_dir / "tensorboard"))
 
     global_step = 0
-
+    logger.info("training started")
     for epoch in range(args.epochs):
         trainer.resnet.train()
 

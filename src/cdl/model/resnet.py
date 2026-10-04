@@ -110,15 +110,3 @@ class QResNet(nn.Module):
         x = self.relu(self.bn(self.stem(x)))
         x = self.layer3(self.layer2(self.layer1(x)))
         return self.fc(self.avgpool(self.q_out(x)).flatten(1))
-
-
-def get_cifar_resnet(
-    num_layers: int,
-    num_classes: int = 100,
-    relaxed: bool = False,
-    bits: int = 6,
-    bits_edge: int = 8,
-    topk_act: int = 5,
-) -> QResNet:
-    n = (num_layers - 2) // 6
-    return QResNet([n, n, n], num_classes, relaxed, bits, bits_edge, topk_act)
