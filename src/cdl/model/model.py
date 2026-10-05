@@ -8,12 +8,14 @@ from cdl.core import (
     cdl_topk_infer_sample,
     cdl_topk_train_forward,
 )
+from cdl.format.format import Format
+from cdl.format.intx import IntX
 
 
 class CdlQuant(nn.Module, abc.ABC):
     def __init__(
         self,
-        a: torch.Tensor,
+        fmt: Format,
         q: float,
         alpha: float,
         numel: int,
@@ -23,8 +25,8 @@ class CdlQuant(nn.Module, abc.ABC):
         super().__init__()
         self.numel = numel
         self.relaxed = relaxed
-        self.topk = min(topk, a.numel())
-        self.register_buffer("a", a)
+        self.topk = min(topk, fmt.n)
+        self.fmt = fmt
         self.q = nn.Parameter(torch.full((), q))
         self.alpha = nn.Parameter(torch.full((), alpha))
         self.entropy_sum = 0.0
@@ -32,7 +34,7 @@ class CdlQuant(nn.Module, abc.ABC):
 
     @property
     def bits(self) -> int:
-        return self.a.numel().bit_length() - 1
+        return self.fmt.bits
 
     @abc.abstractmethod
     def scale_q_lr(self, eta: float) -> float: ...
@@ -42,14 +44,14 @@ class CdlQuant(nn.Module, abc.ABC):
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         if not self.training:
-            return cdl_topk_infer_sample(self.topk, input, self.a, self.q, self.alpha)
+            return cdl_topk_infer_sample(self.fmt, self.topk, input, self.q, self.alpha)
 
         quantized, entropy = cdl_topk_train_forward(
+            self.fmt,
             self.relaxed,
             self.numel,
             self.topk,
             input,
-            self.a,
             self.q,
             self.alpha,
         )
@@ -73,11 +75,10 @@ class CdlQuant(nn.Module, abc.ABC):
 
 class CdlQuantForWeight(CdlQuant):
     def __init__(self, bits: int, weight: torch.Tensor, relaxed: bool):
-        start = -(2 ** (bits - 1))
-        a = torch.arange(start, start + 2**bits, dtype=torch.float32)
+        fmt = IntX(True, bits)
         q = 2 * weight.detach().abs().mean().item() / 2 ** ((bits - 1) / 2)
         numel = weight.numel()
-        super().__init__(a, q, 500.0, numel, relaxed, a.numel())
+        super().__init__(fmt, q, 500.0, numel, relaxed, fmt.n)
 
     def scale_q_lr(self, eta: float) -> float:
         return eta / (self.numel * 2 ** (self.bits - 1)) ** 0.5
@@ -85,9 +86,8 @@ class CdlQuantForWeight(CdlQuant):
 
 class CdlQuantForActivation(CdlQuant):
     def __init__(self, bits: int, relaxed: bool, topk: int):
-        start = 0
-        a = torch.arange(start, start + 2**bits, dtype=torch.float32)
-        super().__init__(a, torch.nan, 50.0, 0, relaxed, topk)
+        fmt = IntX(False, bits)
+        super().__init__(fmt, torch.nan, 50.0, 0, relaxed, topk)
         self.bypassing = False
         self.initialized = False
 

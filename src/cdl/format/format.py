@@ -17,3 +17,17 @@ class Format(nn.Module, ABC):
 
     @abstractmethod
     def ordinal(self, v: torch.Tensor) -> torch.Tensor: ...
+
+    def window(
+        self, v: torch.Tensor, topk: int
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        key = self.ordinal(v)
+        with torch.no_grad():
+            start = (key - topk // 2).clamp_(0, self.n - topk)
+        topk_pos = start.unsqueeze(-1) + torch.arange(topk, device=v.device)
+        topk_level = self.level[topk_pos]
+
+        key_level = self.level[key]
+        gap = torch.where(v >= key_level, self.gap[key], self.gap[(key - 1).clamp(min=0)])
+        cont_pos = key.float() + (v - key_level) / gap
+        return cont_pos, topk_level, topk_pos

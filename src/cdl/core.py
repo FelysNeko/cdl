@@ -1,55 +1,56 @@
 import torch
 
+from cdl.format.format import Format
+
 
 def cdl_topk_cpmf(
+    fmt: Format,
+    topk: int,
     theta: torch.Tensor,
-    a: torch.Tensor,
     q: torch.Tensor,
     alpha: torch.Tensor,
-    topk: int,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    a_numel = a.numel()
-    with torch.no_grad():
-        center = (theta / q - a[0]).round_().clamp_(0, a_numel - 1)
-        start = (center - topk // 2).clamp_(0, a_numel - topk)
-    topk_indices = start.long().unsqueeze(-1) + torch.arange(topk, device=theta.device)
-
-    topk_a_hat = q * a[topk_indices]
-    logits = -alpha * (theta.unsqueeze(-1) - topk_a_hat) ** 2
+    v = theta / q
+    cont_pos, topk_level, topk_pos = fmt.window(v, topk)
+    logits = -alpha * q**2 * (cont_pos.unsqueeze(-1) - topk_pos.float()) ** 2
     topk_pmf = torch.softmax(logits, dim=-1)
-    return topk_pmf, topk_a_hat, topk_indices
+    return topk_pmf, topk_level, topk_pos
 
 
 @torch.no_grad()
 def cdl_topk_q_p(
     topk_pmf: torch.Tensor,
-    topk_a_hat: torch.Tensor,
+    topk_level: torch.Tensor,
+    q: torch.Tensor,
 ) -> torch.Tensor:
     topk = topk_pmf.shape[-1]
     cdf = topk_pmf.cumsum(-1)
     quantile = torch.rand(topk_pmf.shape[:-1], dtype=cdf.dtype, device=cdf.device)
     sub_indices = torch.searchsorted(cdf, quantile.unsqueeze(-1), right=True)
     sub_indices.clamp_(max=topk - 1)
-    return topk_a_hat.gather(dim=-1, index=sub_indices).squeeze(-1)
+    q_p = topk_level.gather(dim=-1, index=sub_indices).squeeze(-1)
+    return q_p * q
 
 
 def cdl_topk_q_d(
     topk_pmf: torch.Tensor,
-    topk_a_hat: torch.Tensor,
+    topk_level: torch.Tensor,
+    q: torch.Tensor,
 ) -> torch.Tensor:
-    return (topk_pmf * topk_a_hat).sum(-1)
+    q_d = (topk_pmf * topk_level).sum(-1)
+    return q_d * q
 
 
 def cdl_topk_mpmf_entropy(
     topk_pmf: torch.Tensor,
-    topk_indices: torch.Tensor,
+    topk_pos: torch.Tensor,
     num_slots: int,
     num_quantized_params: int,
 ) -> torch.Tensor:
     topk = topk_pmf.shape[-1]
     groups = topk_pmf.numel() // (num_quantized_params * topk)
     pmf = topk_pmf.reshape(groups, num_quantized_params, topk)
-    idx = topk_indices.reshape(groups, num_quantized_params, topk)
+    idx = topk_pos.reshape(groups, num_quantized_params, topk)
 
     mpmf = pmf.new_zeros(groups, num_slots)
     mpmf.scatter_add_(1, idx.reshape(groups, -1), pmf.reshape(groups, -1))
@@ -62,35 +63,33 @@ def cdl_topk_mpmf_entropy(
 
 
 def cdl_topk_train_forward(
+    fmt: Format,
     relaxed: bool,
     num_quantized_params: int,
     topk: int,
     theta: torch.Tensor,
-    a: torch.Tensor,
     q: torch.Tensor,
     alpha: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    topk_pmf, topk_a_hat, topk_indices = cdl_topk_cpmf(theta, a, q, alpha, topk)
-    entropy = cdl_topk_mpmf_entropy(
-        topk_pmf, topk_indices, a.numel(), num_quantized_params
-    )
-    q_d = cdl_topk_q_d(topk_pmf, topk_a_hat)
+    topk_pmf, topk_level, topk_pos = cdl_topk_cpmf(fmt, topk, theta, q, alpha)
+    entropy = cdl_topk_mpmf_entropy(topk_pmf, topk_pos, fmt.n, num_quantized_params)
+    q_d = cdl_topk_q_d(topk_pmf, topk_level, q)
 
     if relaxed:
         return q_d, entropy
 
-    q_p = cdl_topk_q_p(topk_pmf, topk_a_hat)
+    q_p = cdl_topk_q_p(topk_pmf, topk_level, q)
 
     return q_d + (q_p - q_d).detach(), entropy
 
 
 @torch.no_grad()
 def cdl_topk_infer_sample(
+    fmt: Format,
     topk: int,
     theta: torch.Tensor,
-    a: torch.Tensor,
     q: torch.Tensor,
     alpha: torch.Tensor,
 ) -> torch.Tensor:
-    topk_pmf, topk_a_hat, _ = cdl_topk_cpmf(theta, a, q, alpha, topk)
-    return cdl_topk_q_p(topk_pmf, topk_a_hat)
+    topk_pmf, topk_level, _ = cdl_topk_cpmf(fmt, topk, theta, q, alpha)
+    return cdl_topk_q_p(topk_pmf, topk_level, q)
