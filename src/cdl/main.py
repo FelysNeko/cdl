@@ -55,6 +55,8 @@ def get_q_resnet(
     bits: int,
     bits_edge: int,
     topk_act: int,
+    kappa_max: float = 2.0,
+    kappa_init: float = 1.0,
 ) -> tuple[QResNet, list[int], int]:
     n = (num_layers - 2) // 6
     num_blocks = [n, n, n]
@@ -65,6 +67,8 @@ def get_q_resnet(
         bits,
         bits_edge,
         topk_act,
+        kappa_max,
+        kappa_init,
     )
     num_params = sum(p.numel() for p in q_resnet.parameters())
     return q_resnet, num_blocks, num_params
@@ -82,6 +86,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--bits", type=int, default=6)
     parser.add_argument("--bits-edge", type=int, default=8)
     parser.add_argument("--topk-act", type=int, default=5)
+    parser.add_argument("--kappa-max", type=float, default=2.0)
+    parser.add_argument("--kappa-init", type=float, default=1.0)
     parser.add_argument("--lam", type=float, default=0.0)
     parser.add_argument("--gam", type=float, default=0.0)
     parser.add_argument("--epochs", type=int, default=200)
@@ -187,6 +193,8 @@ def training_pipeline() -> None:
         args.bits,
         args.bits_edge,
         args.topk_act,
+        args.kappa_max,
+        args.kappa_init,
     )
     trainer = Trainer(cifar_resnet, device)
     logger.info(
@@ -258,6 +266,8 @@ def training_pipeline() -> None:
                 writer.add_scalar(
                     "train/grad_norm", total_grad_norm(optimizer), global_step
                 )
+                for key, value in trainer.kappa_stats().items():
+                    writer.add_scalar(f"train/{key}", value, global_step)
 
                 if device.type == "cuda":
                     writer.add_scalar(
@@ -281,7 +291,7 @@ def training_pipeline() -> None:
                 torch.nn.utils.clip_grad_norm_(clip_params, args.clip)
 
             optimizer.step()
-            trainer.floor_quant(1e-8, 1e-8)
+            trainer.floor_quant(1e-8)
             global_step += 1
 
         duration = time.perf_counter() - start

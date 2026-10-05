@@ -151,9 +151,9 @@ class Trainer:
             register_parameter(m.q, q_lr, 0.0)
             customized_param_set.add(m.q)
 
-            alpha_lr = m.scale_alpha_lr(learning_rate)
-            register_parameter(m.alpha, alpha_lr, 0.0)
-            customized_param_set.add(m.alpha)
+            kappa_lr = m.scale_kappa_lr(learning_rate)
+            register_parameter(m.rho, kappa_lr, 0.0)
+            customized_param_set.add(m.rho)
 
         decay = []
         no_decay = []
@@ -174,12 +174,30 @@ class Trainer:
         return parameters
 
     @torch.no_grad()
-    def floor_quant(self, min_q: float, min_alpha: float) -> None:
+    def floor_quant(self, min_q: float) -> None:
         for m in self.resnet.modules():
             if not isinstance(m, CdlQuant):
                 continue
             m.q.clamp_(min=min_q)
-            m.alpha.clamp_(min=min_alpha)
+            m.rho.clamp_(min=-10.0, max=10.0)
+
+    @torch.no_grad()
+    def kappa_stats(self) -> dict[str, float]:
+        out: dict[str, float] = {}
+        for tag, cls in (("w", CdlQuantForWeight), ("a", CdlQuantForActivation)):
+            vals = [
+                m.kappa.item()
+                for m in self.resnet.modules()
+                if isinstance(m, cls) and m.numel > 0
+            ]
+            if not vals:
+                continue
+            t = torch.tensor(vals)
+            out[f"kappa_{tag}_mean"] = t.mean().item()
+            out[f"kappa_{tag}_min"] = t.min().item()
+            out[f"kappa_{tag}_max"] = t.max().item()
+            out[f"jac_{tag}_max"] = max(1.0, t.max().item() / 2.0)
+        return out
 
     @torch.no_grad()
     def evaluate(self, loader: DataLoader) -> float:

@@ -8,11 +8,11 @@ def cdl_topk_cpmf(
     topk: int,
     theta: torch.Tensor,
     q: torch.Tensor,
-    alpha: torch.Tensor,
+    kappa: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     v = theta / q
     cont_pos, topk_level, topk_pos = fmt.window(v, topk)
-    logits = -alpha * q**2 * (cont_pos.unsqueeze(-1) - topk_pos.float()) ** 2
+    logits = -kappa * (cont_pos.unsqueeze(-1) - topk_pos.float()) ** 2
     topk_pmf = torch.softmax(logits, dim=-1)
     return topk_pmf, topk_level, topk_pos
 
@@ -62,16 +62,16 @@ def cdl_topk_mpmf_entropy(
     return num_quantized_params * entropies.mean()
 
 
-def cdl_topk_train_forward(
+def cdl_topk_forward(
     fmt: Format,
     relaxed: bool,
     num_quantized_params: int,
     topk: int,
     theta: torch.Tensor,
     q: torch.Tensor,
-    alpha: torch.Tensor,
+    kappa: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    topk_pmf, topk_level, topk_pos = cdl_topk_cpmf(fmt, topk, theta, q, alpha)
+    topk_pmf, topk_level, topk_pos = cdl_topk_cpmf(fmt, topk, theta, q, kappa)
     entropy = cdl_topk_mpmf_entropy(topk_pmf, topk_pos, fmt.n, num_quantized_params)
     q_d = cdl_topk_q_d(topk_pmf, topk_level, q)
 
@@ -84,12 +84,9 @@ def cdl_topk_train_forward(
 
 
 @torch.no_grad()
-def cdl_topk_infer_sample(
+def quant_nearest(
     fmt: Format,
-    topk: int,
     theta: torch.Tensor,
     q: torch.Tensor,
-    alpha: torch.Tensor,
 ) -> torch.Tensor:
-    topk_pmf, topk_level, _ = cdl_topk_cpmf(fmt, topk, theta, q, alpha)
-    return cdl_topk_q_p(topk_pmf, topk_level, q)
+    return fmt.level[fmt.ordinal(theta / q)] * q

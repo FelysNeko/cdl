@@ -28,6 +28,8 @@ class Format(nn.Module, ABC):
         topk_level = self.level[topk_pos]
 
         key_level = self.level[key]
-        gap = torch.where(v >= key_level, self.gap[key], self.gap[(key - 1).clamp(min=0)])
+        gap = torch.where(
+            v >= key_level, self.gap[key], self.gap[(key - 1).clamp(min=0)]
+        )
         cont_pos = key.float() + (v - key_level) / gap
         return cont_pos, topk_level, topk_pos
