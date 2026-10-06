@@ -152,8 +152,8 @@ class Trainer:
             customized_param_set.add(m.q)
 
             kappa_lr = m.scale_kappa_lr(learning_rate)
-            register_parameter(m.rho, kappa_lr, 0.0)
-            customized_param_set.add(m.rho)
+            register_parameter(m.log_kappa, kappa_lr, 0.0)
+            customized_param_set.add(m.log_kappa)
 
         decay = []
         no_decay = []
@@ -179,7 +179,7 @@ class Trainer:
             if not isinstance(m, CdlQuant):
                 continue
             m.q.clamp_(min=min_q)
-            m.rho.clamp_(min=-10.0, max=10.0)
+            m.log_kappa.clamp_(min=-20.0, max=20.0)
 
     @torch.no_grad()
     def kappa_stats(self) -> dict[str, float]:
@@ -196,7 +196,6 @@ class Trainer:
             out[f"kappa_{tag}_mean"] = t.mean().item()
             out[f"kappa_{tag}_min"] = t.min().item()
             out[f"kappa_{tag}_max"] = t.max().item()
-            out[f"jac_{tag}_max"] = max(1.0, t.max().item() / 2.0)
         return out
 
     @torch.no_grad()

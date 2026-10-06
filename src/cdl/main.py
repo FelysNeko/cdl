@@ -55,7 +55,6 @@ def get_q_resnet(
     bits: int,
     bits_edge: int,
     topk_act: int,
-    kappa_max: float = 2.0,
     kappa_init: float = 1.0,
 ) -> tuple[QResNet, list[int], int]:
     n = (num_layers - 2) // 6
@@ -67,7 +66,6 @@ def get_q_resnet(
         bits,
         bits_edge,
         topk_act,
-        kappa_max,
         kappa_init,
     )
     num_params = sum(p.numel() for p in q_resnet.parameters())
@@ -86,7 +84,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--bits", type=int, default=6)
     parser.add_argument("--bits-edge", type=int, default=8)
     parser.add_argument("--topk-act", type=int, default=5)
-    parser.add_argument("--kappa-max", type=float, default=2.0)
     parser.add_argument("--kappa-init", type=float, default=1.0)
     parser.add_argument("--lam", type=float, default=0.0)
     parser.add_argument("--gam", type=float, default=0.0)
@@ -193,7 +190,6 @@ def training_pipeline() -> None:
         args.bits,
         args.bits_edge,
         args.topk_act,
-        args.kappa_max,
         args.kappa_init,
     )
     trainer = Trainer(cifar_resnet, device)

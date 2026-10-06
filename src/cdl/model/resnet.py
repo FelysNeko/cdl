@@ -12,16 +12,11 @@ class QBasicBlock(nn.Module):
         relaxed: bool,
         bits: int,
         topk_act: int,
-        kappa_max: float,
         kappa_init: float,
     ):
         super().__init__()
-        self.q_in = CdlQuantForActivation(
-            bits, relaxed, topk_act, kappa_max, kappa_init
-        )
-        self.q_mid = CdlQuantForActivation(
-            bits, relaxed, topk_act, kappa_max, kappa_init
-        )
+        self.q_in = CdlQuantForActivation(bits, relaxed, topk_act, kappa_init)
+        self.q_mid = CdlQuantForActivation(bits, relaxed, topk_act, kappa_init)
         self.conv1 = QConv2d(
             in_planes,
             planes,
@@ -31,7 +26,6 @@ class QBasicBlock(nn.Module):
             bias=False,
             w_bits=bits,
             relaxed=relaxed,
-            kappa_max=kappa_max,
             kappa_init=kappa_init,
         )
         self.bn1 = nn.BatchNorm2d(planes)
@@ -43,7 +37,6 @@ class QBasicBlock(nn.Module):
             bias=False,
             w_bits=bits,
             relaxed=relaxed,
-            kappa_max=kappa_max,
             kappa_init=kappa_init,
         )
         self.bn2 = nn.BatchNorm2d(planes)
@@ -57,7 +50,6 @@ class QBasicBlock(nn.Module):
                     bias=False,
                     w_bits=bits,
                     relaxed=relaxed,
-                    kappa_max=kappa_max,
                     kappa_init=kappa_init,
                 ),
                 nn.BatchNorm2d(planes),
@@ -83,14 +75,12 @@ class QResNet(nn.Module):
         bits: int,
         bits_edge: int,
         topk_act: int,
-        kappa_max: float,
         kappa_init: float,
     ):
         super().__init__()
         self.relaxed = relaxed
         self.bits = bits
         self.topk_act = topk_act
-        self.kappa_max = kappa_max
         self.kappa_init = kappa_init
         self.relu = nn.ReLU(inplace=True)
         self.stem = QConv2d(
@@ -101,7 +91,6 @@ class QResNet(nn.Module):
             bias=False,
             w_bits=bits_edge,
             relaxed=relaxed,
-            kappa_max=kappa_max,
             kappa_init=kappa_init,
         )
         self.bn = nn.BatchNorm2d(16)
@@ -109,16 +98,13 @@ class QResNet(nn.Module):
         self.layer1 = self.make_layer(16, num_blocks[0], 1)
         self.layer2 = self.make_layer(32, num_blocks[1], 2)
         self.layer3 = self.make_layer(64, num_blocks[2], 2)
-        self.q_out = CdlQuantForActivation(
-            bits, relaxed, topk_act, kappa_max, kappa_init
-        )
+        self.q_out = CdlQuantForActivation(bits, relaxed, topk_act, kappa_init)
         self.avgpool = nn.AdaptiveAvgPool2d(1)
         self.fc = QLinear(
             64,
             num_classes,
             w_bits=bits_edge,
             relaxed=relaxed,
-            kappa_max=kappa_max,
             kappa_init=kappa_init,
         )
 
@@ -133,7 +119,6 @@ class QResNet(nn.Module):
                     self.relaxed,
                     self.bits,
                     self.topk_act,
-                    self.kappa_max,
                     self.kappa_init,
                 )
             )

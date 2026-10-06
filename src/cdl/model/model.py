@@ -10,11 +10,6 @@ from cdl.format.format import Format
 from cdl.format.intx import IntX
 
 
-def rho_from_kappa(kappa: float, kappa_max: float) -> float:
-    p = min(max(kappa / kappa_max, 1e-6), 1.0 - 1e-6)
-    return math.log(p / (1.0 - p))
-
-
 class CdlQuant(nn.Module, abc.ABC):
     def __init__(
         self,
@@ -23,7 +18,6 @@ class CdlQuant(nn.Module, abc.ABC):
         numel: int,
         relaxed: bool,
         topk: int,
-        kappa_max: float,
         kappa_init: float,
     ):
         super().__init__()
@@ -32,9 +26,7 @@ class CdlQuant(nn.Module, abc.ABC):
         self.topk = min(topk, fmt.n)
         self.fmt = fmt
         self.q = nn.Parameter(torch.full((), q))
-        self.kappa_max = float(kappa_max)
-        rho = rho_from_kappa(kappa_init, kappa_max)
-        self.rho = nn.Parameter(torch.full((), rho))
+        self.log_kappa = nn.Parameter(torch.full((), math.log(kappa_init)))
         self.entropy_sum = 0.0
         self.forward_count = 0
 
@@ -44,7 +36,7 @@ class CdlQuant(nn.Module, abc.ABC):
 
     @property
     def kappa(self) -> torch.Tensor:
-        return self.kappa_max * torch.sigmoid(self.rho)
+        return torch.exp(self.log_kappa)
 
     @abc.abstractmethod
     def scale_q_lr(self, eta: float) -> float: ...
@@ -84,13 +76,12 @@ class CdlQuantForWeight(CdlQuant):
         bits: int,
         weight: torch.Tensor,
         relaxed: bool,
-        kappa_max: float,
         kappa_init: float,
     ):
         fmt = IntX(True, bits)
         q = 2 * weight.detach().abs().mean().item() / 2 ** ((bits - 1) / 2)
         numel = weight.numel()
-        super().__init__(fmt, q, numel, relaxed, fmt.n, kappa_max, kappa_init)
+        super().__init__(fmt, q, numel, relaxed, fmt.n, kappa_init)
 
     def scale_q_lr(self, eta: float) -> float:
         return eta / (self.numel * 2 ** (self.bits - 1)) ** 0.5
@@ -102,11 +93,10 @@ class CdlQuantForActivation(CdlQuant):
         bits: int,
         relaxed: bool,
         topk: int,
-        kappa_max: float,
         kappa_init: float,
     ):
         fmt = IntX(False, bits)
-        super().__init__(fmt, torch.nan, 0, relaxed, topk, kappa_max, kappa_init)
+        super().__init__(fmt, torch.nan, 0, relaxed, topk, kappa_init)
         self.bypassing = False
         self.initialized = False
 
@@ -136,14 +126,11 @@ class QConv2d(nn.Conv2d):
         *args,
         w_bits: int,
         relaxed: bool,
-        kappa_max: float,
         kappa_init: float,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
-        self.weight_quant = CdlQuantForWeight(
-            w_bits, self.weight, relaxed, kappa_max, kappa_init
-        )
+        self.weight_quant = CdlQuantForWeight(w_bits, self.weight, relaxed, kappa_init)
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         return F.conv2d(
@@ -163,14 +150,11 @@ class QLinear(nn.Linear):
         *args,
         w_bits: int,
         relaxed: bool,
-        kappa_max: float,
         kappa_init: float,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
-        self.weight_quant = CdlQuantForWeight(
-            w_bits, self.weight, relaxed, kappa_max, kappa_init
-        )
+        self.weight_quant = CdlQuantForWeight(w_bits, self.weight, relaxed, kappa_init)
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         return F.linear(input, self.weight_quant(self.weight), self.bias)
