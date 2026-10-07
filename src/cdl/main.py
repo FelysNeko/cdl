@@ -1,9 +1,11 @@
 import argparse
 import json
 import logging
+import os
 import random
 import time
 import uuid
+from collections.abc import Iterable
 from itertools import islice
 from pathlib import Path
 
@@ -24,7 +26,11 @@ STD = (0.2673, 0.2564, 0.2762)
 logger = logging.getLogger(__name__)
 
 
-def get_loaders(batch_size: int, workers: int) -> tuple[DataLoader, DataLoader]:
+def get_loaders(
+    batch_size: int,
+    calibration_batches: int,
+    workers: int,
+) -> tuple[DataLoader, DataLoader, Iterable[torch.Tensor]]:
     train_tf = transforms.Compose(
         [
             transforms.RandomCrop(32, padding=4),
@@ -46,13 +52,14 @@ def get_loaders(batch_size: int, workers: int) -> tuple[DataLoader, DataLoader]:
         train_set, batch_size, shuffle=True, num_workers=workers, drop_last=True
     )
     test_loader = DataLoader(test_set, batch_size, shuffle=False, num_workers=workers)
-    return train_loader, test_loader
+    calibration_batches = (x for x, _ in islice(train_loader, calibration_batches))
+    return train_loader, test_loader, calibration_batches
 
 
 def get_q_resnet(
     cfg: ModelConfig,
     num_classes: int,
-) -> tuple[QResNet, list[int], int]:
+) -> QResNet:
     n = (cfg.layers - 2) // 6
     num_blocks = [n, n, n]
     q_resnet = QResNet(
@@ -65,30 +72,53 @@ def get_q_resnet(
         cfg.kappa,
     )
     num_params = sum(p.numel() for p in q_resnet.parameters())
-    return q_resnet, num_blocks, num_params
+    logger.info(
+        f"built ResNet-{cfg.layers} with blocks {num_blocks} and {num_params} parameters"
+    )
+    return q_resnet
 
 
 def sanitize_device(device: str) -> torch.device:
-    return torch.device(
+    device = torch.device(
         "cuda"
         if device == "auto" and torch.cuda.is_available()
         else "cpu"
         if device == "auto"
         else device
     )
+    logger.info(f"using {device} for training device")
+
+    if device.type == "cuda":
+        logger.info("setting float32 matmul precision to high on cuda device")
+        torch.set_float32_matmul_precision("high")
+
+    return device
 
 
-def get_output_dir(output_dir: Path, run_name: str | None) -> Path:
-    output_dir = output_dir.expanduser()
-    output_dir.mkdir(parents=True, exist_ok=True)
+def resolve_settings(
+    args: argparse.Namespace,
+) -> tuple[Path, Config]:
+    if args.resume:
+        resume_dir: Path = args.resume.expanduser()
+        yaml_path = resume_dir / "config.yaml"
+        logger.info(f"using {yaml_path} as config file")
 
-    if run_name is None:
-        timestamp = time.strftime("%Y-%m-%dT%H-%M-%S")
-        run_name = f"{timestamp}-{uuid.uuid4().hex[:6]}"
+        return resume_dir, load_config(yaml_path)
+    else:
+        output_dir = args.output_dir or Path("output")
+        output_dir = output_dir.expanduser()
+        if args.run_name is None:
+            timestamp = time.strftime("%Y-%m-%dT%H-%M-%S")
+            args.run_name = f"{timestamp}-{uuid.uuid4().hex[:6]}"
 
-    output_dir = output_dir / run_name
-    output_dir.mkdir(parents=True, exist_ok=True)
-    return output_dir
+        output_dir = output_dir / args.run_name
+        output_dir.mkdir(parents=True, exist_ok=True)
+        logger.info(f"setting output directory to {output_dir}")
+
+        cfg = load_config(args.config)
+        save_config(output_dir, cfg, args)
+
+        return output_dir, cfg
 
 
 def seed_all(seed: int) -> None:
@@ -96,6 +126,7 @@ def seed_all(seed: int) -> None:
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
+    logger.info(f"seeded with {seed}")
 
 
 def save_config(output_dir: Path, cfg: Config, args: argparse.Namespace) -> None:
@@ -104,6 +135,60 @@ def save_config(output_dir: Path, cfg: Config, args: argparse.Namespace) -> None
     args_payload = vars(args).copy()
     with open(output_dir / "args.json", "w", encoding="utf-8") as f:
         json.dump(args_payload, f, indent=2, default=str)
+
+
+def save_checkpoint(
+    path: Path,
+    trainer: Trainer,
+    optimizer: torch.optim.Optimizer,
+    lr_scheduler: torch.optim.lr_scheduler.LRScheduler,
+    epoch: int,
+    global_step: int,
+) -> None:
+    resnet = trainer.resnet
+    if hasattr(resnet, "_orig_mod"):
+        resnet = resnet._orig_mod
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    torch.save(
+        {
+            "epoch": epoch,
+            "global_step": global_step,
+            "model": resnet.state_dict(),
+            "optimizer": optimizer.state_dict(),
+            "lr_scheduler": lr_scheduler.state_dict(),
+            "rng": {
+                "python": random.getstate(),
+                "torch": torch.get_rng_state(),
+                "cuda": torch.cuda.get_rng_state_all()
+                if torch.cuda.is_available()
+                else None,
+            },
+        },
+        tmp,
+    )
+    os.replace(tmp, path)
+    logger.info(f"checkpoint saved")
+
+
+def load_checkpoint(
+    resume_dir: Path,
+    trainer: Trainer,
+    optimizer: torch.optim.Optimizer,
+    lr_scheduler: torch.optim.lr_scheduler.LRScheduler,
+    device: torch.device,
+) -> tuple[int, int]:
+    ckpt = torch.load(resume_dir / "last.ckpt", map_location=device, weights_only=False)
+    trainer.resnet.load_state_dict(ckpt["model"])
+    optimizer.load_state_dict(ckpt["optimizer"])
+    lr_scheduler.load_state_dict(ckpt["lr_scheduler"])
+    random.setstate(ckpt["rng"]["python"])
+    torch.set_rng_state(ckpt["rng"]["torch"])
+    if device.type == "cuda" and ckpt["rng"]["cuda"] is not None:
+        torch.cuda.set_rng_state_all(ckpt["rng"]["cuda"])
+    start_epoch = ckpt["epoch"] + 1
+    global_step = ckpt["global_step"]
+    logger.info(f"checkpoint loaded")
+    return start_epoch, global_step
 
 
 def current_lr(optimizer: torch.optim.Optimizer) -> float:
@@ -122,66 +207,66 @@ def total_grad_norm(optimizer: torch.optim.Optimizer) -> float:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", type=Path, required=True)
+
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument("--config", type=Path)
+    group.add_argument("--resume", type=Path)
+
     parser.add_argument("--workers", type=int, default=2)
     parser.add_argument("--device", default="auto")
     parser.add_argument("--compile", action="store_true")
-    parser.add_argument("--output-dir", type=Path, default=Path("output"))
-    parser.add_argument("--run-name", type=str, default=None)
+    parser.add_argument("--output-dir", type=Path)
+    parser.add_argument("--run-name", type=str)
     parser.add_argument("--seed", type=int, default=42)
+
     return parser.parse_args()
 
 
 def training_pipeline() -> None:
     args = parse_args()
-    cfg = load_config(args.config)
-    output_dir = get_output_dir(args.output_dir, args.run_name)
-    save_config(output_dir, cfg, args)
-    logger.info(f"output directory at {output_dir}")
-
-    seed_all(args.seed)
-    logger.info(f"seeded with {args.seed}")
-
     device = sanitize_device(args.device)
-    logger.info(f"using {device} for training device")
+    output_dir, cfg = resolve_settings(args)
+    seed_all(args.seed)
 
-    if device.type == "cuda":
-        logger.info("setting float32 matmul precision to high on cuda device")
-        torch.set_float32_matmul_precision("high")
-
-    cifar_resnet, num_blocks, num_params = get_q_resnet(cfg.model, 100)
-    trainer = Trainer(cifar_resnet, device)
-    logger.info(
-        f"built ResNet-{cfg.model.layers} with blocks {num_blocks} and {num_params} parameters"
+    cifar_resnet = get_q_resnet(cfg.model, 100)
+    train_loader, test_loader, calibration_batches = get_loaders(
+        cfg.train.batch_size,
+        cfg.train.calib_batches,
+        args.workers,
     )
 
-    train_loader, test_loader = get_loaders(cfg.train.batch_size, args.workers)
-    calibration_batches = (x for x, _ in islice(train_loader, cfg.train.calib_batches))
+    trainer = Trainer(cifar_resnet, device)
     trainer.init_act_q_pass(calibration_batches)
-    logger.info("activation quantizers calibrated")
-
-    n_weight, n_activation = trainer.get_quant_counts()
-    logger.info(f"quantized {n_weight} weight elements")
-    logger.info(f"quantized {n_activation} activation elements per sample")
+    logger.info("activation quantizer calibrated")
 
     param_groups = trainer.get_param_groups(
         cfg.train.learning_rate, cfg.train.weight_decay
     )
     optimizer = torch.optim.SGD(param_groups, momentum=cfg.train.momentum)
-
     lr_scheduler = torch.optim.lr_scheduler.MultiStepLR(
         optimizer, list(cfg.train.milestones), cfg.train.sched_gamma
     )
+
+    start_epoch = 0
+    global_step = 0
+
+    if args.resume:
+        start_epoch, global_step = load_checkpoint(
+            args.resume, trainer, optimizer, lr_scheduler, device
+        )
+
+    n_weight, n_activation = trainer.get_quant_counts()
+    logger.info(f"quantized {n_weight} weight elements")
+    logger.info(f"quantized {n_activation} activation elements per sample")
+
+    writer = SummaryWriter(log_dir=str(output_dir / "tensorboard"))
 
     if args.compile:
         logger.info("torch.compile enabled")
         trainer.compile()
 
-    writer = SummaryWriter(log_dir=str(output_dir / "tensorboard"))
-
-    global_step = 0
-    logger.info("training started")
-    for epoch in range(cfg.train.epochs):
+    logger.info(f"training started from epoch {start_epoch}")
+    for epoch in range(start_epoch, cfg.train.epochs):
         trainer.resnet.train()
 
         start = time.perf_counter()
@@ -249,9 +334,18 @@ def training_pipeline() -> None:
             trainer.floor_quant(1e-8)
             global_step += 1
 
+        lr_scheduler.step()
+        save_checkpoint(
+            output_dir / "last.ckpt",
+            trainer,
+            optimizer,
+            lr_scheduler,
+            epoch,
+            global_step,
+        )
+
         duration = time.perf_counter() - start
         logger.info(f"epoch {epoch} completed in {duration:.1f}s")
-        lr_scheduler.step()
 
         if epoch % cfg.logging.eval_every_epochs == 0 or epoch == cfg.train.epochs - 1:
             acc = trainer.evaluate(test_loader)
@@ -260,4 +354,5 @@ def training_pipeline() -> None:
             writer.add_scalar("eval/acc", acc, epoch)
             writer.flush()
 
+    logger.info("training finished")
     writer.close()
