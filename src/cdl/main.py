@@ -14,7 +14,7 @@ from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from torchvision import datasets, transforms
 
-from cdl.config import Config, load_config
+from cdl.config import Config, ModelConfig, load_config
 from cdl.model.resnet import QResNet
 from cdl.trainer import Trainer
 
@@ -50,24 +50,19 @@ def get_loaders(batch_size: int, workers: int) -> tuple[DataLoader, DataLoader]:
 
 
 def get_q_resnet(
-    num_layers: int,
+    cfg: ModelConfig,
     num_classes: int,
-    relaxed: bool,
-    bits: int,
-    bits_edge: int,
-    topk_act: int,
-    kappa: float,
 ) -> tuple[QResNet, list[int], int]:
-    n = (num_layers - 2) // 6
+    n = (cfg.layers - 2) // 6
     num_blocks = [n, n, n]
     q_resnet = QResNet(
         num_blocks,
         num_classes,
-        relaxed,
-        bits,
-        bits_edge,
-        topk_act,
-        kappa,
+        cfg.relaxed,
+        cfg.bits,
+        cfg.bits_edge,
+        cfg.topk_act,
+        cfg.kappa,
     )
     num_params = sum(p.numel() for p in q_resnet.parameters())
     return q_resnet, num_blocks, num_params
@@ -133,6 +128,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--compile", action="store_true")
     parser.add_argument("--output-dir", type=Path, default=Path("output"))
     parser.add_argument("--run-name", type=str, default=None)
+    parser.add_argument("--seed", type=int, default=42)
     return parser.parse_args()
 
 
@@ -143,8 +139,8 @@ def training_pipeline() -> None:
     save_config(output_dir, cfg, args)
     logger.info(f"output directory at {output_dir}")
 
-    seed_all(cfg.seed)
-    logger.info(f"seeded with {cfg.seed}")
+    seed_all(args.seed)
+    logger.info(f"seeded with {args.seed}")
 
     device = sanitize_device(args.device)
     logger.info(f"using {device} for training device")
@@ -153,22 +149,14 @@ def training_pipeline() -> None:
         logger.info("setting float32 matmul precision to high on cuda device")
         torch.set_float32_matmul_precision("high")
 
-    cifar_resnet, num_blocks, num_params = get_q_resnet(
-        cfg.layers,
-        100,
-        cfg.relaxed,
-        cfg.bits,
-        cfg.bits_edge,
-        cfg.topk_act,
-        cfg.kappa,
-    )
+    cifar_resnet, num_blocks, num_params = get_q_resnet(cfg.model, 100)
     trainer = Trainer(cifar_resnet, device)
     logger.info(
-        f"built ResNet-{cfg.layers} with blocks {num_blocks} and {num_params} parameters"
+        f"built ResNet-{cfg.model.layers} with blocks {num_blocks} and {num_params} parameters"
     )
 
-    train_loader, test_loader = get_loaders(cfg.batch_size, args.workers)
-    calibration_batches = (x for x, _ in islice(train_loader, cfg.calib_batches))
+    train_loader, test_loader = get_loaders(cfg.train.batch_size, args.workers)
+    calibration_batches = (x for x, _ in islice(train_loader, cfg.train.calib_batches))
     trainer.init_act_q_pass(calibration_batches)
     logger.info("activation quantizers calibrated")
 
@@ -176,11 +164,13 @@ def training_pipeline() -> None:
     logger.info(f"quantized {n_weight} weight elements")
     logger.info(f"quantized {n_activation} activation elements per sample")
 
-    param_groups = trainer.get_param_groups(cfg.learning_rate, cfg.weight_decay)
-    optimizer = torch.optim.SGD(param_groups, momentum=cfg.momentum)
+    param_groups = trainer.get_param_groups(
+        cfg.train.learning_rate, cfg.train.weight_decay
+    )
+    optimizer = torch.optim.SGD(param_groups, momentum=cfg.train.momentum)
 
     lr_scheduler = torch.optim.lr_scheduler.MultiStepLR(
-        optimizer, list(cfg.milestones), cfg.sched_gamma
+        optimizer, list(cfg.train.milestones), cfg.train.sched_gamma
     )
 
     if args.compile:
@@ -191,18 +181,21 @@ def training_pipeline() -> None:
 
     global_step = 0
     logger.info("training started")
-    for epoch in range(cfg.epochs):
+    for epoch in range(cfg.train.epochs):
         trainer.resnet.train()
 
         start = time.perf_counter()
         for x, y in tqdm.tqdm(train_loader, desc=f"epoch {epoch}"):
             batch_output = trainer.forward_one_batch(x, y)
-            loss = batch_output.compute_joint_loss(cfg.lam, cfg.gam)
+            loss = batch_output.compute_joint_loss(cfg.train.lam, cfg.train.gam)
 
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
 
-            if cfg.log_every_steps > 0 and global_step % cfg.log_every_steps == 0:
+            if (
+                cfg.logging.log_every_steps > 0
+                and global_step % cfg.logging.log_every_steps == 0
+            ):
                 ce_loss = batch_output.ce_loss.item()
                 weight_entropy = batch_output.weight_entropy.item()
                 activation_entropy = batch_output.activation_entropy.item()
@@ -260,7 +253,7 @@ def training_pipeline() -> None:
         logger.info(f"epoch {epoch} completed in {duration:.1f}s")
         lr_scheduler.step()
 
-        if epoch % cfg.eval_every_epochs == 0 or epoch == cfg.epochs - 1:
+        if epoch % cfg.logging.eval_every_epochs == 0 or epoch == cfg.train.epochs - 1:
             acc = trainer.evaluate(test_loader)
             acc_percent = acc * 100
             logger.info(f"epoch {epoch} evaluation accuracy is {acc_percent:.1f}%")

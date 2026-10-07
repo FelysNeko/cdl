@@ -165,9 +165,13 @@ class Trainer:
             for (lr, wd), params in buckets.items()
         ]
         if decay:
-            groups.append({"params": decay, "lr": learning_rate, "weight_decay": weight_decay})
+            groups.append(
+                {"params": decay, "lr": learning_rate, "weight_decay": weight_decay}
+            )
         if no_decay:
-            groups.append({"params": no_decay, "lr": learning_rate, "weight_decay": 0.0})
+            groups.append(
+                {"params": no_decay, "lr": learning_rate, "weight_decay": 0.0}
+            )
         return groups
 
     @torch.no_grad()
