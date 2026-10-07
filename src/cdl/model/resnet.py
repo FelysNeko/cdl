@@ -1,6 +1,48 @@
+import torch
+import torch.nn.functional as F
 from torch import nn
 
-from cdl.model.model import CdlQuantForActivation, QConv2d, QLinear
+from cdl.model.quant import CdlQuantForActivation, CdlQuantForWeight
+
+
+class QConv2d(nn.Conv2d):
+    def __init__(
+        self,
+        *args,
+        w_bits: int,
+        relaxed: bool,
+        kappa: float,
+        **kwargs,
+    ):
+        super().__init__(*args, **kwargs)
+        self.weight_quant = CdlQuantForWeight(w_bits, self.weight, relaxed, kappa)
+
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        return F.conv2d(
+            input,
+            self.weight_quant(self.weight),
+            self.bias,
+            self.stride,
+            self.padding,
+            self.dilation,
+            self.groups,
+        )
+
+
+class QLinear(nn.Linear):
+    def __init__(
+        self,
+        *args,
+        w_bits: int,
+        relaxed: bool,
+        kappa: float,
+        **kwargs,
+    ):
+        super().__init__(*args, **kwargs)
+        self.weight_quant = CdlQuantForWeight(w_bits, self.weight, relaxed, kappa)
+
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        return F.linear(input, self.weight_quant(self.weight), self.bias)
 
 
 class QBasicBlock(nn.Module):
@@ -12,11 +54,11 @@ class QBasicBlock(nn.Module):
         relaxed: bool,
         bits: int,
         topk_act: int,
-        kappa_init: float,
+        kappa: float,
     ):
         super().__init__()
-        self.q_in = CdlQuantForActivation(bits, relaxed, topk_act, kappa_init)
-        self.q_mid = CdlQuantForActivation(bits, relaxed, topk_act, kappa_init)
+        self.q_in = CdlQuantForActivation(bits, relaxed, topk_act, kappa)
+        self.q_mid = CdlQuantForActivation(bits, relaxed, topk_act, kappa)
         self.conv1 = QConv2d(
             in_planes,
             planes,
@@ -26,7 +68,7 @@ class QBasicBlock(nn.Module):
             bias=False,
             w_bits=bits,
             relaxed=relaxed,
-            kappa_init=kappa_init,
+            kappa=kappa,
         )
         self.bn1 = nn.BatchNorm2d(planes)
         self.conv2 = QConv2d(
@@ -37,7 +79,7 @@ class QBasicBlock(nn.Module):
             bias=False,
             w_bits=bits,
             relaxed=relaxed,
-            kappa_init=kappa_init,
+            kappa=kappa,
         )
         self.bn2 = nn.BatchNorm2d(planes)
         self.shortcut = (
@@ -50,7 +92,7 @@ class QBasicBlock(nn.Module):
                     bias=False,
                     w_bits=bits,
                     relaxed=relaxed,
-                    kappa_init=kappa_init,
+                    kappa=kappa,
                 ),
                 nn.BatchNorm2d(planes),
             )
@@ -75,13 +117,13 @@ class QResNet(nn.Module):
         bits: int,
         bits_edge: int,
         topk_act: int,
-        kappa_init: float,
+        kappa: float,
     ):
         super().__init__()
         self.relaxed = relaxed
         self.bits = bits
         self.topk_act = topk_act
-        self.kappa_init = kappa_init
+        self.kappa = kappa
         self.relu = nn.ReLU(inplace=True)
         self.stem = QConv2d(
             3,
@@ -91,21 +133,21 @@ class QResNet(nn.Module):
             bias=False,
             w_bits=bits_edge,
             relaxed=relaxed,
-            kappa_init=kappa_init,
+            kappa=kappa,
         )
         self.bn = nn.BatchNorm2d(16)
         self.in_planes = 16
         self.layer1 = self.make_layer(16, num_blocks[0], 1)
         self.layer2 = self.make_layer(32, num_blocks[1], 2)
         self.layer3 = self.make_layer(64, num_blocks[2], 2)
-        self.q_out = CdlQuantForActivation(bits, relaxed, topk_act, kappa_init)
+        self.q_out = CdlQuantForActivation(bits, relaxed, topk_act, kappa)
         self.avgpool = nn.AdaptiveAvgPool2d(1)
         self.fc = QLinear(
             64,
             num_classes,
             w_bits=bits_edge,
             relaxed=relaxed,
-            kappa_init=kappa_init,
+            kappa=kappa,
         )
 
     def make_layer(self, planes, num_blocks, stride):
@@ -119,7 +161,7 @@ class QResNet(nn.Module):
                     self.relaxed,
                     self.bits,
                     self.topk_act,
-                    self.kappa_init,
+                    self.kappa,
                 )
             )
             self.in_planes = planes

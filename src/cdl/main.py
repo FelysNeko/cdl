@@ -2,7 +2,6 @@ import argparse
 import json
 import logging
 import random
-import sys
 import time
 import uuid
 from itertools import islice
@@ -10,10 +9,12 @@ from pathlib import Path
 
 import torch
 import tqdm
+from omegaconf import OmegaConf
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from torchvision import datasets, transforms
 
+from cdl.config import Config, load_config
 from cdl.model.resnet import QResNet
 from cdl.trainer import Trainer
 
@@ -55,7 +56,7 @@ def get_q_resnet(
     bits: int,
     bits_edge: int,
     topk_act: int,
-    kappa_init: float = 1.0,
+    kappa: float,
 ) -> tuple[QResNet, list[int], int]:
     n = (num_layers - 2) // 6
     num_blocks = [n, n, n]
@@ -66,53 +67,10 @@ def get_q_resnet(
         bits,
         bits_edge,
         topk_act,
-        kappa_init,
+        kappa,
     )
     num_params = sum(p.numel() for p in q_resnet.parameters())
     return q_resnet, num_blocks, num_params
-
-
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--layers",
-        type=int,
-        default=20,
-        choices=[20, 44, 56, 110],
-    )
-    parser.add_argument("--relaxed", action="store_true")
-    parser.add_argument("--bits", type=int, default=6)
-    parser.add_argument("--bits-edge", type=int, default=8)
-    parser.add_argument("--topk-act", type=int, default=5)
-    parser.add_argument("--kappa-init", type=float, default=1.0)
-    parser.add_argument("--lam", type=float, default=0.0)
-    parser.add_argument("--gam", type=float, default=0.0)
-    parser.add_argument("--epochs", type=int, default=200)
-    parser.add_argument("--batch-size", type=int, default=64)
-    parser.add_argument("--lr", type=float, default=0.1)
-    parser.add_argument("--wd", type=float, default=5e-4)
-    parser.add_argument("--momentum", type=float, default=0.9)
-    parser.add_argument("--clip", type=float, default=5.0)
-    parser.add_argument("--milestones", type=int, nargs="+", default=[60, 120, 160])
-    parser.add_argument("--sched-gamma", type=float, default=0.1)
-    parser.add_argument("--calib-batches", type=int, default=1)
-    parser.add_argument(
-        "--eval-every-epochs",
-        type=int,
-        default=1,
-    )
-    parser.add_argument(
-        "--log-every-steps",
-        type=int,
-        default=50,
-    )
-    parser.add_argument("--workers", type=int, default=2)
-    parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--compile", action="store_true")
-    parser.add_argument("--device", default="auto")
-    parser.add_argument("--output-dir", type=Path, default=Path("output"))
-    parser.add_argument("--run-name", type=str, default=None)
-    return parser.parse_args()
 
 
 def sanitize_device(device: str) -> torch.device:
@@ -145,12 +103,12 @@ def seed_all(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
-def save_config(output_dir: Path, args: argparse.Namespace) -> None:
-    config = vars(args).copy()
-    config["argv"] = sys.argv
-    config_path = output_dir / "config.json"
-    with open(config_path, "w", encoding="utf-8") as f:
-        json.dump(config, f, indent=2, default=str)
+def save_config(output_dir: Path, cfg: Config, args: argparse.Namespace) -> None:
+    cfg_payload = OmegaConf.structured(cfg)
+    OmegaConf.save(cfg_payload, output_dir / "config.yaml")
+    args_payload = vars(args).copy()
+    with open(output_dir / "args.json", "w", encoding="utf-8") as f:
+        json.dump(args_payload, f, indent=2, default=str)
 
 
 def current_lr(optimizer: torch.optim.Optimizer) -> float:
@@ -167,14 +125,26 @@ def total_grad_norm(optimizer: torch.optim.Optimizer) -> float:
     return torch.nn.utils.get_total_norm(grads).item()
 
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", type=Path, required=True)
+    parser.add_argument("--workers", type=int, default=2)
+    parser.add_argument("--device", default="auto")
+    parser.add_argument("--compile", action="store_true")
+    parser.add_argument("--output-dir", type=Path, default=Path("output"))
+    parser.add_argument("--run-name", type=str, default=None)
+    return parser.parse_args()
+
+
 def training_pipeline() -> None:
     args = parse_args()
+    cfg = load_config(args.config)
     output_dir = get_output_dir(args.output_dir, args.run_name)
-    save_config(output_dir, args)
+    save_config(output_dir, cfg, args)
     logger.info(f"output directory at {output_dir}")
 
-    seed_all(args.seed)
-    logger.info(f"seeded with {args.seed}")
+    seed_all(cfg.seed)
+    logger.info(f"seeded with {cfg.seed}")
 
     device = sanitize_device(args.device)
     logger.info(f"using {device} for training device")
@@ -184,21 +154,21 @@ def training_pipeline() -> None:
         torch.set_float32_matmul_precision("high")
 
     cifar_resnet, num_blocks, num_params = get_q_resnet(
-        args.layers,
+        cfg.layers,
         100,
-        args.relaxed,
-        args.bits,
-        args.bits_edge,
-        args.topk_act,
-        args.kappa_init,
+        cfg.relaxed,
+        cfg.bits,
+        cfg.bits_edge,
+        cfg.topk_act,
+        cfg.kappa,
     )
     trainer = Trainer(cifar_resnet, device)
     logger.info(
-        f"built ResNet-{args.layers} with blocks {num_blocks} and {num_params} parameters"
+        f"built ResNet-{cfg.layers} with blocks {num_blocks} and {num_params} parameters"
     )
 
-    train_loader, test_loader = get_loaders(args.batch_size, args.workers)
-    calibration_batches = (x for x, _ in islice(train_loader, args.calib_batches))
+    train_loader, test_loader = get_loaders(cfg.batch_size, args.workers)
+    calibration_batches = (x for x, _ in islice(train_loader, cfg.calib_batches))
     trainer.init_act_q_pass(calibration_batches)
     logger.info("activation quantizers calibrated")
 
@@ -206,12 +176,11 @@ def training_pipeline() -> None:
     logger.info(f"quantized {n_weight} weight elements")
     logger.info(f"quantized {n_activation} activation elements per sample")
 
-    param_groups = trainer.get_param_groups(args.lr, args.wd)
-    optimizer = torch.optim.SGD(param_groups, momentum=args.momentum)
-    clip_params = [p for group in param_groups for p in group["params"]]
+    param_groups = trainer.get_param_groups(cfg.learning_rate, cfg.weight_decay)
+    optimizer = torch.optim.SGD(param_groups, momentum=cfg.momentum)
 
     lr_scheduler = torch.optim.lr_scheduler.MultiStepLR(
-        optimizer, args.milestones, args.sched_gamma
+        optimizer, list(cfg.milestones), cfg.sched_gamma
     )
 
     if args.compile:
@@ -222,18 +191,18 @@ def training_pipeline() -> None:
 
     global_step = 0
     logger.info("training started")
-    for epoch in range(args.epochs):
+    for epoch in range(cfg.epochs):
         trainer.resnet.train()
 
         start = time.perf_counter()
         for x, y in tqdm.tqdm(train_loader, desc=f"epoch {epoch}"):
             batch_output = trainer.forward_one_batch(x, y)
-            loss = batch_output.compute_joint_loss(args.lam, args.gam)
+            loss = batch_output.compute_joint_loss(cfg.lam, cfg.gam)
 
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
 
-            if args.log_every_steps > 0 and global_step % args.log_every_steps == 0:
+            if cfg.log_every_steps > 0 and global_step % cfg.log_every_steps == 0:
                 ce_loss = batch_output.ce_loss.item()
                 weight_entropy = batch_output.weight_entropy.item()
                 activation_entropy = batch_output.activation_entropy.item()
@@ -283,9 +252,6 @@ def training_pipeline() -> None:
                     )
                     torch.cuda.reset_peak_memory_stats()
 
-            if args.clip > 0:
-                torch.nn.utils.clip_grad_norm_(clip_params, args.clip)
-
             optimizer.step()
             trainer.floor_quant(1e-8)
             global_step += 1
@@ -294,7 +260,7 @@ def training_pipeline() -> None:
         logger.info(f"epoch {epoch} completed in {duration:.1f}s")
         lr_scheduler.step()
 
-        if epoch % args.eval_every_epochs == 0 or epoch == args.epochs - 1:
+        if epoch % cfg.eval_every_epochs == 0 or epoch == cfg.epochs - 1:
             acc = trainer.evaluate(test_loader)
             acc_percent = acc * 100
             logger.info(f"epoch {epoch} evaluation accuracy is {acc_percent:.1f}%")

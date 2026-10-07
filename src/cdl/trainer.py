@@ -1,13 +1,12 @@
 from collections.abc import Iterable
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any
 
 import torch
 from torch import nn
 from torch.utils.data import DataLoader
 
-from cdl.model.model import CdlQuant, CdlQuantForActivation, CdlQuantForWeight
+from cdl.model.quant import CdlQuant, CdlQuantForActivation, CdlQuantForWeight
 from cdl.model.resnet import QResNet
 
 
@@ -116,11 +115,11 @@ class Trainer:
 
         for m in self.resnet.modules():
             if isinstance(m, CdlQuantForWeight):
-                e = m.compute_entropy_and_reset()
+                e = m.drain_entropy()
                 weight_entropy_loss = weight_entropy_loss + e
 
             if isinstance(m, CdlQuantForActivation):
-                e = m.compute_entropy_and_reset()
+                e = m.drain_entropy()
                 activation_entropy_loss = activation_entropy_loss + e
 
         is_error = out.argmax(dim=-1) != y
@@ -134,26 +133,22 @@ class Trainer:
         )
 
     def get_param_groups(self, learning_rate: float, weight_decay: float) -> list[dict]:
-        parameters = []
         customized_param_set = set()
+        buckets: dict[tuple[float, float], list[nn.Parameter]] = {}
 
-        def register_parameter(ps: Any, lr: float, wd: float):
-            parameters.append({"params": ps, "lr": lr, "weight_decay": wd})
+        def add(param: nn.Parameter, lr: float, wd: float) -> None:
+            customized_param_set.add(param)
+            buckets.setdefault((lr, wd), []).append(param)
 
         for m in self.resnet.modules():
             if not isinstance(m, CdlQuant):
                 continue
 
-            if m.numel == 0:
+            if m.num_quantized_params == 0:
                 raise RuntimeError("quantizer not initialized")
 
-            q_lr = m.scale_q_lr(learning_rate)
-            register_parameter(m.q, q_lr, 0.0)
-            customized_param_set.add(m.q)
-
-            kappa_lr = m.scale_kappa_lr(learning_rate)
-            register_parameter(m.log_kappa, kappa_lr, 0.0)
-            customized_param_set.add(m.log_kappa)
+            add(m.q, m.scale_q_lr(learning_rate), 0.0)
+            add(m.log_kappa, m.scale_kappa_lr(learning_rate), 0.0)
 
         decay = []
         no_decay = []
@@ -165,13 +160,15 @@ class Trainer:
             else:
                 decay.append(param)
 
+        groups = [
+            {"params": params, "lr": lr, "weight_decay": wd}
+            for (lr, wd), params in buckets.items()
+        ]
         if decay:
-            register_parameter(decay, learning_rate, weight_decay)
-
+            groups.append({"params": decay, "lr": learning_rate, "weight_decay": weight_decay})
         if no_decay:
-            register_parameter(no_decay, learning_rate, 0.0)
-
-        return parameters
+            groups.append({"params": no_decay, "lr": learning_rate, "weight_decay": 0.0})
+        return groups
 
     @torch.no_grad()
     def floor_quant(self, min_q: float) -> None:
@@ -188,7 +185,7 @@ class Trainer:
             vals = [
                 m.kappa.item()
                 for m in self.resnet.modules()
-                if isinstance(m, cls) and m.numel > 0
+                if isinstance(m, cls) and m.num_quantized_params > 0
             ]
             if not vals:
                 continue
@@ -213,10 +210,12 @@ class Trainer:
 
     def get_quant_counts(self) -> tuple[int, int]:
         n_weight = sum(
-            m.numel for m in self.resnet.modules() if isinstance(m, CdlQuantForWeight)
+            m.num_quantized_params
+            for m in self.resnet.modules()
+            if isinstance(m, CdlQuantForWeight)
         )
         n_activation = sum(
-            m.numel
+            m.num_quantized_params
             for m in self.resnet.modules()
             if isinstance(m, CdlQuantForActivation)
         )

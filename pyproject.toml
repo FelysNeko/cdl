@@ -5,8 +5,9 @@ description = "Coded Deep Learning"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "tensorboard",
-    "tqdm",
+    "omegaconf>=2.3.1",
+    "tensorboard>=2.21.0",
+    "tqdm>=4.70.1",
 ]
 
 [project.optional-dependencies]
@@ -65,7 +66,7 @@ build-backend = "uv_build"
 
 [dependency-groups]
 dev = [
-    "ipykernel",
+    "ipykernel>=7.4.0",
     "pypdf>=6.19.0",
     "ruff>=0.16.9",
 ]
