@@ -167,7 +167,7 @@ def save_checkpoint(
         tmp,
     )
     os.replace(tmp, path)
-    logger.info(f"checkpoint saved")
+    logger.info("checkpoint saved")
 
 
 def load_checkpoint(
@@ -187,7 +187,7 @@ def load_checkpoint(
         torch.cuda.set_rng_state_all(ckpt["rng"]["cuda"])
     start_epoch = ckpt["epoch"] + 1
     global_step = ckpt["global_step"]
-    logger.info(f"checkpoint loaded")
+    logger.info("checkpoint loaded")
     return start_epoch, global_step
 
 
@@ -244,7 +244,7 @@ def training_pipeline() -> None:
         cfg.train.weight_decay,
         cfg.train.freeze_kappa,
     )
-    optimizer = torch.optim.SGD(param_groups, momentum=cfg.train.momentum)
+    optimizer = torch.optim.SGD(param_groups, momentum=cfg.train.momentum, fused=True)
     lr_scheduler = torch.optim.lr_scheduler.MultiStepLR(
         optimizer, list(cfg.train.milestones), cfg.train.sched_gamma
     )

@@ -26,7 +26,7 @@ def cdl_topk_q_p(
     topk = topk_pmf.shape[-1]
     cdf = topk_pmf.cumsum(-1)
     quantile = torch.rand(topk_pmf.shape[:-1], dtype=cdf.dtype, device=cdf.device)
-    sub_indices = torch.searchsorted(cdf, quantile.unsqueeze(-1), right=True)
+    sub_indices = (cdf <= quantile.unsqueeze(-1)).sum(-1, keepdim=True)
     sub_indices.clamp_(max=topk - 1)
     q_p = topk_level.gather(dim=-1, index=sub_indices).squeeze(-1)
     return q_p * q

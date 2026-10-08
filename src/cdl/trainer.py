@@ -15,7 +15,7 @@ class BatchOutput:
     ce_loss: torch.Tensor
     weight_entropy: torch.Tensor
     activation_entropy: torch.Tensor
-    error_rate: float
+    error_rate: torch.Tensor
 
     def compute_joint_loss(self, lam: float, gam: float) -> torch.Tensor:
         return self.ce_loss + lam * self.weight_entropy + gam * self.activation_entropy
@@ -29,7 +29,7 @@ class Trainer:
 
     def compile(self) -> None:
         torch._dynamo.config.cache_size_limit = 128
-        self.resnet = torch.compile(self.resnet, dynamic=True)
+        self.resnet = torch.compile(self.resnet, dynamic=False, mode="reduce-overhead")
 
     @contextmanager
     def batchnorm_batch_stats(self):
@@ -110,20 +110,26 @@ class Trainer:
         out: torch.Tensor = self.resnet(x)
 
         cross_entropy_loss = self.criterion(out, y)
-        weight_entropy_loss = torch.zeros(())
-        activation_entropy_loss = torch.zeros(())
+        weight_entropies: list[torch.Tensor] = []
+        activation_entropies: list[torch.Tensor] = []
 
         for m in self.resnet.modules():
             if isinstance(m, CdlQuantForWeight):
-                e = m.drain_entropy()
-                weight_entropy_loss = weight_entropy_loss + e
+                weight_entropies.append(m.drain_entropy())
+            elif isinstance(m, CdlQuantForActivation):
+                activation_entropies.append(m.drain_entropy())
 
-            if isinstance(m, CdlQuantForActivation):
-                e = m.drain_entropy()
-                activation_entropy_loss = activation_entropy_loss + e
+        weight_entropy_loss = (
+            torch.stack(weight_entropies).sum() if weight_entropies else torch.zeros(())
+        )
+        activation_entropy_loss = (
+            torch.stack(activation_entropies).sum()
+            if activation_entropies
+            else torch.zeros(())
+        )
 
         is_error = out.argmax(dim=-1) != y
-        error_rate = is_error.float().mean().item()
+        error_rate = is_error.float().mean()
 
         return BatchOutput(
             ce_loss=cross_entropy_loss,
