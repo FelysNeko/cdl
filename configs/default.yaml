@@ -4,20 +4,21 @@ model:
   bits: 6
   bits_edge: 8
   topk_act: 5
-  kappa: 1.0
+  kappa: 1.0 # set to 0.7 and freeze it for stability
 
 train:
   lam: 0.0
   gam: 0.0
   epochs: 200
+  freeze_kappa: false
   batch_size: 64
   learning_rate: 0.1
   weight_decay: 0.0005
   momentum: 0.9
   milestones:
-  - 60
-  - 120
-  - 160
+    - 60
+    - 120
+    - 160
   sched_gamma: 0.1
   calib_batches: 1
 

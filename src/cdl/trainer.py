@@ -132,13 +132,11 @@ class Trainer:
             error_rate=error_rate,
         )
 
-    def get_param_groups(self, learning_rate: float, weight_decay: float) -> list[dict]:
+    def get_param_groups(
+        self, learning_rate: float, weight_decay: float, freeze_kappa: bool
+    ) -> list[dict]:
         customized_param_set = set()
         buckets: dict[tuple[float, float], list[nn.Parameter]] = {}
-
-        def add(param: nn.Parameter, lr: float, wd: float) -> None:
-            customized_param_set.add(param)
-            buckets.setdefault((lr, wd), []).append(param)
 
         for m in self.resnet.modules():
             if not isinstance(m, CdlQuant):
@@ -147,8 +145,16 @@ class Trainer:
             if m.num_quantized_params == 0:
                 raise RuntimeError("quantizer not initialized")
 
-            add(m.q, m.scale_q_lr(learning_rate), 0.0)
-            add(m.log_kappa, m.scale_kappa_lr(learning_rate), 0.0)
+            customized_param_set.add(m.q)
+            q_lr = m.scale_q_lr(learning_rate)
+            buckets.setdefault((q_lr, 0.0), []).append(m.q)
+
+            customized_param_set.add(m.log_kappa)
+            if freeze_kappa:
+                m.log_kappa.requires_grad_(False)
+            else:
+                kappa_lr = m.scale_kappa_lr(learning_rate)
+                buckets.setdefault((kappa_lr, 0.0), []).append(m.log_kappa)
 
         decay = []
         no_decay = []

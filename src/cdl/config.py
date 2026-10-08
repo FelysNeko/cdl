@@ -20,6 +20,7 @@ class TrainingConfig:
     gam: float = 0.0
 
     epochs: int = 200
+    freeze_kappa: bool = False
     batch_size: int = 64
     learning_rate: float = 0.1
     weight_decay: float = 5e-4

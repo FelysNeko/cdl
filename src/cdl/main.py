@@ -240,7 +240,9 @@ def training_pipeline() -> None:
     logger.info("activation quantizer calibrated")
 
     param_groups = trainer.get_param_groups(
-        cfg.train.learning_rate, cfg.train.weight_decay
+        cfg.train.learning_rate,
+        cfg.train.weight_decay,
+        cfg.train.freeze_kappa,
     )
     optimizer = torch.optim.SGD(param_groups, momentum=cfg.train.momentum)
     lr_scheduler = torch.optim.lr_scheduler.MultiStepLR(
