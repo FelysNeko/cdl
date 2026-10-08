@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 
 def get_loaders(
     batch_size: int,
-    calibration_batches: int,
+    num_calib_batches: int,
     workers: int,
 ) -> tuple[DataLoader, DataLoader, Iterable[torch.Tensor]]:
     train_tf = transforms.Compose(
@@ -52,8 +52,8 @@ def get_loaders(
         train_set, batch_size, shuffle=True, num_workers=workers, drop_last=True
     )
     test_loader = DataLoader(test_set, batch_size, shuffle=False, num_workers=workers)
-    calibration_batches = (x for x, _ in islice(train_loader, calibration_batches))
-    return train_loader, test_loader, calibration_batches
+    num_calib_batches = (x for x, _ in islice(train_loader, num_calib_batches))
+    return train_loader, test_loader, num_calib_batches
 
 
 def get_q_resnet(
@@ -107,11 +107,13 @@ def resolve_settings(
     else:
         output_dir = args.output_dir or Path("output")
         output_dir = output_dir.expanduser()
-        if args.run_name is None:
-            timestamp = time.strftime("%Y-%m-%dT%H-%M-%S")
-            args.run_name = f"{timestamp}-{uuid.uuid4().hex[:6]}"
 
-        output_dir = output_dir / args.run_name
+        run_name = args.run_name
+        if run_name is None:
+            timestamp = time.strftime("%Y-%m-%dT%H-%M-%S")
+            run_name = f"{timestamp}-{uuid.uuid4().hex[:6]}"
+
+        output_dir = output_dir / run_name
         output_dir.mkdir(parents=True, exist_ok=True)
         logger.info(f"setting output directory to {output_dir}")
 
