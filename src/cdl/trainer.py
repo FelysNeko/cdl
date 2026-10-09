@@ -195,20 +195,14 @@ class Trainer:
             m.log_kappa.clamp_(min=-20.0, max=20.0)
 
     @torch.no_grad()
-    def kappa_stats(self) -> dict[str, float]:
+    def quant_stats(self) -> dict[str, float]:
         out: dict[str, float] = {}
-        for tag, cls in (("w", CdlQuantForWeight), ("a", CdlQuantForActivation)):
-            vals = [
-                m.kappa.item()
-                for m in self.resnet.modules()
-                if isinstance(m, cls) and m.num_quantized_params > 0
-            ]
-            if not vals:
+        for name, m in self.resnet.named_modules():
+            if not isinstance(m, CdlQuant):
                 continue
-            t = torch.tensor(vals)
-            out[f"kappa_{tag}_mean"] = t.mean().item()
-            out[f"kappa_{tag}_min"] = t.min().item()
-            out[f"kappa_{tag}_max"] = t.max().item()
+            name = name.lstrip("_orig_mod.")
+            out[f"{name}.kappa"] = m.kappa.item()
+            out[f"{name}.q"] = m.q.item()
         return out
 
     @torch.no_grad()

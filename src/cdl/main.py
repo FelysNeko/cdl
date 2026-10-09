@@ -239,7 +239,8 @@ def training_pipeline() -> None:
 
     trainer = Trainer(cifar_resnet, device)
     trainer.init_act_q_pass(calibration_batches)
-    logger.info("activation quantizer calibrated")
+    for key, value in trainer.quant_stats().items():
+        logger.info(f"{key} = {value}")
 
     param_groups = trainer.get_param_groups(
         cfg.train.learning_rate,
@@ -313,8 +314,9 @@ def training_pipeline() -> None:
                 writer.add_scalar(
                     "train/grad_norm", total_grad_norm(optimizer), global_step
                 )
-                for key, value in trainer.kappa_stats().items():
-                    writer.add_scalar(f"train/{key}", value, global_step)
+
+                for key, value in trainer.quant_stats().items():
+                    writer.add_scalar(f"quant/{key}", value, global_step)
 
                 if device.type == "cuda":
                     writer.add_scalar(
