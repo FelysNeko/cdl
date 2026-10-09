@@ -276,7 +276,7 @@ def training_pipeline() -> None:
         start = time.perf_counter()
         for x, y in tqdm.tqdm(train_loader, desc=f"epoch {epoch}"):
             batch_output = trainer.forward_one_batch(x, y)
-            loss = batch_output.compute_joint_loss(cfg.train.lam, cfg.train.gam)
+            loss = batch_output.compute_joint_loss(cfg.train.lam / n_weight, cfg.train.gam / n_activation)
 
             optimizer.zero_grad(set_to_none=True)
             loss.backward()

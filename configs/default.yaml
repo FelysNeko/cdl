@@ -4,13 +4,13 @@ model:
   bits: 6
   bits_edge: 8
   topk_act: 5
-  kappa: 1.0 # set to 0.7 and freeze it for stability
+  kappa: 1.0
 
 train:
   lam: 0.0
   gam: 0.0
   epochs: 200
-  freeze_kappa: false
+  freeze_kappa: true
   batch_size: 64
   learning_rate: 0.1
   weight_decay: 0.0005
