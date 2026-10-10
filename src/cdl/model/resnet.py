@@ -15,6 +15,7 @@ class QConv2d(nn.Conv2d):
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
+        nn.init.kaiming_normal_(self.weight, mode="fan_out", nonlinearity="relu")
         self.weight_quant = CdlQuantForWeight(w_bits, self.weight, relaxed, kappa)
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
