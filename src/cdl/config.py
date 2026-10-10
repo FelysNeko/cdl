@@ -34,6 +34,7 @@ class TrainingConfig:
 class LoggingConfig:
     eval_every_epochs: int = 1
     log_every_steps: int = 50
+    recal_bn_batches: int = 100
 
 
 @dataclass

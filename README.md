@@ -1,6 +1,6 @@
 # Coded Deep Learning
 
-This is an unofficial implementation of [Coded Deep Learning: Framework and Algorithm](https://arxiv.org/abs/2501.09849) with additional FP4 and FP8 support. However, I found the paper difficult to reproduce. Therefore, I changed the model to train `kappa` instead of `alpha`, where `kappa` is equivalent to `alpha * step ** 2`. This prevents `alpha`'s gradient from being scaled by `step`. However, simply setting `kappa` to `1` and excluding it from training leads to better performance. Additionally, I normalized the entropy term.
+This is an unofficial implementation of [Coded Deep Learning: Framework and Algorithm](https://arxiv.org/abs/2501.09849) with additional FP4 and FP8 support. However, I found the paper difficult to reproduce. Therefore, I changed the model to train `kappa` instead of `alpha`, where `kappa` is equivalent to `alpha * step ** 2`. This prevents `alpha`'s gradient from being scaled by `step`. However, simply setting `kappa` to `1` and excluding it from training leads to better performance. Batch normalization re-estimation is requires since the quantization is softer. Additionally, I normalized the entropy term.
 
 ## References
 

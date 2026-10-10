@@ -200,10 +200,41 @@ class Trainer:
         for name, m in self.resnet.named_modules():
             if not isinstance(m, CdlQuant):
                 continue
-            name = name.lstrip("_orig_mod.")
+            name = name.removeprefix("_orig_mod.")
             out[f"{name}.kappa"] = m.kappa.item()
             out[f"{name}.q"] = m.q.item()
         return out
+
+    @torch.no_grad()
+    def recalibrate_bn(self, loader: DataLoader, num_batches: int) -> None:
+        if num_batches <= 0:
+            return
+        devices = [self.device] if self.device.type == "cuda" else []
+        with torch.random.fork_rng(devices=devices):
+            self._recalibrate_bn(loader, num_batches)
+
+    def _recalibrate_bn(self, loader: DataLoader, num_batches: int) -> None:
+        bns = [m for m in self.resnet.modules() if isinstance(m, nn.BatchNorm2d)]
+        if not bns:
+            return
+        was_training = self.resnet.training
+        moments = [m.momentum for m in bns]
+        self.resnet.train()
+        for m in self.resnet.modules():
+            if isinstance(m, CdlQuant):
+                m.eval()
+        try:
+            for m in bns:
+                m.reset_running_stats()
+                m.momentum = None
+            for i, (x, _) in enumerate(loader):
+                if i >= num_batches:
+                    break
+                self.resnet(x.to(self.device))
+        finally:
+            for m, momentum in zip(bns, moments):
+                m.momentum = momentum
+            self.resnet.train(was_training)
 
     @torch.no_grad()
     def evaluate(self, loader: DataLoader) -> float:

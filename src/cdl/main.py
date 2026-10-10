@@ -277,7 +277,9 @@ def training_pipeline() -> None:
         start = time.perf_counter()
         for x, y in tqdm.tqdm(train_loader, desc=f"epoch {epoch}"):
             batch_output = trainer.forward_one_batch(x, y)
-            loss = batch_output.compute_joint_loss(cfg.train.lam / n_weight, cfg.train.gam / n_activation)
+            loss = batch_output.compute_joint_loss(
+                cfg.train.lam / n_weight, cfg.train.gam / n_activation
+            )
 
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
@@ -354,6 +356,8 @@ def training_pipeline() -> None:
         logger.info(f"epoch {epoch} completed in {duration:.1f}s")
 
         if epoch % cfg.logging.eval_every_epochs == 0 or epoch == cfg.train.epochs - 1:
+            if cfg.logging.recal_bn_batches > 0:
+                trainer.recalibrate_bn(train_loader, cfg.logging.recal_bn_batches)
             acc = trainer.evaluate(test_loader)
             acc_percent = acc * 100
             logger.info(f"epoch {epoch} evaluation accuracy is {acc_percent:.1f}%")

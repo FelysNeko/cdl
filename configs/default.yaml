@@ -25,3 +25,4 @@ train:
 logging:
   eval_every_epochs: 1
   log_every_steps: 50
+  recal_bn_batches: 100
