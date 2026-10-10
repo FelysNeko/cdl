@@ -4,9 +4,9 @@ import math
 import torch
 from torch import nn
 
-from cdl.core import cdl_topk_forward, quant_nearest
-from cdl.format.format import Format
-from cdl.format.intx import IntX
+from cdl.core.companded import cdl_topk_forward, quant_nearest
+from cdl.core.format.format import Format
+from cdl.core.format.intx import IntX
 
 
 class CdlQuant(nn.Module, abc.ABC):

@@ -1,6 +1,6 @@
 import torch
 
-from cdl.format.format import Format
+from cdl.core.format.format import Format
 
 
 def cdl_topk_cpmf(
