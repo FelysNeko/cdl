@@ -6,8 +6,12 @@ import torch
 from torch import nn
 from torch.utils.data import DataLoader
 
-from cdl.model.quant import CdlQuant, CdlQuantForActivation, CdlQuantForWeight
-from cdl.model.resnet import QResNet
+from cdl.model.resnet.cdl import (
+    CdlQuant,
+    CdlQuantForActivation,
+    CdlQuantForWeight,
+    QResNet,
+)
 
 
 @dataclass(frozen=True, eq=False)

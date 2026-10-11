@@ -17,7 +17,7 @@ from torch.utils.tensorboard import SummaryWriter
 from torchvision import datasets, transforms
 
 from cdl.config import Config, ModelConfig, load_config
-from cdl.model.resnet import QResNet
+from cdl.model.resnet.cdl import QResNet
 from cdl.trainer import Trainer
 
 MEAN = (0.5071, 0.4865, 0.4409)
