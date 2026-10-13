@@ -1,8 +1,6 @@
 import torch
 from torch import nn
 
-from cdl.model.pad_shortcut import PadShortcut
-
 
 def make_conv2d(*args, **kwargs) -> nn.Conv2d:
     conv = nn.Conv2d(*args, **kwargs)
@@ -20,9 +18,12 @@ class BasicBlock(nn.Module):
         self.conv2 = make_conv2d(planes, planes, 3, padding=1, bias=False)
         self.bn2 = nn.BatchNorm2d(planes)
         self.shortcut = (
-            PadShortcut(in_planes, planes, stride)
+            nn.Sequential(
+                make_conv2d(in_planes, planes, 1, stride=stride, bias=False),
+                nn.BatchNorm2d(planes),
+            )
             if stride != 1 or in_planes != planes
-            else nn.Identity()
+            else nn.Sequential()
         )
         self.relu = nn.ReLU(inplace=True)
 

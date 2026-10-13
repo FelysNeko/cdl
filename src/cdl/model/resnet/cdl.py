@@ -8,7 +8,6 @@ from torch import nn
 from cdl.core.companded import cdl_topk_forward, quant_nearest
 from cdl.core.format.format import Format
 from cdl.core.format.intx import IntX
-from cdl.model.pad_shortcut import PadShortcut
 
 
 class CdlQuant(nn.Module, abc.ABC):
@@ -199,9 +198,21 @@ class QBasicBlock(nn.Module):
         )
         self.bn2 = nn.BatchNorm2d(planes)
         self.shortcut = (
-            PadShortcut(in_planes, planes, stride)
+            nn.Sequential(
+                QConv2d(
+                    in_planes,
+                    planes,
+                    1,
+                    stride=stride,
+                    bias=False,
+                    w_bits=bits,
+                    relaxed=relaxed,
+                    kappa=kappa,
+                ),
+                nn.BatchNorm2d(planes),
+            )
             if stride != 1 or in_planes != planes
-            else nn.Identity()
+            else nn.Sequential()
         )
         self.relu = nn.ReLU(inplace=True)
 
