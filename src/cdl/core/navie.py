@@ -1,5 +1,4 @@
 import torch
-from torch.distributions import Categorical
 
 
 def cdl_topk_forward(
@@ -32,7 +31,10 @@ def cdl_topk_forward(
         return q_d, entropies
 
     with torch.no_grad():
-        sub_indices = Categorical(probs=pmf).sample().unsqueeze(-1)
+        cdf = pmf.cumsum(-1)
+        quantile = torch.rand(pmf.shape[:-1], dtype=cdf.dtype, device=cdf.device)
+        sub_indices = (cdf <= quantile.unsqueeze(-1)).sum(-1, keepdim=True)
+        sub_indices.clamp_(max=topk - 1)
         chosen = topk_indices.gather(dim=-1, index=sub_indices).squeeze(-1)
         q_p = a[chosen] * q
 
