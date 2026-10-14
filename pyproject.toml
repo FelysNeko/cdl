@@ -8,47 +8,26 @@ dependencies = [
     "omegaconf>=2.3.1",
     "tensorboard>=2.21.0",
     "tqdm>=4.70.1",
+    "torch==2.12.1",
+    "torchvision==0.27.1",
+    "flashinfer-python==0.7.1",
+    "flashinfer-cubin==0.7.1",
+    "flashinfer-jit-cache==0.7.1+cu130",
+    "flashinfer-jit-cache-sm120f==0.7.1+cu130",
 ]
 
-[project.optional-dependencies]
-cpu = ["torch==2.12.1", "torchvision==0.27.1"]
-cu126 = ["torch==2.12.1", "torchvision==0.27.1"]
-cu130 = ["torch==2.12.1", "torchvision==0.27.1"]
-cu132 = ["torch==2.12.1", "torchvision==0.27.1"]
-
-[tool.uv]
-conflicts = [
-    [
-        { extra = "cpu" },
-        { extra = "cu126" },
-        { extra = "cu130" },
-        { extra = "cu132" },
-    ],
-]
+[[tool.uv.dependency-metadata]]
+name = "flashinfer-jit-cache"
+version = "0.7.1+cu130"
+requires-dist = []
 
 [tool.uv.sources]
-torch = [
-    { index = "pytorch-cpu", extra = "cpu" },
-    { index = "pytorch-cu126", extra = "cu126" },
-    { index = "pytorch-cu130", extra = "cu130" },
-    { index = "pytorch-cu132", extra = "cu132" },
-]
-torchvision = [
-    { index = "pytorch-cpu", extra = "cpu" },
-    { index = "pytorch-cu126", extra = "cu126" },
-    { index = "pytorch-cu130", extra = "cu130" },
-    { index = "pytorch-cu132", extra = "cu132" },
-]
-
-[[tool.uv.index]]
-name = "pytorch-cpu"
-url = "https://download.pytorch.org/whl/cpu"
-explicit = true
-
-[[tool.uv.index]]
-name = "pytorch-cu126"
-url = "https://download.pytorch.org/whl/cu126"
-explicit = true
+torch = [{ index = "pytorch-cu130" }]
+torchvision = [{ index = "pytorch-cu130" }]
+flashinfer-python = [{ index = "flashinfer" }]
+flashinfer-cubin = [{ index = "flashinfer" }]
+flashinfer-jit-cache = [{ index = "flashinfer-cu130" }]
+flashinfer-jit-cache-sm120f = [{ index = "flashinfer-cu130" }]
 
 [[tool.uv.index]]
 name = "pytorch-cu130"
@@ -56,8 +35,13 @@ url = "https://download.pytorch.org/whl/cu130"
 explicit = true
 
 [[tool.uv.index]]
-name = "pytorch-cu132"
-url = "https://download.pytorch.org/whl/cu132"
+name = "flashinfer-cu130"
+url = "https://flashinfer.ai/whl/cu130"
+explicit = true
+
+[[tool.uv.index]]
+name = "flashinfer"
+url = "https://flashinfer.ai/whl"
 explicit = true
 
 [build-system]
