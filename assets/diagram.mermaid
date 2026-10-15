@@ -1,0 +1,22 @@
+flowchart TD
+    theta["$$ \theta=[\theta_k]_{k=1}^{32} $$"]
+    alpha["$$ \alpha $$"]
+    q["$$ q $$"]
+    beta["$$ \beta $$"]
+    theta_q_p["$$ Q_p(\theta,\alpha,\hat{q}) $$"]
+    q_q_p["$$ Q_p(q,\beta,1) $$"]
+    q_hat["$$ \hat{q}=B_j, B_j \in E8M0 $$"]
+    theta_hat["$$ \hat{\theta}=A_i\hat{q}, A_i \in E2M1 $$"]
+    quantized["$$ MXFP4(\theta) = [ A_{i_k} ]_{k=1}^{32} \cdot B_j $$"]
+
+    theta --> theta_q_p
+    alpha --> theta_q_p
+    theta_q_p --> theta_hat
+
+    q --> q_q_p
+    beta --> q_q_p
+    q_q_p --> q_hat
+    q_hat --> quantized
+
+    q_hat --> theta_q_p
+    theta_hat --> quantized

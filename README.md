@@ -20,14 +20,15 @@ def cdl_topk_forward(
     q: torch.Tensor,
     alpha: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    logits = -alpha * (theta.unsqueeze(-1) - a * q) ** 2
+    a_hat = a * q
+    logits = -alpha * (theta.unsqueeze(-1) - a_hat) ** 2
     topk_values, topk_indices = logits.topk(topk)
     pmf = torch.softmax(topk_values, dim=-1)
 
     groups = pmf.numel() // (num_quantized_params * topk)
     idx = topk_indices.reshape(groups, num_quantized_params, topk)
 
-    mpmf = pmf.new_zeros(groups, a.numel())
+    mpmf = pmf.new_zeros(groups, a_hat.numel())
     mpmf.scatter_add_(1, idx.reshape(groups, -1), pmf.reshape(groups, -1))
     mpmf = mpmf / num_quantized_params
 
@@ -35,7 +36,7 @@ def cdl_topk_forward(
     entropies = -(mpmf * mpmf.clamp_min(tiny).log2()).sum(-1)
     entropies = num_quantized_params * entropies.mean()
 
-    q_d = (pmf * a[topk_indices]).sum(-1)
+    q_d = (pmf * a_hat[topk_indices]).sum(-1)
 
     if relaxed:
         return q_d, entropies
@@ -43,7 +44,7 @@ def cdl_topk_forward(
     with torch.no_grad():
         sub_indices = Categorical(probs=pmf).sample().unsqueeze(-1)
         chosen = topk_indices.gather(dim=-1, index=sub_indices).squeeze(-1)
-        q_p = a[chosen]
+        q_p = a_hat[chosen]
 
     return q_d + (q_p - q_d).detach(), entropies
 ```
