@@ -17,22 +17,36 @@ Thus, the trainable parameters are:
 - Weight: `[64, 9, 32]` stored in FP32, targeted FP4E2M1
 - Scaler: `[64, 9, 1]` stored in FP32, targeted FP8E8M0
 
-Note: this implementation does not train `alpha`.
+Todo: decide whether the sharpness factor should be block-wise or tensor-wise.
 
 ### Forward Pass
 
-Define the CDL function signature as follows:
+```mermaid
+flowchart TD
+    theta["$$ \theta=[\theta_k]_{k=1}^{32} $$"]
+    alpha["$$ \alpha $$"]
+    q["$$ q $$"]
+    beta["$$ \beta $$"]
+    theta_q_p["$$ Q_p(\theta,\alpha,\hat{q}) $$"]
+    q_q_p["$$ Q_p(q,\beta,1) $$"]
+    q_hat["$$ \hat{q}=B_j, B_j \in E8M0 $$"]
+    theta_hat["$$ \hat{\theta}=A_i\hat{q}, A_i \in E2M1 $$"]
+    quantized["$$ MXFP4(\theta) = [ A_{i_k} ]_{k=1}^{32} \cdot B_j $$"]
 
-```python
-# note: `a` is omitted since it remains unchanged
-def cdl(theta: Tensor, q: Tensor) -> Tensor: ...
+    theta --> theta_q_p
+    alpha --> theta_q_p
+    theta_q_p --> theta_hat
+
+    q --> q_q_p
+    beta --> q_q_p
+    q_q_p --> q_hat
+    q_hat --> quantized
+
+    q_hat --> theta_q_p
+    theta_hat --> quantized
 ```
 
-We can compute `s = cdl(scaler, 1)`, getting a tensor in shape `[64, 9, 1]` stored in `uint8` or an equivalent format. Note that `q` is simply 1 because the target is a fixed specification. There is no need to scale it. Then compute `quantized = cdl(weight, s)`, getting a tensor in shape `[64, 9, 32]` stored in E2M1 format or an equivalent format. The MXFP4 quantized weight is ready.
-
-The critical part is the MXFP4 GEMM, which takes the weight in MXFP4 and the activation in any format and outputs a high-precision activation.
-
-We may choose to quantize this activation back to MXFP4.
+The critical part is the MXFP4 GEMM, which takes the weight in MXFP4 and the activation in any format and outputs a high-precision activation, e.g., BF16. We may choose to quantize this activation back to MXFP4 to achieve W4A4.
 
 ### Backward Pass
 
