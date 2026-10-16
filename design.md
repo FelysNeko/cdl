@@ -23,11 +23,90 @@ Todo: decide whether the sharpness factor should be block-wise or tensor-wise.
 
 ![](assets/diagram.png)
 
-The critical part is the MXFP4 GEMM, which takes the weight in MXFP4 and the activation in any format and outputs a high-precision activation, e.g., BF16. We may choose to quantize this activation back to MXFP4 to achieve W4A4.
+```python
+import torch
+from torch.distributions import Categorical
+
+MAPPING = torch.tensor([15, 14, 13, 12, 11, 10, 9, 8, 0, 1, 2, 3, 4, 5, 6, 7], dtype=torch.uint8)
+E8M0 = torch.pow(2.0, torch.arange(256, dtype=torch.float32) - 127.0)
+E2M1 = torch.tensor([-6.0, -4.0, -3.0, -2.0, -1.5, -1.0, -0.5, -0.0, 0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0])
+ONE = torch.ones(())
+
+
+def pack_e2m1(x: torch.Tensor) -> torch.Tensor:
+    codes = MAPPING[x].reshape(x.shape[0], -1)
+    return codes[:, 0::2] | (codes[:, 1::2] << 4)
+
+
+def pack_e8m0(x: torch.Tensor) -> torch.Tensor:
+    m, b = x.shape[0], x.shape[1]
+    rows = (m + 127) // 128 * 128
+    cols = (b + 3) // 4 * 4
+    sf = torch.zeros(rows, cols, dtype=torch.uint8)
+    sf[:m, :b] = x.reshape(m, b).to(torch.uint8)
+    return sf.view(rows // 128, 4, 32, cols // 4, 4).permute(0, 3, 2, 1, 4).reshape(rows, cols)
+
+
+def cdl_topk_forward(
+    theta: torch.Tensor,
+    a: torch.Tensor,
+    q: torch.Tensor,
+    kappa: torch.Tensor,
+    topk: int,
+) -> torch.Tensor:
+    logits = -kappa * ((theta / q).unsqueeze(-1) - a) ** 2
+    topk_values, topk_indices = logits.topk(topk)
+    pmf = torch.softmax(topk_values, dim=-1)
+
+    with torch.no_grad():
+        sub_indices = Categorical(probs=pmf).sample().unsqueeze(-1)
+        chosen = topk_indices.gather(dim=-1, index=sub_indices).squeeze(-1)
+
+    return chosen
+
+
+def mxfp4_cdl_topk_forward(
+    theta: torch.Tensor, q: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    b_j = cdl_topk_forward(q, E8M0, ONE, ONE, 5)
+    a_i = cdl_topk_forward(theta, E2M1, E8M0[b_j], ONE, 5)
+    return a_i, b_j
+```
+
+```python
+from flashinfer import mm_fp4
+
+# [tokens, in_features] = [16, 288]
+activation = torch.rand((16, 9, 32))
+activation_scaler = torch.rand((16, 9, 1))
+a, a_s = mxfp4_cdl_topk_forward(activation, activation_scaler)
+
+# [out_features, in_features] = [64, 288]
+weight = torch.rand((64, 9, 32))
+weight_scaler = torch.rand((64, 9, 1))
+w, w_s = mxfp4_cdl_topk_forward(weight, weight_scaler)
+
+# [16, 288] @ [64, 288].T = [16, 64]
+with torch.cuda.device(1):
+    out = mm_fp4(
+        pack_e2m1(a).cuda(),
+        pack_e2m1(w).cuda().T,
+        pack_e8m0(a_s).cuda(),
+        pack_e8m0(w_s).cuda().T,
+        None,
+        torch.bfloat16,
+        None,
+        block_size=32,
+        use_nvfp4=False,
+        backend="cudnn",
+    )
+
+out
+```
 
 ### Backward Pass
 
-Given that the forward pass is fully differentiable, the backward pass does not need any STE proxy. Gradients are stored in FP32, but we can use stochastic rounding to quantize them and apply MXFP4 GEMM to them and to the saved tensor from the forward pass.
+Gradients are stored in BF16, but we can quantize them and apply MXFP4 GEMM to them and to the saved tensor from the forward pass.
 
 ## Other Formats
 
