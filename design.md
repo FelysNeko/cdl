@@ -10,18 +10,20 @@
 
 ### Parameters
 
-Reshape the weight `[64, 32, 3, 3]` into `[64, 288]` and pad it into `[64, 288]` (no padding required for this case). Then reshape it into `[64, 9, 32]`, where `64` is the output feature dimension and `32` is the block size. This implies `[64, 9, 1]` scalers.
+Reshape the weight `[64, 32, 3, 3]` into `[64, 288]` and pad it to `[64, 288]` (no padding required for this case). Then reshape it into `[64, 9, 32]`, where `64` is the output feature dimension and `32` is the block size. This implies `[64, 9, 1]` scalers.
 
 Thus, the trainable parameters are:
 
-- Weight: `[64, 9, 32]` stored in FP32, targeted FP4E2M1
-- Scaler: `[64, 9, 1]` stored in FP32, targeted FP8E8M0
+- Weight: `[64, 9, 32]` stored in FP32, targeting FP4 E2M1
+- Scaler: `[64, 9, 1]` stored in FP32, targeting FP8 E8M0
 
 Todo: decide whether the sharpness factor should be block-wise or tensor-wise.
 
 ### Forward Pass
 
 ![](assets/diagram.png)
+
+For readability, the code below does not show the backward proxy and entropy computation. It is functionally correct but unoptimized.
 
 ```python
 import torch
@@ -100,13 +102,35 @@ with torch.cuda.device(1):
         use_nvfp4=False,
         backend="cudnn",
     )
-
-out
 ```
 
 ### Backward Pass
 
 Gradients are stored in BF16, but we can quantize them and apply MXFP4 GEMM to them and to the saved tensor from the forward pass.
+
+A quantized matrix multiplication (MM) is formulated by:
+
+```math
+Y = \hat{X}\hat{W}^T
+```
+
+where
+
+```math
+\hat{X} = Q_p(X)
+```
+
+The backward propagation need to compute GEMM which is the bottleneck. We can either quantize the gradient or apply mix precision GEMM of MXFP4 and BF16.
+
+```math
+\frac{\partial L}{\partial \hat{X}} = \frac{\partial L}{\partial Y} \cdot \frac{\partial Y}{\partial \hat{X}} = \underbrace{Q_u(g)}_{MXFP4} \cdot \underbrace{\hat{W}}_{MXFP4}
+```
+
+We use the deterministic quantization as proxy.
+
+```math
+\frac{\partial L}{\partial X} = \frac{\partial L}{\partial \hat{X}} \cdot \frac{\partial Q_p(X)}{\partial X} \approx \frac{\partial L}{\partial \hat{X}} \cdot \underbrace{{2\alpha Var\{Q_p(X)\}}}_{Proxy}
+```
 
 ## Other Formats
 
