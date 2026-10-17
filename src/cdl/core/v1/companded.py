@@ -4,14 +4,14 @@ from cdl.core.format.format import Format
 
 
 def cdl_topk_cpmf(
-    fmt: Format,
     topk: int,
     theta: torch.Tensor,
+    f: Format,
     q: torch.Tensor,
     kappa: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     v = theta / q
-    cont_pos, topk_level, topk_pos = fmt.window(v, topk)
+    cont_pos, topk_level, topk_pos = f.window(v, topk)
     logits = -kappa * (cont_pos.unsqueeze(-1) - topk_pos.float()) ** 2
     topk_pmf = torch.softmax(logits, dim=-1)
     return topk_pmf, topk_level, topk_pos
@@ -19,9 +19,9 @@ def cdl_topk_cpmf(
 
 @torch.no_grad()
 def cdl_topk_q_p(
+    q: torch.Tensor,
     topk_pmf: torch.Tensor,
     topk_level: torch.Tensor,
-    q: torch.Tensor,
 ) -> torch.Tensor:
     topk = topk_pmf.shape[-1]
     cdf = topk_pmf.cumsum(-1)
@@ -33,9 +33,9 @@ def cdl_topk_q_p(
 
 
 def cdl_topk_q_d(
+    q: torch.Tensor,
     topk_pmf: torch.Tensor,
     topk_level: torch.Tensor,
-    q: torch.Tensor,
 ) -> torch.Tensor:
     q_d = (topk_pmf * topk_level).sum(-1)
     return q_d * q
@@ -63,30 +63,30 @@ def cdl_topk_mpmf_entropy(
 
 
 def cdl_topk_forward(
-    fmt: Format,
     relaxed: bool,
     num_quantized_params: int,
     topk: int,
     theta: torch.Tensor,
+    f: Format,
     q: torch.Tensor,
     kappa: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    topk_pmf, topk_level, topk_pos = cdl_topk_cpmf(fmt, topk, theta, q, kappa)
-    entropy = cdl_topk_mpmf_entropy(topk_pmf, topk_pos, fmt.n, num_quantized_params)
-    q_d = cdl_topk_q_d(topk_pmf, topk_level, q)
+    topk_pmf, topk_level, topk_pos = cdl_topk_cpmf(topk, theta, f, q, kappa)
+    entropy = cdl_topk_mpmf_entropy(topk_pmf, topk_pos, f.n, num_quantized_params)
+    q_d = cdl_topk_q_d(q, topk_pmf, topk_level)
 
     if relaxed:
         return q_d, entropy
 
-    q_p = cdl_topk_q_p(topk_pmf, topk_level, q)
+    q_p = cdl_topk_q_p(q, topk_pmf, topk_level)
 
     return q_d + (q_p - q_d).detach(), entropy
 
 
 @torch.no_grad()
 def quant_nearest(
-    fmt: Format,
     theta: torch.Tensor,
+    f: Format,
     q: torch.Tensor,
 ) -> torch.Tensor:
-    return fmt.level[fmt.ordinal(theta / q)] * q
+    return f.level[f.ordinal(theta / q)] * q

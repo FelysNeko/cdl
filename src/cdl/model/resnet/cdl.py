@@ -5,15 +5,15 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from cdl.core.companded import cdl_topk_forward, quant_nearest
 from cdl.core.format.format import Format
 from cdl.core.format.intx import IntX
+from cdl.core.v1.companded import cdl_topk_forward, quant_nearest
 
 
 class CdlQuant(nn.Module, abc.ABC):
     def __init__(
         self,
-        fmt: Format,
+        f: Format,
         q: float,
         num_quantized_params: int,
         relaxed: bool,
@@ -21,12 +21,12 @@ class CdlQuant(nn.Module, abc.ABC):
         kappa: float,
     ):
         super().__init__()
-        if topk > fmt.n:
-            raise ValueError(f"top-{topk} exceeds the {fmt.n} quantization levels")
+        if topk > f.n:
+            raise ValueError(f"top-{topk} exceeds the {f.n} quantization levels")
         self.num_quantized_params = num_quantized_params
         self.relaxed = relaxed
         self.topk = topk
-        self.fmt = fmt
+        self.f = f
         self.q = nn.Parameter(torch.full((), q))
         self.log_kappa = nn.Parameter(torch.full((), math.log(kappa)))
         self.__entropy: torch.Tensor | None = None
@@ -43,14 +43,14 @@ class CdlQuant(nn.Module, abc.ABC):
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         if not self.training:
-            return quant_nearest(self.fmt, input, self.q)
+            return quant_nearest(input, self.f, self.q)
 
         quantized, entropy = cdl_topk_forward(
-            self.fmt,
             self.relaxed,
             self.num_quantized_params,
             self.topk,
             input,
+            self.f,
             self.q,
             self.kappa,
         )
@@ -83,7 +83,7 @@ class CdlQuantForWeight(CdlQuant):
         super().__init__(fmt, q, num_quantized_params, relaxed, fmt.n, kappa)
 
     def scale_q_lr(self, eta: float) -> float:
-        return eta / (self.num_quantized_params * 2 ** (self.fmt.bits - 1)) ** 0.5
+        return eta / (self.num_quantized_params * 2 ** (self.f.bits - 1)) ** 0.5
 
 
 class CdlQuantForActivation(CdlQuant):
@@ -101,11 +101,11 @@ class CdlQuantForActivation(CdlQuant):
 
     def scale_q_lr(self, eta: float) -> float:
         assert self.initialized
-        return eta / (self.num_quantized_params * 2**self.fmt.bits) ** 0.5
+        return eta / (self.num_quantized_params * 2**self.f.bits) ** 0.5
 
     @torch.no_grad()
     def init_q_and_numel(self, act_abs_mean: float, num_quantized_params: int) -> None:
-        self.q.fill_(2 * act_abs_mean / 2 ** ((self.fmt.bits - 1) / 2))
+        self.q.fill_(2 * act_abs_mean / 2 ** ((self.f.bits - 1) / 2))
         self.num_quantized_params = num_quantized_params
         self.initialized = True
 
