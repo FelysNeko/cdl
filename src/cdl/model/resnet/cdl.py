@@ -7,7 +7,7 @@ from torch import nn
 
 from cdl.core.format.format import Format
 from cdl.core.format.intx import IntX
-from cdl.core.v1.companded import cdl_topk_forward, quant_nearest
+from cdl.core.v1 import cdl_topk_forward, quant_nearest
 
 
 class CdlQuant(nn.Module, abc.ABC):
@@ -19,12 +19,14 @@ class CdlQuant(nn.Module, abc.ABC):
         relaxed: bool,
         topk: int,
         kappa: float,
+        companded: bool = True,
     ):
         super().__init__()
         if topk > f.n:
             raise ValueError(f"top-{topk} exceeds the {f.n} quantization levels")
         self.num_quantized_params = num_quantized_params
         self.relaxed = relaxed
+        self.companded = companded
         self.topk = topk
         self.f = f
         self.q = nn.Parameter(torch.full((), q))
@@ -46,13 +48,14 @@ class CdlQuant(nn.Module, abc.ABC):
             return quant_nearest(input, self.f, self.q)
 
         quantized, entropy = cdl_topk_forward(
-            self.relaxed,
-            self.num_quantized_params,
-            self.topk,
             input,
             self.f,
             self.q,
             self.kappa,
+            self.num_quantized_params,
+            self.topk,
+            self.companded,
+            self.relaxed,
         )
 
         if self.__entropy is not None:

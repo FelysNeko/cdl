@@ -8,10 +8,8 @@ class IntX(Format):
         start = 0
         if signed:
             start = -(2 ** (bits - 1))
-        n = 2**bits
-        end = start + n
-        level = torch.arange(start, end)
-        super().__init__(n, bits, level)
+        level = torch.arange(start, start + 2**bits)
+        super().__init__(level)
         self.start = start
 
     def ordinal(self, v: torch.Tensor) -> torch.Tensor:

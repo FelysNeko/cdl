@@ -1,65 +1,65 @@
 import torch
 
-from cdl.core.v1.navie import (
-    cdl_topk_cpmf,
-    cdl_topk_mpmf_entropy,
-    cdl_topk_q_d,
-    cdl_topk_q_p_indices,
-)
+from cdl.core import formulae
+from cdl.core.format.format import Format
 
 
 def cdl_topk_forward(
     theta: torch.Tensor,
-    a: torch.Tensor,
+    f: Format,
     q: torch.Tensor,
     kappa: torch.Tensor,
-    topk: int,
     num_quantized_params: int,
+    topk: int,
+    companded: bool,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    topk_pmf, topk_indices = cdl_topk_cpmf(theta, a, q, kappa, topk)
+    topk_pmf, topk_indices = formulae.topk_cpmf(theta, f, q, kappa, topk, companded)
 
-    entropies = cdl_topk_mpmf_entropy(
+    entropies = formulae.topk_mpmf_entropy(
         topk_pmf,
         topk_indices,
-        a.numel(),
+        f.n,
         num_quantized_params,
     )
 
-    proxy = cdl_topk_q_d(a, q, topk_pmf, topk_indices)
-    chosen = cdl_topk_q_p_indices(topk_pmf, topk_indices)
+    proxy = formulae.topk_q_d(f, q, topk_pmf, topk_indices)
+    chosen = formulae.topk_q_p_indices(topk_pmf, topk_indices)
 
     return chosen, proxy, entropies
 
 
 def cascaded_cdl_topk_forward(
     theta: torch.Tensor,
-    theta_lut: torch.Tensor,
+    theta_format: Format,
     theta_kappa: torch.Tensor,
     theta_topk: int,
     theta_num_quantized_params: int,
     q: torch.Tensor,
-    q_lut: torch.Tensor,
+    q_format: Format,
     q_kappa: torch.Tensor,
     q_topk: int,
     alpha: torch.Tensor,
+    companded: bool,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     q_indices, q_proxy, q_entropies = cdl_topk_forward(
         q,
-        q_lut,
+        q_format,
         torch.ones(()),
         q_kappa,
-        q_topk,
         q.numel(),
+        q_topk,
+        companded,
     )
-    q_hat = q_lut[q_indices]
+    q_hat = q_format.level[q_indices]
     proxied_q_hat = q_proxy + (q_hat - q_proxy).detach()
     theta_indices, theta_proxy, theta_entropies = cdl_topk_forward(
         theta,
-        theta_lut,
+        theta_format,
         proxied_q_hat * alpha,
         theta_kappa,
-        theta_topk,
         theta_num_quantized_params,
+        theta_topk,
+        companded,
     )
 
     return theta_indices, q_indices, theta_proxy, q_entropies, theta_entropies
