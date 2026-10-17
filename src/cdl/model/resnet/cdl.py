@@ -80,7 +80,7 @@ class CdlQuantForWeight(CdlQuant):
         relaxed: bool,
         kappa: float,
     ):
-        fmt = IntX(True, bits)
+        fmt = IntX(True, bits, torch.bfloat16)
         q = 2 * weight.detach().abs().mean().item() / 2 ** ((bits - 1) / 2)
         num_quantized_params = weight.numel()
         super().__init__(fmt, q, num_quantized_params, relaxed, fmt.n, kappa)
@@ -97,7 +97,7 @@ class CdlQuantForActivation(CdlQuant):
         topk: int,
         kappa: float,
     ):
-        fmt = IntX(False, bits)
+        fmt = IntX(False, bits, torch.bfloat16)
         super().__init__(fmt, torch.nan, 0, relaxed, topk, kappa)
         self.initialized = False
         self.bypassing = False

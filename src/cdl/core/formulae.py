@@ -11,10 +11,10 @@ def topk_cpmf_companded(
     topk: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     v = theta / q
-    cont_pos, topk_pos = f.window(v, topk)
-    logits = -kappa * (cont_pos.unsqueeze(-1) - topk_pos.float()) ** 2
+    cont_pos, topk_indices = f.window(v, topk)
+    logits = -kappa * (cont_pos.unsqueeze(-1) - topk_indices.float()) ** 2
     topk_pmf = torch.softmax(logits, dim=-1)
-    return topk_pmf, topk_pos
+    return topk_pmf, topk_indices
 
 
 def topk_cpmf_naive(
@@ -55,7 +55,7 @@ def topk_q_p_indices(
     sub_indices = (cdf <= quantile.unsqueeze(-1)).sum(-1, keepdim=True)
     sub_indices.clamp_(max=topk - 1)
     chosen = topk_indices.gather(dim=-1, index=sub_indices).squeeze(-1)
-    return chosen
+    return chosen.long()
 
 
 @torch.no_grad()
@@ -88,7 +88,9 @@ def topk_mpmf_entropy(
     groups = topk_pmf.numel() // (num_quantized_params * topk)
 
     mpmf = topk_pmf.new_zeros(groups, num_slots)
-    mpmf.scatter_add_(1, topk_indices.reshape(groups, -1), topk_pmf.reshape(groups, -1))
+    mpmf.scatter_add_(
+        1, topk_indices.reshape(groups, -1).long(), topk_pmf.reshape(groups, -1)
+    )
     mpmf = mpmf / num_quantized_params
 
     tiny = torch.finfo(mpmf.dtype).tiny
