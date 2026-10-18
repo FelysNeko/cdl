@@ -6,7 +6,7 @@ import torch
 from torch import nn
 from torch.utils.data import DataLoader
 
-from cdl.model.resnet.cdl import (
+from cdl.model.resnet.v1 import (
     CdlQuant,
     CdlQuantForActivation,
     CdlQuantForWeight,

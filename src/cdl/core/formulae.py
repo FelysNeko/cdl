@@ -11,7 +11,9 @@ def topk_cpmf_companded(
     topk: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     v = theta / q
-    cont_pos, topk_indices = f.window(v, topk)
+    cont_pos, start = f.window(v, topk)
+    offset = torch.arange(topk, device=v.device, dtype=start.dtype)
+    topk_indices = start.unsqueeze(-1) + offset
     logits = -kappa * (cont_pos.unsqueeze(-1) - topk_indices.float()) ** 2
     topk_pmf = torch.softmax(logits, dim=-1)
     return topk_pmf, topk_indices
@@ -89,7 +91,9 @@ def topk_mpmf_entropy(
 
     mpmf = topk_pmf.new_zeros(groups, num_slots)
     mpmf.scatter_add_(
-        1, topk_indices.reshape(groups, -1).long(), topk_pmf.reshape(groups, -1)
+        1,
+        topk_indices.reshape(groups, -1).long(),
+        topk_pmf.reshape(groups, -1),
     )
     mpmf = mpmf / num_quantized_params
 

@@ -30,17 +30,19 @@ class Format(nn.Module, abc.ABC):
         return (weight * self.level[index]).sum(-1) / weight.sum(-1)
 
     def window(self, v: torch.Tensor, topk: int) -> tuple[torch.Tensor, torch.Tensor]:
+        assert 0 < topk <= self.n
+
         key = self.ordinal(v)
+        assert self.n - 1 <= torch.iinfo(key.dtype).max
+
         with torch.no_grad():
             start = torch.where(key < topk // 2, 0, key - topk // 2).clamp_(
                 max=self.n - topk
             )
-            offset = torch.arange(topk, device=v.device, dtype=start.dtype)
-            topk_indices = start.unsqueeze(-1) + offset
 
         index = key.long()
         key_level = self.level[index]
         left = torch.where(key == 0, 0, key - 1).long()
         gap = torch.where(v >= key_level, self.gap[index], self.gap[left])
         cont_pos = index.float() + (v - key_level) / gap
-        return cont_pos, topk_indices
+        return cont_pos, start
