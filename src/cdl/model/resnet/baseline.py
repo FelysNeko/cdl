@@ -1,28 +1,49 @@
-import flashinfer
 import torch
 import torch.nn.functional as F
-from flashinfer import SfLayout
+from flashinfer.quantization import fp4_quantization
 from torch import nn
+
+
+@torch.library.custom_op("cdl::nvfp4_qdq", mutates_args=())
+def nvfp4_qdq(
+    x: torch.Tensor, global_scale: torch.Tensor, global_scale_inv: torch.Tensor
+) -> torch.Tensor:
+    major, minor = torch.cuda.get_device_capability(x.device)
+    quant = fp4_quantization.get_fp4_quantization_module(f"{major}{minor}")
+    packed, sf = quant.fp4_quantize_sm100(x, global_scale, is_sf_swizzled_layout=False)
+    out = torch.empty_like(x)
+    fp4_quantization.get_fp4_kv_dequantization_module().nvfp4_kv_dequant(
+        packed, sf.reshape(x.shape[0], -1), global_scale_inv, out
+    )
+    return out
+
+
+@nvfp4_qdq.register_fake
+def _(
+    x: torch.Tensor, global_scale: torch.Tensor, global_scale_inv: torch.Tensor
+) -> torch.Tensor:
+    return x.new_empty(x.shape, dtype=torch.bfloat16)
 
 
 def quantize_dequantize(theta: torch.Tensor) -> torch.Tensor:
     k = theta.shape[-1]
-    x = theta.reshape(-1, k).bfloat16()
-    r = -k % 16
-    if r:
-        x = F.pad(x, (0, r))
+    with torch.no_grad():
+        x = theta.reshape(-1, k).bfloat16()
+        r = -k % 16
+        if r:
+            x = F.pad(x, (0, r))
 
-    global_scale = flashinfer.make_nvfp4_global_scale(x, per_token_activation=False)
-    packed, sf = flashinfer.nvfp4_quantize(
-        x, global_scale, sfLayout=SfLayout.layout_linear
-    )
-    out = flashinfer.nvfp4_kv_dequantize(
-        packed, sf, (1.0 / global_scale).reshape(1).float()
-    )
+        amax = x.float().abs().amax()
+        global_scale = torch.where(
+            amax > 0,
+            amax.new_full((), 448.0 * 6.0) / amax,
+            amax.new_full((), torch.finfo(torch.float32).max),
+        ).reshape(1)
+        out = nvfp4_qdq(x, global_scale, (1.0 / global_scale).float())
 
     out = out.reshape(*theta.shape[:-1], -1)
-    dequantize_theta = out[..., :k].to(theta.dtype)
-    return theta + (dequantize_theta - theta).detach()
+    dequantized_theta = out[..., :k].to(theta.dtype)
+    return theta + (dequantized_theta - theta).detach()
 
 
 class BaselineQuantForActivation(nn.Module):
