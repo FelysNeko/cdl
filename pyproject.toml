@@ -8,6 +8,10 @@ dependencies = [
     "omegaconf>=2.3.1",
     "tensorboard>=2.21.0",
     "tqdm>=4.70.1",
+]
+
+[project.optional-dependencies]
+gpu = [
     "torch==2.12.1",
     "torchvision==0.27.1",
     "flashinfer-python==0.7.1",
@@ -15,19 +19,37 @@ dependencies = [
     "flashinfer-jit-cache==0.7.1+cu130",
     "flashinfer-jit-cache-sm120f==0.7.1+cu130",
 ]
+cpu = [
+    "torch==2.12.1",
+    "torchvision==0.27.1",
+]
+
+[tool.uv]
+conflicts = [[{ extra = "cpu" }, { extra = "gpu" }]]
+
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cpu", extra = "cpu" },
+    { index = "pytorch-cu130", extra = "gpu" },
+]
+torchvision = [
+    { index = "pytorch-cpu", extra = "cpu" },
+    { index = "pytorch-cu130", extra = "gpu" },
+]
+flashinfer-python = [{ index = "flashinfer" }]
+flashinfer-cubin = [{ index = "flashinfer" }]
+flashinfer-jit-cache = [{ index = "flashinfer-cu130" }]
+flashinfer-jit-cache-sm120f = [{ index = "flashinfer-cu130" }]
 
 [[tool.uv.dependency-metadata]]
 name = "flashinfer-jit-cache"
 version = "0.7.1+cu130"
 requires-dist = []
 
-[tool.uv.sources]
-torch = [{ index = "pytorch-cu130" }]
-torchvision = [{ index = "pytorch-cu130" }]
-flashinfer-python = [{ index = "flashinfer" }]
-flashinfer-cubin = [{ index = "flashinfer" }]
-flashinfer-jit-cache = [{ index = "flashinfer-cu130" }]
-flashinfer-jit-cache-sm120f = [{ index = "flashinfer-cu130" }]
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
 
 [[tool.uv.index]]
 name = "pytorch-cu130"
