@@ -52,10 +52,10 @@ class CdlQuant(nn.Module, abc.ABC):
             self.f,
             self.q,
             self.kappa,
-            self.num_quantized_params,
             self.topk,
             self.companded,
             self.relaxed,
+            self.num_quantized_params,
         )
 
         if self.__entropy is not None:

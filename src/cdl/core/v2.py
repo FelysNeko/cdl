@@ -9,15 +9,14 @@ def cdl_topk_forward(
     f: Format,
     q: torch.Tensor,
     kappa: torch.Tensor,
-    num_quantized_params: int,
     topk: int,
     companded: bool,
-    requires_entropy: bool,
+    num_quantized_params: int | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
     topk_pmf, topk_indices = formulae.topk_cpmf(theta, f, q, kappa, topk, companded)
 
     entropies = None
-    if requires_entropy:
+    if num_quantized_params is not None:
         entropies = formulae.topk_mpmf_entropy(
             topk_pmf,
             topk_indices,
@@ -25,7 +24,7 @@ def cdl_topk_forward(
             num_quantized_params,
         )
 
-    proxy = formulae.topk_q_d(f, q, topk_pmf, topk_indices)
+    proxy = formulae.topk_q_d(f, q, topk_pmf, topk_indices, companded)
     chosen = formulae.topk_q_p_indices(topk_pmf, topk_indices)
 
     return chosen, proxy, entropies
@@ -36,15 +35,14 @@ def cascaded_cdl_topk_forward(
     theta_format: Format,
     theta_kappa: torch.Tensor,
     theta_topk: int,
-    theta_num_quantized_params: int,
-    theta_requires_entropy: bool,
     q: torch.Tensor,
     q_format: Format,
     q_kappa: torch.Tensor,
     q_topk: int,
-    q_requires_entropy: bool,
     alpha: torch.Tensor,
     companded: bool,
+    q_num_quantized_params: int | None = None,
+    theta_num_quantized_params: int | None = None,
 ) -> tuple[
     torch.Tensor,
     torch.Tensor,
@@ -57,10 +55,9 @@ def cascaded_cdl_topk_forward(
         q_format,
         torch.ones(()),
         q_kappa,
-        q.numel(),
         q_topk,
         companded,
-        q_requires_entropy,
+        q_num_quantized_params,
     )
     q_hat = q_format.level[q_indices]
     proxied_q_hat = q_proxy + (q_hat - q_proxy).detach()
@@ -69,10 +66,9 @@ def cascaded_cdl_topk_forward(
         theta_format,
         proxied_q_hat * alpha,
         theta_kappa,
-        theta_num_quantized_params,
         theta_topk,
         companded,
-        theta_requires_entropy,
+        theta_num_quantized_params,
     )
 
     return theta_indices, q_indices, theta_proxy, q_entropies, theta_entropies

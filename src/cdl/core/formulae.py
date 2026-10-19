@@ -19,7 +19,7 @@ def topk_cpmf_companded(
     return topk_pmf, topk_indices
 
 
-def topk_cpmf_naive(
+def topk_cpmf_value(
     theta: torch.Tensor,
     a: torch.Tensor,
     q: torch.Tensor,
@@ -43,7 +43,7 @@ def topk_cpmf(
     if companded:
         return topk_cpmf_companded(theta, f, q, kappa, topk)
     else:
-        return topk_cpmf_naive(theta, f.level, q, kappa, topk)
+        return topk_cpmf_value(theta, f.level, q, kappa, topk)
 
 
 @torch.no_grad()
@@ -71,13 +71,36 @@ def topk_q_p(
     return f.level[chosen] * q
 
 
-def topk_q_d(
+def topk_q_d_companded(
     f: Format,
     q: torch.Tensor,
     topk_pmf: torch.Tensor,
     topk_indices: torch.Tensor,
 ) -> torch.Tensor:
     return f.expectation(topk_pmf, topk_indices) * q
+
+
+def topk_q_d_value(
+    a: torch.Tensor,
+    q: torch.Tensor,
+    topk_pmf: torch.Tensor,
+    topk_indices: torch.Tensor,
+) -> torch.Tensor:
+    index = topk_indices.long()
+    return (topk_pmf * a[index]).sum(-1) * q
+
+
+def topk_q_d(
+    f: Format,
+    q: torch.Tensor,
+    topk_pmf: torch.Tensor,
+    topk_indices: torch.Tensor,
+    companded: bool,
+) -> torch.Tensor:
+    if companded:
+        return topk_q_d_companded(f, q, topk_pmf, topk_indices)
+    else:
+        return topk_q_d_value(f.level, q, topk_pmf, topk_indices)
 
 
 def topk_mpmf_entropy(
