@@ -71,16 +71,7 @@ def topk_q_p(
     return f.level[chosen] * q
 
 
-def topk_q_d_companded(
-    f: Format,
-    q: torch.Tensor,
-    topk_pmf: torch.Tensor,
-    topk_indices: torch.Tensor,
-) -> torch.Tensor:
-    return f.expectation(topk_pmf, topk_indices) * q
-
-
-def topk_q_d_value(
+def topk_q_d(
     a: torch.Tensor,
     q: torch.Tensor,
     topk_pmf: torch.Tensor,
@@ -88,19 +79,6 @@ def topk_q_d_value(
 ) -> torch.Tensor:
     index = topk_indices.long()
     return (topk_pmf * a[index]).sum(-1) * q
-
-
-def topk_q_d(
-    f: Format,
-    q: torch.Tensor,
-    topk_pmf: torch.Tensor,
-    topk_indices: torch.Tensor,
-    companded: bool,
-) -> torch.Tensor:
-    if companded:
-        return topk_q_d_companded(f, q, topk_pmf, topk_indices)
-    else:
-        return topk_q_d_value(f.level, q, topk_pmf, topk_indices)
 
 
 def topk_mpmf_entropy(

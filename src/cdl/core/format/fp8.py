@@ -3,7 +3,7 @@ import torch
 from cdl.core.format.format import Format
 
 
-class FP8E4M3(Format):
+class E4M3(Format):
     def __init__(self, dtype: torch.dtype) -> None:
         key = torch.arange(254)
         u = torch.where(key >= 127, key - 127, 254 - key).to(torch.uint8)
@@ -15,7 +15,18 @@ class FP8E4M3(Format):
         return torch.where(u < 128, u + 127, 254 - u).clamp_(0, 253)
 
 
-class FP8E8M0(Format):
+class UE4M3ExcludeZero(Format):
+    def __init__(self, dtype: torch.dtype) -> None:
+        key = torch.arange(1, 127, dtype=torch.uint8)
+        level = key.view(torch.float8_e4m3fn).to(dtype)
+        super().__init__(level)
+
+    def ordinal(self, v: torch.Tensor) -> torch.Tensor:
+        u = v.clamp(2.0**-9, 448.0).to(torch.float8_e4m3fn).view(torch.uint8)
+        return (u - 1).clamp_(0, 125)
+
+
+class E8M0(Format):
     def __init__(self, dtype: torch.dtype) -> None:
         key = torch.arange(255)
         level = key.to(torch.uint8).view(torch.float8_e8m0fnu).to(dtype)

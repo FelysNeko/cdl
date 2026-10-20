@@ -24,11 +24,6 @@ class Format(nn.Module, abc.ABC):
     @abc.abstractmethod
     def ordinal(self, v: torch.Tensor) -> torch.Tensor: ...
 
-    def expectation(self, pmf: torch.Tensor, indices: torch.Tensor) -> torch.Tensor:
-        index = indices.long()
-        weight = pmf * self.gap[index]
-        return (weight * self.level[index]).sum(-1) / weight.sum(-1)
-
     def window(self, v: torch.Tensor, topk: int) -> tuple[torch.Tensor, torch.Tensor]:
         assert 0 < topk <= self.n
 

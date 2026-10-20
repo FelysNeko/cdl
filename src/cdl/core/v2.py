@@ -24,7 +24,7 @@ def cdl_topk_forward(
             num_quantized_params,
         )
 
-    proxy = formulae.topk_q_d(f, q, topk_pmf, topk_indices, companded)
+    proxy = formulae.topk_q_d(f, q, topk_pmf, topk_indices)
     chosen = formulae.topk_q_p_indices(topk_pmf, topk_indices)
 
     return chosen, proxy, entropies
