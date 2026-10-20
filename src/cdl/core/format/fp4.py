@@ -17,6 +17,10 @@ class E2M1(Format):
         m = (v.abs().clamp(max=6.0).unsqueeze(-1) > self.mid).sum(-1, dtype=torch.uint8)
         return torch.where(torch.signbit(v), 7 - m, m + 8)
 
+    def pack(self, i: torch.Tensor) -> torch.Tensor:
+        code = torch.where(i < 8, 15 - i, i - 8).to(torch.uint8)
+        return code[..., 0::2] | (code[..., 1::2] << 4)
+
 
 class UE2M1(Format):
     def __init__(self, dtype: torch.dtype) -> None:
@@ -29,3 +33,7 @@ class UE2M1(Format):
         v = v.clamp(0.0, 6.0)
         m = (v.unsqueeze(-1) > self.mid).sum(-1, dtype=torch.uint8)
         return m
+
+    def pack(self, i: torch.Tensor) -> torch.Tensor:
+        code = i.to(torch.uint8)
+        return code[..., 0::2] | (code[..., 1::2] << 4)

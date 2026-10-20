@@ -15,3 +15,6 @@ class IntX(Format):
     def ordinal(self, v: torch.Tensor) -> torch.Tensor:
         r = (v.round() - self.start).clamp(0, self.n - 1)
         return r.to(torch.uint8)
+
+    def pack(self, i: torch.Tensor) -> torch.Tensor:
+        return self.level[i.long()]

@@ -14,6 +14,10 @@ class E4M3(Format):
         u = v.clamp(-448.0, 448.0).to(torch.float8_e4m3fn).view(torch.uint8)
         return torch.where(u < 128, u + 127, 254 - u).clamp_(0, 253)
 
+    def pack(self, i: torch.Tensor) -> torch.Tensor:
+        u = torch.where(i < 127, 254 - i, i - 127)
+        return u.to(torch.uint8)
+
 
 class UE4M3ExcludeZero(Format):
     def __init__(self, dtype: torch.dtype) -> None:
@@ -25,6 +29,9 @@ class UE4M3ExcludeZero(Format):
         u = v.clamp(2.0**-9, 448.0).to(torch.float8_e4m3fn).view(torch.uint8)
         return (u - 1).clamp_(0, 125)
 
+    def pack(self, i: torch.Tensor) -> torch.Tensor:
+        return (i + 1).to(torch.uint8)
+
 
 class E8M0(Format):
     def __init__(self, dtype: torch.dtype) -> None:
@@ -35,3 +42,6 @@ class E8M0(Format):
     def ordinal(self, v: torch.Tensor) -> torch.Tensor:
         u = v.clamp(2.0**-127, 2.0**127).to(torch.float8_e8m0fnu).view(torch.uint8)
         return u.clamp_(0, 254)
+
+    def pack(self, i: torch.Tensor) -> torch.Tensor:
+        return i.to(torch.uint8)

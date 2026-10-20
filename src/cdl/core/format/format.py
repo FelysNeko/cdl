@@ -24,6 +24,9 @@ class Format(nn.Module, abc.ABC):
     @abc.abstractmethod
     def ordinal(self, v: torch.Tensor) -> torch.Tensor: ...
 
+    @abc.abstractmethod
+    def pack(self, i: torch.Tensor) -> torch.Tensor: ...
+
     def window(self, v: torch.Tensor, topk: int) -> tuple[torch.Tensor, torch.Tensor]:
         assert 0 < topk <= self.n
 
