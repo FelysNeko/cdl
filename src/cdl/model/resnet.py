@@ -1,14 +1,10 @@
 import torch
 from torch import nn
 
-from cdl.model.components.quant.identity import IdentityQuant
-
 
 class BasicBlock(nn.Module):
     def __init__(self, in_planes: int, planes: int, stride: int) -> None:
         super().__init__()
-        self.q_in = IdentityQuant()
-        self.q_mid = IdentityQuant()
         self.conv1 = nn.Conv2d(
             in_planes, planes, 3, stride=stride, padding=1, bias=False
         )
@@ -26,9 +22,7 @@ class BasicBlock(nn.Module):
         self.relu = nn.ReLU(inplace=True)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.q_in(x)
         out = self.relu(self.bn1(self.conv1(x)))
-        out = self.q_mid(out)
         return self.relu(self.bn2(self.conv2(out)) + self.shortcut(x))
 
 
@@ -42,7 +36,6 @@ class ResNet(nn.Module):
         self.layer1 = self.make_layer(16, num_blocks[0], 1)
         self.layer2 = self.make_layer(32, num_blocks[1], 2)
         self.layer3 = self.make_layer(64, num_blocks[2], 2)
-        self.q_out = IdentityQuant()
         self.avgpool = nn.AdaptiveAvgPool2d(1)
         self.fc = nn.Linear(64, num_classes)
 
@@ -57,5 +50,4 @@ class ResNet(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.relu(self.bn(self.stem(x)))
         x = self.layer3(self.layer2(self.layer1(x)))
-        x = self.q_out(x)
         return self.fc(self.avgpool(x).flatten(1))
