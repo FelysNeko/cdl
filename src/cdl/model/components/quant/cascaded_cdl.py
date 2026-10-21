@@ -6,8 +6,7 @@ import torch
 from torch import nn
 
 from cdl.core.format.format import Format
-from cdl.core.v1 import quant_nearest
-from cdl.core.v2 import cascaded_cdl_topk_forward
+from cdl.core.v2 import cascaded_cdl_topk_forward, cascaded_nearest_round
 from cdl.model.mixin.batchnorm_batch_stats import BatchNormBatchStatsMixin
 
 
@@ -80,8 +79,13 @@ class CascadedCdlQuant(nn.Module, abc.ABC):
         self, x: torch.Tensor
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         if not self.training:
-            q_hat = quant_nearest(self.q, self.q_format, self.q.new_ones(()))
-            return quant_nearest(x, self.theta_format, q_hat * self.alpha).to(x.dtype)
+            return cascaded_nearest_round(
+                x,
+                self.theta_format,
+                self.q,
+                self.q_format,
+                self.alpha,
+            ).to(x.dtype)
 
         theta_indices, q_indices, theta_proxy, _, _ = cascaded_cdl_topk_forward(
             x,

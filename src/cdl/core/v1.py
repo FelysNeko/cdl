@@ -36,9 +36,9 @@ def cdl_topk_forward(
 
 
 @torch.no_grad()
-def quant_nearest(
+def nearest_round(
     theta: torch.Tensor,
     f: Format,
     q: torch.Tensor,
 ) -> torch.Tensor:
-    return f.level[f.ordinal(theta / q).long()] * q
+    return f.quantize(theta, q)

@@ -6,7 +6,7 @@ import torch
 from torch import nn
 
 from cdl.core.format.format import Format
-from cdl.core.v1 import cdl_topk_forward, quant_nearest
+from cdl.core.v1 import cdl_topk_forward, nearest_round
 from cdl.model.mixin.batchnorm_batch_stats import BatchNormBatchStatsMixin
 
 
@@ -61,7 +61,7 @@ class CdlQuant(nn.Module, abc.ABC):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if not self.training:
-            return quant_nearest(x, self.f, self.q).to(x.dtype)
+            return nearest_round(x, self.f, self.q).to(x.dtype)
 
         quantized, entropy = cdl_topk_forward(
             x,

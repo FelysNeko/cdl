@@ -27,6 +27,10 @@ class Format(nn.Module, abc.ABC):
     @abc.abstractmethod
     def pack(self, i: torch.Tensor) -> torch.Tensor: ...
 
+    def quantize(self, theta: torch.Tensor, q: torch.Tensor) -> torch.Tensor:
+        i = self.ordinal(theta / q)
+        return self.level[i.long()] * q
+
     def window(self, v: torch.Tensor, topk: int) -> tuple[torch.Tensor, torch.Tensor]:
         assert 0 < topk <= self.n
 

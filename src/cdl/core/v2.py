@@ -72,3 +72,15 @@ def cascaded_cdl_topk_forward(
     )
 
     return theta_indices, q_indices, theta_proxy, q_entropies, theta_entropies
+
+
+@torch.no_grad()
+def cascaded_nearest_round(
+    theta: torch.Tensor,
+    theta_format: Format,
+    q: torch.Tensor,
+    q_format: Format,
+    alpha: torch.Tensor,
+) -> torch.Tensor:
+    q_hat = q_format.quantize(q, q.new_ones(()))
+    return theta_format.quantize(theta, q_hat * alpha)
