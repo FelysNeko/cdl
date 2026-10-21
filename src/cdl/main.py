@@ -12,12 +12,22 @@ from pathlib import Path
 import torch
 import tqdm
 from omegaconf import OmegaConf
+from torch import nn
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from torchvision import datasets, transforms
 
 from cdl.config import Config, ModelConfig, load_config
-from cdl.model.resnet.v1 import QResNet
+from cdl.core.format.intx import IntX
+from cdl.model.components.conv2d.native import NativeQuantizedConv2d
+from cdl.model.components.linear.native import NativeQuantizedLinear
+from cdl.model.components.quant.cdl import (
+    CdlQuantForActivation,
+    CdlQuantForWeight,
+    CdlQuantMixin,
+)
+from cdl.model.components.quant.identity import IdentityQuant
+from cdl.model.resnet import ResNet
 from cdl.trainer import Trainer
 
 MEAN = (0.5071, 0.4865, 0.4409)
@@ -56,21 +66,101 @@ def get_loaders(
     return train_loader, test_loader, num_calib_batches
 
 
+class CdlResNet(ResNet, CdlQuantMixin):
+    """A plain ResNet with its reusable components replaced by CDL ones."""
+
+    def __init__(
+        self,
+        num_blocks: list[int],
+        num_classes: int,
+        cfg: ModelConfig,
+    ) -> None:
+        super().__init__(num_blocks, num_classes)
+        self._replace_with_cdl_components(cfg)
+
+    @torch.no_grad()
+    def _replace_with_cdl_components(self, cfg: ModelConfig) -> None:
+        # Take a snapshot: modules are replaced while walking the tree.
+        for name, module in list(self.named_modules()):
+            if not name:
+                continue
+
+            parent = (
+                self
+                if "." not in name
+                else self.get_submodule(name.rsplit(".", 1)[0])
+            )
+            child_name = name.rsplit(".", 1)[-1]
+
+            if isinstance(module, nn.Conv2d):
+                bits = cfg.bits_edge if name == "stem" else cfg.bits
+                quant = CdlQuantForWeight(
+                    IntX(True, bits, torch.bfloat16),
+                    module.weight,
+                    cfg.relaxed,
+                    cfg.kappa,
+                )
+                replacement = NativeQuantizedConv2d(
+                    module.in_channels,
+                    module.out_channels,
+                    module.kernel_size,
+                    stride=module.stride,
+                    padding=module.padding,
+                    dilation=module.dilation,
+                    groups=module.groups,
+                    bias=module.bias is not None,
+                    device=module.weight.device,
+                    dtype=module.weight.dtype,
+                    quant=quant,
+                )
+                replacement.weight.copy_(module.weight)
+                if module.bias is not None:
+                    assert replacement.bias is not None
+                    replacement.bias.copy_(module.bias)
+                setattr(parent, child_name, replacement)
+
+            elif isinstance(module, nn.Linear):
+                bits = cfg.bits_edge if name == "fc" else cfg.bits
+                quant = CdlQuantForWeight(
+                    IntX(True, bits, torch.bfloat16),
+                    module.weight,
+                    cfg.relaxed,
+                    cfg.kappa,
+                )
+                replacement = NativeQuantizedLinear(
+                    module.in_features,
+                    module.out_features,
+                    bias=module.bias is not None,
+                    device=module.weight.device,
+                    dtype=module.weight.dtype,
+                    quant=quant,
+                )
+                replacement.weight.copy_(module.weight)
+                if module.bias is not None:
+                    assert replacement.bias is not None
+                    replacement.bias.copy_(module.bias)
+                setattr(parent, child_name, replacement)
+
+            elif isinstance(module, IdentityQuant):
+                setattr(
+                    parent,
+                    child_name,
+                    CdlQuantForActivation(
+                        IntX(False, cfg.bits, torch.bfloat16),
+                        cfg.relaxed,
+                        cfg.topk_act,
+                        cfg.kappa,
+                    ),
+                )
+
+
 def get_q_resnet(
     cfg: ModelConfig,
     num_classes: int,
-) -> QResNet:
+) -> CdlResNet:
     n = (cfg.layers - 2) // 6
     num_blocks = [n, n, n]
-    q_resnet = QResNet(
-        num_blocks,
-        num_classes,
-        cfg.relaxed,
-        cfg.bits,
-        cfg.bits_edge,
-        cfg.topk_act,
-        cfg.kappa,
-    )
+    q_resnet = CdlResNet(num_blocks, num_classes, cfg)
     num_params = sum(p.numel() for p in q_resnet.parameters())
     logger.info(
         f"built ResNet-{cfg.layers} with blocks {num_blocks} and {num_params} parameters"
@@ -238,11 +328,11 @@ def training_pipeline() -> None:
     )
 
     trainer = Trainer(cifar_resnet, device)
-    trainer.init_act_q_pass(calibration_batches)
-    for key, value in trainer.quant_stats().items():
+    cifar_resnet.init_act_q_pass(calibration_batches)
+    for key, value in cifar_resnet.quant_stats().items():
         logger.info(f"{key} = {value}")
 
-    param_groups = trainer.get_param_groups(
+    param_groups = cifar_resnet.get_param_groups(
         cfg.train.learning_rate,
         cfg.train.weight_decay,
         cfg.train.freeze_kappa,
@@ -260,7 +350,10 @@ def training_pipeline() -> None:
             args.resume, trainer, optimizer, lr_scheduler, device
         )
 
-    n_weight, n_activation = trainer.get_quant_counts()
+    if cfg.train.lam != 0.0 or cfg.train.gam != 0.0:
+        cifar_resnet.enable_entropy_computation()
+
+    n_weight, n_activation = cifar_resnet.get_quant_counts()
     logger.info(f"quantized {n_weight} weight elements")
     logger.info(f"quantized {n_activation} activation elements per sample")
 
@@ -317,7 +410,7 @@ def training_pipeline() -> None:
                     "train/grad_norm", total_grad_norm(optimizer), global_step
                 )
 
-                for key, value in trainer.quant_stats().items():
+                for key, value in cifar_resnet.quant_stats().items():
                     writer.add_scalar(f"quant/{key}", value, global_step)
 
                 if device.type == "cuda":
@@ -339,7 +432,7 @@ def training_pipeline() -> None:
                     torch.cuda.reset_peak_memory_stats()
 
             optimizer.step()
-            trainer.floor_quant(1e-8)
+            cifar_resnet.floor_quant(1e-8)
             global_step += 1
 
         lr_scheduler.step()

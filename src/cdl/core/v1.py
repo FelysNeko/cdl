@@ -25,7 +25,7 @@ def cdl_topk_forward(
             num_quantized_params,
         )
 
-    q_d = formulae.topk_q_d(f, q, topk_pmf, topk_indices)
+    q_d = formulae.topk_q_d(f.level, q, topk_pmf, topk_indices)
 
     if relaxed:
         return q_d, entropies
