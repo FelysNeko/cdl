@@ -86,9 +86,7 @@ class CdlResNet(ResNet, CdlQuantMixin):
                 continue
 
             parent = (
-                self
-                if "." not in name
-                else self.get_submodule(name.rsplit(".", 1)[0])
+                self if "." not in name else self.get_submodule(name.rsplit(".", 1)[0])
             )
             child_name = name.rsplit(".", 1)[-1]
 
