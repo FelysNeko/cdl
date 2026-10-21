@@ -1,7 +1,7 @@
 import torch
 
 from cdl.core import formulae
-from cdl.core.format.format import Format
+from cdl.api.format import Format
 
 
 def cdl_topk_forward(

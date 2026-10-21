@@ -5,7 +5,7 @@ from collections.abc import Iterable
 import torch
 from torch import nn
 
-from cdl.core.format.format import Format
+from cdl.api.format import Format
 from cdl.core.v1 import cdl_topk_forward, nearest_round
 from cdl.model.mixin.batchnorm_batch_stats import BatchNormBatchStatsMixin
 

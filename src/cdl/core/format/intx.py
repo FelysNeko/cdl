@@ -1,6 +1,6 @@
 import torch
 
-from cdl.core.format.format import Format
+from cdl.api.format import Format
 
 
 class IntX(Format):

@@ -26,7 +26,6 @@ from cdl.model.components.quant.cdl import (
     CdlQuantForWeight,
     CdlQuantMixin,
 )
-from cdl.model.components.quant.identity import IdentityQuant
 from cdl.model.resnet import ResNet
 from cdl.trainer import Trainer
 
@@ -92,11 +91,21 @@ class CdlResNet(ResNet, CdlQuantMixin):
 
             if isinstance(module, nn.Conv2d):
                 bits = cfg.bits_edge if name == "stem" else cfg.bits
-                quant = CdlQuantForWeight(
+                weight_quant = CdlQuantForWeight(
                     IntX(True, bits, torch.bfloat16),
                     module.weight,
                     cfg.relaxed,
                     cfg.kappa,
+                )
+                activation_quant = (
+                    nn.Identity()
+                    if name == "stem"
+                    else CdlQuantForActivation(
+                        IntX(False, cfg.bits, torch.bfloat16),
+                        cfg.relaxed,
+                        cfg.topk_act,
+                        cfg.kappa,
+                    )
                 )
                 replacement = NativeQuantizedConv2d(
                     module.in_channels,
@@ -109,7 +118,8 @@ class CdlResNet(ResNet, CdlQuantMixin):
                     bias=module.bias is not None,
                     device=module.weight.device,
                     dtype=module.weight.dtype,
-                    quant=quant,
+                    activation_quant=activation_quant,
+                    weight_quant=weight_quant,
                 )
                 replacement.weight.copy_(module.weight)
                 if module.bias is not None:
@@ -119,10 +129,16 @@ class CdlResNet(ResNet, CdlQuantMixin):
 
             elif isinstance(module, nn.Linear):
                 bits = cfg.bits_edge if name == "fc" else cfg.bits
-                quant = CdlQuantForWeight(
+                weight_quant = CdlQuantForWeight(
                     IntX(True, bits, torch.bfloat16),
                     module.weight,
                     cfg.relaxed,
+                    cfg.kappa,
+                )
+                activation_quant = CdlQuantForActivation(
+                    IntX(False, cfg.bits, torch.bfloat16),
+                    cfg.relaxed,
+                    cfg.topk_act,
                     cfg.kappa,
                 )
                 replacement = NativeQuantizedLinear(
@@ -131,25 +147,14 @@ class CdlResNet(ResNet, CdlQuantMixin):
                     bias=module.bias is not None,
                     device=module.weight.device,
                     dtype=module.weight.dtype,
-                    quant=quant,
+                    activation_quant=activation_quant,
+                    weight_quant=weight_quant,
                 )
                 replacement.weight.copy_(module.weight)
                 if module.bias is not None:
                     assert replacement.bias is not None
                     replacement.bias.copy_(module.bias)
                 setattr(parent, child_name, replacement)
-
-            elif isinstance(module, IdentityQuant):
-                setattr(
-                    parent,
-                    child_name,
-                    CdlQuantForActivation(
-                        IntX(False, cfg.bits, torch.bfloat16),
-                        cfg.relaxed,
-                        cfg.topk_act,
-                        cfg.kappa,
-                    ),
-                )
 
 
 def get_q_resnet(
