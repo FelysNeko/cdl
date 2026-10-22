@@ -4,6 +4,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 
 import torch
+import torch.nn.functional as F
 from torch import nn
 
 from cdl.api.format import Format
@@ -11,6 +12,25 @@ from cdl.api.quant import Quant
 from cdl.api.tensor import QuantizedTensor
 from cdl.core.v2 import cascaded_cdl_topk_forward, cascaded_nearest_round
 from cdl.model.mixin.batchnorm_batch_stats import BatchNormBatchStatsMixin
+
+
+def group_tensor_into_blocks(
+    theta: torch.Tensor, block_size: int
+) -> tuple[torch.Tensor, int]:
+    out_dim = theta.shape[0]
+    flat_weight = theta.reshape(out_dim, -1)
+    flat_dim = flat_weight.shape[-1]
+
+    pad_size = 0
+    extra = flat_dim % block_size
+    if extra:
+        pad_size = block_size - extra
+        flat_weight = F.pad(flat_weight, (0, pad_size))
+        flat_dim += pad_size
+
+    num_blocks = flat_dim // block_size
+    blocked_weight = flat_weight.reshape(out_dim, num_blocks, block_size)
+    return blocked_weight, pad_size
 
 
 @dataclass
@@ -34,12 +54,13 @@ class CascadedCdlBypassQuantizedTensor(QuantizedTensor):
 @dataclass
 class CascadedCdlQuantizedTensor(QuantizedTensor):
     theta_indices: torch.Tensor
-    q_indices: torch.Tensor
-    alpha: torch.Tensor
-    grad_proxy: torch.Tensor
     theta_format: Format
+    q_indices: torch.Tensor
     q_format: Format
+    alpha: torch.Tensor
+    grad_proxy: torch.Tensor | None
     dtype: torch.dtype
+    k: int
 
     def fp4(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         raise NotImplementedError(
@@ -56,8 +77,13 @@ class CascadedCdlQuantizedTensor(QuantizedTensor):
     def dequantize(self) -> torch.Tensor:
         theta = self.theta_format.level[self.theta_indices.long()]
         q = self.q_format.level[self.q_indices.long()]
-        x = theta * q * self.alpha
-        return (self.grad_proxy + (x - self.grad_proxy).detach()).to(self.dtype)
+        x = (theta * q * self.alpha).flatten(1)[:, : self.k]
+
+        if self.grad_proxy is None:
+            return x.to(self.dtype)
+
+        grad_proxy = self.grad_proxy.flatten(1)[:, : self.k]
+        return (grad_proxy + (x - grad_proxy).detach()).to(self.dtype)
 
 
 class CascadedCdlQuant(Quant, abc.ABC):
@@ -72,8 +98,11 @@ class CascadedCdlQuant(Quant, abc.ABC):
         q_kappa: float,
         q_topk: int,
         alpha: float,
+        block_size: int,
     ):
         super().__init__()
+        if block_size <= 0:
+            raise ValueError("block_size must be positive")
         if theta_topk > theta_format.n:
             raise ValueError(
                 f"top-{theta_topk} exceeds the {theta_format.n} quantization levels"
@@ -90,6 +119,7 @@ class CascadedCdlQuant(Quant, abc.ABC):
 
         self.theta_format = theta_format
         self.theta_topk = theta_topk
+        self.block_size = block_size
         self.theta_num_quantized_params = theta_num_quantized_params
         self.q_format = q_format
         self.q_topk = q_topk
@@ -110,10 +140,6 @@ class CascadedCdlQuant(Quant, abc.ABC):
     def q_kappa(self) -> torch.Tensor:
         return self.log_q_kappa.exp()
 
-    @property
-    @abc.abstractmethod
-    def input_shape(self) -> tuple[int, ...]: ...
-
     @abc.abstractmethod
     def scale_q_lr(self, eta: float) -> float: ...
 
@@ -126,26 +152,45 @@ class CascadedCdlQuant(Quant, abc.ABC):
         return eta / self.q.numel() ** 0.5
 
     def forward(self, x: torch.Tensor) -> QuantizedTensor:
+        if x.ndim != 2:
+            raise ValueError(
+                f"{type(self).__name__} expects a 2-D [rows, k] tensor, "
+                f"got ndim={x.ndim}"
+            )
+        blocked, _ = group_tensor_into_blocks(x, self.block_size)
+        if blocked.shape[1] != self.q.shape[-2]:
+            raise ValueError(
+                "input width is incompatible with the initialized block layout: "
+                f"expected {self.q.shape[-2]} blocks of {self.block_size}, "
+                f"got {blocked.shape[1]} blocks from width {x.shape[1]}"
+            )
+        if self.q.ndim >= 2 and self.q.shape[0] not in (1, x.shape[0]):
+            raise ValueError(
+                "input row count is incompatible with the initialized scales: "
+                f"expected {self.q.shape[0]} rows, got {x.shape[0]}"
+            )
+
         if not self.training:
             theta_indices, q_indices = cascaded_nearest_round(
-                x,
+                blocked,
                 self.theta_format,
                 self.q,
                 self.q_format,
                 self.alpha,
             )
             return CascadedCdlQuantizedTensor(
-                theta_indices,
-                q_indices,
-                self.alpha.detach(),
-                x.new_zeros(()),
-                self.theta_format,
-                self.q_format,
-                x.dtype,
+                theta_indices=theta_indices,
+                theta_format=self.theta_format,
+                q_indices=q_indices,
+                q_format=self.q_format,
+                alpha=self.alpha.detach(),
+                grad_proxy=None,
+                dtype=x.dtype,
+                k=x.shape[1],
             )
 
         theta_indices, q_indices, grad_proxy, _, _ = cascaded_cdl_topk_forward(
-            x,
+            blocked,
             self.theta_format,
             self.theta_kappa,
             self.theta_topk,
@@ -157,13 +202,14 @@ class CascadedCdlQuant(Quant, abc.ABC):
             True,
         )
         return CascadedCdlQuantizedTensor(
-            theta_indices,
-            q_indices,
-            self.alpha.detach(),
-            grad_proxy,
-            self.theta_format,
-            self.q_format,
-            x.dtype,
+            theta_indices=theta_indices,
+            theta_format=self.theta_format,
+            q_indices=q_indices,
+            q_format=self.q_format,
+            alpha=self.alpha.detach(),
+            grad_proxy=grad_proxy,
+            dtype=x.dtype,
+            k=x.shape[1],
         )
 
 
@@ -176,15 +222,24 @@ class CascadedCdlQuantForWeight(CascadedCdlQuant):
         q_format: Format,
         q_kappa: float,
         alpha: float,
+        block_size: int,
     ) -> None:
-        if theta.ndim < 2:
-            raise ValueError("theta must be in shape [out_feat, n, block_size]")
+        if block_size <= 0:
+            raise ValueError("block_size must be positive")
+        if theta.ndim != 2:
+            raise ValueError("theta must be in shape [out_feat, k]")
+        if theta.shape[1] == 0:
+            raise ValueError("theta must have at least one element per row")
 
-        q_tensor = (
-            2
-            * theta.detach().abs().mean(-1, keepdim=True)
-            / 2 ** ((theta_format.bits - 1) / 2)
-        ).clamp_min(torch.finfo(torch.float32).tiny)
+        blocked, pad_size = group_tensor_into_blocks(theta.detach(), block_size)
+        block_sums = blocked.abs().sum(dim=-1, keepdim=True)
+        block_counts = blocked.new_full((blocked.shape[1],), block_size)
+        if pad_size:
+            block_counts[-1] -= pad_size
+        block_means = block_sums / block_counts[None, :, None]
+        q_tensor = (2 * block_means / 2 ** ((theta_format.bits - 1) / 2)).clamp_min(
+            torch.finfo(torch.float32).tiny
+        )
 
         super().__init__(
             theta_format,
@@ -196,16 +251,11 @@ class CascadedCdlQuantForWeight(CascadedCdlQuant):
             q_kappa,
             q_format.n,
             alpha,
+            block_size,
         )
-        self.__input_shape = tuple(theta.shape)
-
-    @property
-    def input_shape(self) -> tuple[int, ...]:
-        return self.__input_shape
 
     def scale_q_lr(self, eta: float) -> float:
-        block_size = self.input_shape[-1]
-        return eta / (block_size * 2 ** (self.theta_format.bits - 1)) ** 0.5
+        return eta / (self.block_size * 2 ** (self.theta_format.bits - 1)) ** 0.5
 
 
 class CascadedCdlQuantForActivation(CascadedCdlQuant):
@@ -218,6 +268,7 @@ class CascadedCdlQuantForActivation(CascadedCdlQuant):
         q_kappa: float,
         q_topk: int,
         alpha: float,
+        block_size: int,
     ):
         super().__init__(
             theta_format,
@@ -229,61 +280,50 @@ class CascadedCdlQuantForActivation(CascadedCdlQuant):
             q_kappa,
             q_topk,
             alpha,
+            block_size,
         )
         self.initialized = False
         self.bypassing = False
-        self.__input_shape: tuple[int, ...] | None = None
-
-    @property
-    def input_shape(self) -> tuple[int, ...]:
-        if self.__input_shape is None:
-            raise RuntimeError("quantizer not initialized")
-        return self.__input_shape
 
     def scale_q_lr(self, eta: float) -> float:
         if not self.initialized:
             raise RuntimeError("quantizer not initialized")
-        block_size = self.input_shape[-1]
-        return eta / (block_size * 2**self.theta_format.bits) ** 0.5
+        return eta / (self.block_size * 2**self.theta_format.bits) ** 0.5
 
     @torch.no_grad()
-    def init_q_and_numel(self, theta: torch.Tensor) -> None:
-        if theta.ndim < 2:
-            raise ValueError("theta must be in shape [out_feat, n, block_size]")
-
-        reduce_dims = tuple(range(theta.ndim - 2)) + (theta.ndim - 1,)
-        block_means = theta.detach().abs().mean(dim=reduce_dims)
-        input_shape = tuple(theta.shape)
-
-        n_blocks = block_means.numel()
-        block_size = input_shape[-1]
+    def set_q_from_block_means(self, block_means: torch.Tensor, width: int) -> None:
         q = (
             2
             * block_means.to(device=self.log_q.device, dtype=self.log_q.dtype)
             / 2 ** ((self.theta_format.bits - 1) / 2)
         ).clamp_min(torch.finfo(torch.float32).tiny)
-        log_q = q.reshape(1, n_blocks, 1).log()
+        log_q = q.reshape(1, -1, 1).log()
 
         if tuple(self.log_q.shape) != tuple(log_q.shape):
             self.log_q = nn.Parameter(log_q)
         else:
             self.log_q.copy_(log_q)
 
-        self.theta_num_quantized_params = n_blocks * block_size
-        self.__input_shape = tuple(input_shape)
+        self.theta_num_quantized_params = width
         self.initialized = True
 
     def forward(self, input: torch.Tensor) -> QuantizedTensor:
+        if input.ndim != 2:
+            raise ValueError(
+                "CascadedCdlQuantForActivation expects a 2-D [rows, k] tensor, "
+                f"got ndim={input.ndim}"
+            )
+
         if self.bypassing:
             return CascadedCdlBypassQuantizedTensor(input)
 
         if not self.initialized:
             raise RuntimeError("quantizer not initialized")
 
-        if input.shape[-2:] != self.input_shape[-2:]:
+        if input.shape[1] != self.theta_num_quantized_params:
             raise ValueError(
-                "activation grouping must match calibration: expected trailing "
-                f"shape {tuple(self.input_shape[-2:])}, got {tuple(input.shape[-2:])}"
+                "activation width must match calibration: expected "
+                f"{self.theta_num_quantized_params}, got {input.shape[1]}"
             )
         return super().forward(input)
 
@@ -299,39 +339,42 @@ class CdlQuantMixin(BatchNormBatchStatsMixin):
         if not modules:
             return
 
-        # Per-block absolute sums and element counts accumulated over all
-        # calibration batches.
         stats: dict[
             CascadedCdlQuantForActivation,
-            tuple[torch.Tensor | None, int, tuple[int, ...] | None],
-        ] = {m: (None, 0, None) for m in modules}
+            tuple[torch.Tensor, int, int],
+        ] = {}
 
         def hook(mod: nn.Module, args: tuple[torch.Tensor, ...]) -> None:
             x = args[0]
-            if x.ndim < 3:
+            if x.ndim != 2:
                 raise ValueError(
-                    "activation inputs must be grouped as [..., n_blocks, block_size]"
+                    f"activation inputs must be in shape [rows, k], got ndim={x.ndim}"
                 )
 
-            block_sums, count, input_shape = stats[mod]
-            n_blocks, block_size = x.shape[-2:]
-            if input_shape is not None and input_shape[-2:] != (n_blocks, block_size):
+            blocked, _ = group_tensor_into_blocks(x.detach(), mod.block_size)
+            block_sums = blocked.abs().sum(dim=(0, 2))
+            previous = stats.get(mod)
+            if previous is None:
+                stats[mod] = (block_sums, x.shape[0], x.shape[1])
+                return
+
+            sums, rows, width = previous
+            if width != x.shape[1]:
                 raise ValueError(
                     "all calibration samples for an activation quantizer must "
-                    "have the same grouped block layout"
+                    "have the same width"
                 )
+            stats[mod] = (sums + block_sums, rows + x.shape[0], width)
 
-            flat = x.reshape(-1, n_blocks, block_size)
-            current_sums = flat.detach().abs().sum(dim=(0, 2))
-            if block_sums is None:
-                block_sums = current_sums
-            else:
-                block_sums = block_sums + current_sums
-            stats[mod] = (
-                block_sums,
-                count + flat.shape[0] * block_size,
-                tuple(x.shape) if input_shape is None else input_shape,
-            )
+        def block_means(m: CascadedCdlQuantForActivation) -> tuple[torch.Tensor, int]:
+            if m not in stats:
+                raise RuntimeError("some quantizers were never reached by samples")
+            sums, rows, width = stats[m]
+            counts = sums.new_full((sums.numel(),), m.block_size)
+            pad_size = -width % m.block_size
+            if pad_size:
+                counts[-1] -= pad_size
+            return sums / (rows * counts), width
 
         handles = [m.register_forward_pre_hook(hook) for m in modules]
 
@@ -355,15 +398,8 @@ class CdlQuantMixin(BatchNormBatchStatsMixin):
             self.train(was_training)
 
         for m in modules:
-            block_sums, count, input_shape = stats[m]
-            if block_sums is None or count == 0 or input_shape is None:
-                raise RuntimeError("some quantizers were never reached by samples")
-            block_means = block_sums / count
-            block_size = input_shape[-1]
-            # A compact theta whose per-block means equal the accumulated
-            # calibration means, so initialization goes through the same path.
-            theta_for_init = block_means.reshape(1, -1, 1).expand(1, -1, block_size)
-            m.init_q_and_numel(theta_for_init)
+            means, width = block_means(m)
+            m.set_q_from_block_means(means, width)
 
     @torch.no_grad()
     def get_param_groups(
