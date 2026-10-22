@@ -48,6 +48,7 @@ class ModelConfig:
 class TrainingConfig:
     epochs: int = 200
     freeze_kappa: bool = False
+    freeze_alpha: bool = False
     batch_size: int = 64
     learning_rate: float = 0.1
     weight_decay: float = 5e-4
@@ -352,6 +353,7 @@ def training_pipeline() -> None:
         cfg.train.learning_rate,
         cfg.train.weight_decay,
         cfg.train.freeze_kappa,
+        cfg.train.freeze_alpha,
     )
     optimizer = torch.optim.SGD(param_groups, momentum=cfg.train.momentum, fused=True)
     lr_scheduler = torch.optim.lr_scheduler.MultiStepLR(

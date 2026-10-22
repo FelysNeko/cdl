@@ -5,7 +5,8 @@ model:
   bits_edge: 8
   topk_act: 5
   kappa: 1.0
-  fp4: false  # true: int6 -> E2M1 (edge layers stay int8)
+  fp4_weight: false  # true: int6 -> E2M1 for non-edge weights (stem/fc stay int8)
+  fp4_act: true  # true: int6 -> E2M1 for all activation quantizers
 
 train:
   lam: 0.0

@@ -39,7 +39,8 @@ class ModelConfig:
     bits_edge: int = 8
     topk_act: int = 5
     kappa: float = 1.0
-    fp4: bool = False
+    fp4_weight: bool = False
+    fp4_act: bool = False
 
 
 @dataclass
@@ -105,11 +106,11 @@ class CdlResNet(ResNet, CdlQuantMixin):
                 is_edge = name == "stem"
                 if is_edge:
                     weight_format = IntX(True, cfg.bits_edge, torch.bfloat16)
-                elif cfg.fp4:
+                elif cfg.fp4_weight:
                     weight_format = E2M1(torch.bfloat16)
                 else:
                     weight_format = IntX(True, cfg.bits, torch.bfloat16)
-                if cfg.fp4 and not is_edge:
+                if cfg.fp4_act and not is_edge:
                     act_format = E2M1(torch.bfloat16)
                 else:
                     act_format = IntX(False, cfg.bits, torch.bfloat16)
@@ -158,7 +159,9 @@ class CdlResNet(ResNet, CdlQuantMixin):
                     cfg.kappa,
                 )
                 activation_quant = CdlQuantForActivation(
-                    E2M1(torch.bfloat16) if cfg.fp4 else IntX(False, cfg.bits, torch.bfloat16),
+                    E2M1(torch.bfloat16)
+                    if cfg.fp4_act
+                    else IntX(False, cfg.bits, torch.bfloat16),
                     cfg.relaxed,
                     cfg.topk_act,
                     cfg.kappa,

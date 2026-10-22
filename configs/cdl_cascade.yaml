@@ -1,15 +1,16 @@
 model:
   layers: 20
-  weight_block_size: 32
-  act_block_size: 32
+  weight_block_size: 16
+  act_block_size: 16
   topk_act: 5
   kappa: 1.0
   alpha: 1.0
-  activation_quant: cdl  # cdl | nvfp4
+  activation_quant: nvfp4  # cdl | nvfp4
 
 train:
   epochs: 200
   freeze_kappa: true
+  freeze_alpha: false
   batch_size: 64
   learning_rate: 0.1
   weight_decay: 0.0005

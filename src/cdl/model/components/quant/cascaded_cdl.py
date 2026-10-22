@@ -411,7 +411,11 @@ class CdlQuantMixin(BatchNormBatchStatsMixin):
 
     @torch.no_grad()
     def get_param_groups(
-        self, learning_rate: float, weight_decay: float, freeze_kappa: bool
+        self,
+        learning_rate: float,
+        weight_decay: float,
+        freeze_kappa: bool,
+        freeze_alpha: bool = False,
     ) -> list[dict]:
         customized_param_set: set[nn.Parameter] = set()
         buckets: dict[tuple[float, float], list[nn.Parameter]] = {}
@@ -437,6 +441,10 @@ class CdlQuantMixin(BatchNormBatchStatsMixin):
                 q_kappa_lr = m.scale_q_kappa_lr(learning_rate)
                 buckets.setdefault((theta_kappa_lr, 0.0), []).append(m.log_theta_kappa)
                 buckets.setdefault((q_kappa_lr, 0.0), []).append(m.log_q_kappa)
+
+            customized_param_set.add(m.log_alpha)
+            if freeze_alpha:
+                m.log_alpha.requires_grad_(False)
 
         decay = []
         no_decay = []
