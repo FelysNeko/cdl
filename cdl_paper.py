@@ -4,6 +4,7 @@ import logging
 import random
 import time
 import uuid
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import torch
@@ -14,7 +15,6 @@ from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 
 from cdl.checkpoint import load_checkpoint, save_checkpoint
-from cdl.config import Config, ModelConfig, load_config
 from cdl.core.format.intx import IntX
 from cdl.dataset import get_loaders
 from cdl.model.components.conv2d import NativeQuantizedConv2d
@@ -28,6 +28,53 @@ from cdl.model.components.quant.identity import IdentityQuant
 from cdl.model.resnet import ResNet
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class ModelConfig:
+    layers: int = 20
+    relaxed: bool = False
+    bits: int = 6
+    bits_edge: int = 8
+    topk_act: int = 5
+    kappa: float = 1.0
+
+
+@dataclass
+class TrainingConfig:
+    lam: float = 0.0
+    gam: float = 0.0
+
+    epochs: int = 200
+    freeze_kappa: bool = False
+    batch_size: int = 64
+    learning_rate: float = 0.1
+    weight_decay: float = 5e-4
+    momentum: float = 0.9
+    milestones: list[int] = field(default_factory=lambda: [60, 120, 160])
+    sched_gamma: float = 0.1
+    calib_batches: int = 1
+
+
+@dataclass
+class LoggingConfig:
+    eval_every_epochs: int = 1
+    log_every_steps: int = 50
+    recal_bn_batches: int = 100
+
+
+@dataclass
+class Config:
+    model: ModelConfig = field(default_factory=ModelConfig)
+    train: TrainingConfig = field(default_factory=TrainingConfig)
+    logging: LoggingConfig = field(default_factory=LoggingConfig)
+
+
+def load_config(yaml_path: Path) -> Config:
+    schema = OmegaConf.structured(Config)
+    yaml_cfg = OmegaConf.load(yaml_path)
+    cfg = OmegaConf.merge(schema, yaml_cfg)
+    return OmegaConf.to_object(cfg)
 
 
 class CdlResNet(ResNet, CdlQuantMixin):
@@ -244,6 +291,11 @@ def evaluate(model: nn.Module, loader: DataLoader, device: torch.device) -> floa
 
 
 def training_pipeline() -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+        
     args = parse_args()
     device = sanitize_device(args.device)
     output_dir, cfg = resolve_settings(args)
