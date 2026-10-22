@@ -4,7 +4,7 @@ import torch
 from cdl.api.tensor import QuantizedTensor
 
 
-def swizzle_e4m3(sf: torch.Tensor) -> torch.Tensor:
+def swizzle_nvfp4_scale_factors(sf: torch.Tensor) -> torch.Tensor:
     m, b = sf.shape
     rows, cols = (m + 127) // 128 * 128, (b + 3) // 4 * 4
     out = torch.zeros(rows, cols, dtype=torch.uint8, device=sf.device)
@@ -32,8 +32,8 @@ class MatMul(torch.autograd.Function):
         out = flashinfer.mm_fp4(
             x_theta,
             w_theta.T,
-            swizzle_e4m3(x_q),
-            swizzle_e4m3(w_q).T,
+            swizzle_nvfp4_scale_factors(x_q),
+            swizzle_nvfp4_scale_factors(w_q).T,
             x_alpha * w_alpha,
             backend="b12x",
         )

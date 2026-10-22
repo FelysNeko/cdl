@@ -116,6 +116,8 @@ class CascadedCdlQuant(Quant, abc.ABC):
         if not torch.isfinite(q_tensor).all():
             raise ValueError("the initial q must contain only finite values")
         q_tensor = q_tensor.clamp_min(torch.finfo(torch.float32).tiny)
+        if not math.isfinite(alpha) or alpha <= 0:
+            raise ValueError("alpha must be finite and positive")
 
         self.theta_format = theta_format
         self.theta_topk = theta_topk
@@ -126,7 +128,9 @@ class CascadedCdlQuant(Quant, abc.ABC):
         self.log_theta_kappa = nn.Parameter(torch.full((), math.log(theta_kappa)))
         self.log_q = nn.Parameter(q_tensor.log())
         self.log_q_kappa = nn.Parameter(torch.full((), math.log(q_kappa)))
-        self.alpha = nn.Parameter(torch.full((), alpha, dtype=q_tensor.dtype))
+        self.log_alpha = nn.Parameter(
+            torch.full((), math.log(alpha), dtype=q_tensor.dtype)
+        )
 
     @property
     def theta_kappa(self) -> torch.Tensor:
@@ -139,6 +143,10 @@ class CascadedCdlQuant(Quant, abc.ABC):
     @property
     def q_kappa(self) -> torch.Tensor:
         return self.log_q_kappa.exp()
+
+    @property
+    def alpha(self) -> torch.Tensor:
+        return self.log_alpha.exp()
 
     @abc.abstractmethod
     def scale_q_lr(self, eta: float) -> float: ...
