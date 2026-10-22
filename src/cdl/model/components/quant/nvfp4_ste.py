@@ -1,52 +1,107 @@
+from dataclasses import dataclass
+
 import flashinfer
 import torch
 import torch.nn.functional as F
-from torch import nn
+
+from cdl.api.quant import Quant
+from cdl.api.tensor import QuantizedTensor
 
 
-@torch.library.custom_op("cdl::nvfp4_qdq", mutates_args=())
-def nvfp4_qdq(x, global_scale: torch.Tensor, global_scale_inv: torch.Tensor):
-    packed, sf = flashinfer.fp4_quantize(x, global_scale, is_sf_swizzled_layout=False)
-    out = flashinfer.nvfp4_kv_dequantize(
-        packed, sf, global_scale_inv, output_dtype=x.dtype
+@torch.library.custom_op("cdl::nvfp4_quantize", mutates_args=())
+def nvfp4_quantize(
+    x: torch.Tensor, global_scale: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    # x: [rows, k] with k % 16 == 0, bfloat16, row-major.
+    # Returns (packed fp4 [rows, k / 2] uint8, block scales [rows, k / 16] uint8)
+    # in the linear (non-swizzled) scale layout.
+    packed, scale = flashinfer.fp4_quantize(
+        x, global_scale, is_sf_swizzled_layout=False
     )
-    return out
+    return packed, scale
 
 
-@nvfp4_qdq.register_fake
-def _(x, global_scale: torch.Tensor, global_scale_inv: torch.Tensor):
-    return torch.empty_like(x)
+@nvfp4_quantize.register_fake
+def _(x: torch.Tensor, global_scale: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    rows, k = x.shape
+    return (
+        torch.empty(rows, k // 2, dtype=torch.uint8, device=x.device),
+        torch.empty(rows, k // 16, dtype=torch.uint8, device=x.device),
+    )
 
 
-def quantize_dequantize(theta: torch.Tensor) -> torch.Tensor:
-    k = theta.shape[-1]
-    with torch.no_grad():
-        x = theta.reshape(-1, k).bfloat16()
-        r = -k % 16
-        if r:
-            x = F.pad(x, (0, r))
-
-        amax = x.float().abs().amax()
-        global_scale = torch.where(
-            amax > 0,
-            amax.new_full((), 448.0 * 6.0) / amax,
-            amax.new_full((), torch.finfo(torch.float32).max),
-        ).reshape(1)
-        out = nvfp4_qdq(x, global_scale, (1.0 / global_scale).float())
-
-    out = out.reshape(*theta.shape[:-1], -1)
-    dequantized_theta = out[..., :k].to(theta.dtype)
-    return theta + (dequantized_theta - theta).detach()
+@torch.library.custom_op("cdl::nvfp4_dequantize", mutates_args=())
+def nvfp4_dequantize(
+    packed: torch.Tensor,
+    scale: torch.Tensor,
+    global_scale_inv: torch.Tensor,
+) -> torch.Tensor:
+    # packed: [rows, k / 2] uint8, scale: [rows, k / 16] uint8 (linear layout).
+    # Returns the dequantized bfloat16 tensor of shape [rows, k].
+    return flashinfer.nvfp4_kv_dequantize(
+        packed, scale, global_scale_inv, output_dtype=torch.bfloat16
+    )
 
 
-class Nvfp4SteQuantForActivation(nn.Module):
-    def forward(self, input: torch.Tensor) -> torch.Tensor:
-        b, c, h, w = input.shape
-        flat = input.permute(0, 2, 3, 1).reshape(-1, c)
-        out = quantize_dequantize(flat)
-        return out.reshape(b, h, w, c).permute(0, 3, 1, 2).contiguous()
+@nvfp4_dequantize.register_fake
+def _(
+    packed: torch.Tensor,
+    scale: torch.Tensor,
+    global_scale_inv: torch.Tensor,
+) -> torch.Tensor:
+    rows = packed.shape[0]
+    k = packed.shape[-1] * 2
+    return torch.empty(rows, k, dtype=torch.bfloat16, device=packed.device)
 
 
-class Nvfp4SteQuantForWeight(nn.Module):
-    def forward(self, input: torch.Tensor) -> torch.Tensor:
-        return quantize_dequantize(input.flatten(1)).view_as(input)
+@dataclass
+class Nvfp4SteQuantizedTensor(QuantizedTensor):
+    packed: torch.Tensor
+    scale: torch.Tensor
+    global_scale_inv: torch.Tensor
+    grad_proxy: torch.Tensor
+    k: int
+    dtype: torch.dtype
+
+    def fp4(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        return self.packed, self.scale, self.global_scale_inv
+
+    def fp8(self) -> tuple[torch.Tensor, torch.Tensor]:
+        raise NotImplementedError("Nvfp4SteQuantizedTensor has no fp8 representation")
+
+    def dequantize(self) -> torch.Tensor:
+        dense = nvfp4_dequantize(self.packed, self.scale, self.global_scale_inv)
+        dense = dense[..., : self.k].to(self.dtype)
+        return self.grad_proxy + (dense - self.grad_proxy).detach()
+
+
+class Nvfp4SteQuant(Quant):
+    def forward(self, input: torch.Tensor) -> QuantizedTensor:
+        if input.ndim != 2:
+            raise ValueError(
+                f"Nvfp4SteQuant expects a 2-D [rows, k] tensor, got ndim={input.ndim}"
+            )
+
+        k = input.shape[-1]
+        with torch.no_grad():
+            flat = input.bfloat16()
+            r = -k % 16
+            if r:
+                flat = F.pad(flat, (0, r))
+
+            amax = flat.float().abs().amax()
+            global_scale = torch.where(
+                amax > 0,
+                amax.new_full((), 448.0 * 6.0) / amax,
+                amax.new_full((), torch.finfo(torch.float32).max),
+            ).reshape(1)
+            packed, scale = nvfp4_quantize(flat, global_scale)
+
+        return Nvfp4SteQuantizedTensor(
+            packed=packed,
+            scale=scale,
+            global_scale_inv=(1.0 / global_scale).float(),
+            grad_proxy=input,
+            k=k,
+            dtype=input.dtype,
+        )
