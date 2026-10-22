@@ -1,7 +1,7 @@
 import torch
 
-from cdl.core import formulae
 from cdl.api.format import Format
+from cdl.core import formulae
 
 
 def cdl_topk_forward(
@@ -61,7 +61,7 @@ def cascaded_cdl_topk_forward(
     )
     q_hat = q_format.level[q_indices]
     proxied_q_hat = q_proxy + (q_hat - q_proxy).detach()
-    theta_indices, theta_proxy, theta_entropies = cdl_topk_forward(
+    theta_indices, grad_proxy, theta_entropies = cdl_topk_forward(
         theta,
         theta_format,
         proxied_q_hat * alpha,
@@ -71,7 +71,7 @@ def cascaded_cdl_topk_forward(
         theta_num_quantized_params,
     )
 
-    return theta_indices, q_indices, theta_proxy, q_entropies, theta_entropies
+    return theta_indices, q_indices, grad_proxy, q_entropies, theta_entropies
 
 
 @torch.no_grad()
@@ -81,6 +81,9 @@ def cascaded_nearest_round(
     q: torch.Tensor,
     q_format: Format,
     alpha: torch.Tensor,
-) -> torch.Tensor:
-    q_hat = q_format.quantize(q, q.new_ones(()))
-    return theta_format.quantize(theta, q_hat * alpha)
+) -> tuple[torch.Tensor, torch.Tensor]:
+    q_indices = q_format.ordinal(q)
+    q_hat = q_format.level[q_indices.long()]
+    scale = q_hat * alpha
+    theta_indices = theta_format.ordinal(theta / scale)
+    return theta_indices, q_indices

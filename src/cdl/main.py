@@ -19,13 +19,14 @@ from torchvision import datasets, transforms
 
 from cdl.config import Config, ModelConfig, load_config
 from cdl.core.format.intx import IntX
-from cdl.model.components.conv2d.native import NativeQuantizedConv2d
-from cdl.model.components.linear.native import NativeQuantizedLinear
+from cdl.model.components.conv2d import NativeQuantizedConv2d
+from cdl.model.components.linear import NativeQuantizedLinear
 from cdl.model.components.quant.cdl import (
     CdlQuantForActivation,
     CdlQuantForWeight,
     CdlQuantMixin,
 )
+from cdl.model.components.quant.identity import IdentityQuant
 from cdl.model.resnet import ResNet
 from cdl.trainer import Trainer
 
@@ -66,8 +67,6 @@ def get_loaders(
 
 
 class CdlResNet(ResNet, CdlQuantMixin):
-    """A plain ResNet with its reusable components replaced by CDL ones."""
-
     def __init__(
         self,
         num_blocks: list[int],
@@ -98,7 +97,7 @@ class CdlResNet(ResNet, CdlQuantMixin):
                     cfg.kappa,
                 )
                 activation_quant = (
-                    nn.Identity()
+                    IdentityQuant()
                     if name == "stem"
                     else CdlQuantForActivation(
                         IntX(False, cfg.bits, torch.bfloat16),
@@ -120,6 +119,7 @@ class CdlResNet(ResNet, CdlQuantMixin):
                     dtype=module.weight.dtype,
                     activation_quant=activation_quant,
                     weight_quant=weight_quant,
+                    backend="native",
                 )
                 replacement.weight.copy_(module.weight)
                 if module.bias is not None:
@@ -149,6 +149,7 @@ class CdlResNet(ResNet, CdlQuantMixin):
                     dtype=module.weight.dtype,
                     activation_quant=activation_quant,
                     weight_quant=weight_quant,
+                    backend="native",
                 )
                 replacement.weight.copy_(module.weight)
                 if module.bias is not None:

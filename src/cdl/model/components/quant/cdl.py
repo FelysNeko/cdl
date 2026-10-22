@@ -1,16 +1,40 @@
 import abc
 import math
 from collections.abc import Iterable
+from dataclasses import dataclass
 
 import torch
 from torch import nn
 
 from cdl.api.format import Format
+from cdl.api.quant import Quant
+from cdl.api.tensor import QuantizedTensor
 from cdl.core.v1 import cdl_topk_forward, nearest_round
 from cdl.model.mixin.batchnorm_batch_stats import BatchNormBatchStatsMixin
 
 
-class CdlQuant(nn.Module, abc.ABC):
+@dataclass
+class CdlQuantizedTensor(QuantizedTensor):
+    theta: torch.Tensor
+    f: Format
+    q: torch.Tensor
+    entropy: torch.Tensor | None = None
+
+    def fp4(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        raise NotImplementedError(
+            "CdlQuantizedTensor stores a dense CDL result and has no packed FP4 view"
+        )
+
+    def fp8(self) -> tuple[torch.Tensor, torch.Tensor]:
+        raise NotImplementedError(
+            "CdlQuantizedTensor stores a dense CDL result and has no packed FP8 view"
+        )
+
+    def dequantize(self) -> torch.Tensor:
+        return self.theta
+
+
+class CdlQuant(Quant, abc.ABC):
     def __init__(
         self,
         f: Format,
@@ -59,9 +83,10 @@ class CdlQuant(nn.Module, abc.ABC):
     def disable_entropy_computation(self) -> None:
         self.__entropy_enabled = False
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor) -> QuantizedTensor:
         if not self.training:
-            return nearest_round(x, self.f, self.q).to(x.dtype)
+            quantized = nearest_round(x, self.f, self.q).to(x.dtype)
+            return CdlQuantizedTensor(quantized, self.f, self.q)
 
         quantized, entropy = cdl_topk_forward(
             x,
@@ -73,13 +98,19 @@ class CdlQuant(nn.Module, abc.ABC):
             self.relaxed,
             self.num_quantized_params if self.__entropy_enabled else None,
         )
+        result = CdlQuantizedTensor(
+            quantized.to(x.dtype),
+            self.f,
+            self.q,
+            entropy,
+        )
 
         if entropy is not None:
             if self.__entropy is not None:
                 raise RuntimeError("entropy is overwritten by a second forward pass")
             self.__entropy = entropy
 
-        return quantized.to(x.dtype)
+        return result
 
     def drain_entropy(self) -> torch.Tensor:
         if self.__entropy is None:
@@ -139,9 +170,9 @@ class CdlQuantForActivation(CdlQuant):
         self.num_quantized_params = num_quantized_params
         self.initialized = True
 
-    def forward(self, input: torch.Tensor) -> torch.Tensor:
+    def forward(self, input: torch.Tensor) -> QuantizedTensor:
         if self.bypassing:
-            return input
+            return CdlQuantizedTensor(input, self.f, self.q)
 
         if not self.initialized:
             raise RuntimeError("quantizer not initialized")

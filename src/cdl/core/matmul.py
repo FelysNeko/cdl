@@ -1,32 +1,7 @@
-import functools
-
 import flashinfer
 import torch
 
-
-@functools.cache
-def get_indices_to_e2m1_mapping(device: torch.device) -> torch.Tensor:
-    return torch.tensor(
-        [15, 14, 13, 12, 11, 10, 9, 8, 0, 1, 2, 3, 4, 5, 6, 7],
-        dtype=torch.uint8,
-        device=device,
-    )
-
-
-def pack_e2m1(x: torch.Tensor) -> torch.Tensor:
-    mapping = get_indices_to_e2m1_mapping(x.device)
-    codes = mapping[x].reshape(x.shape[0], -1)
-    return codes[:, 0::2] | (codes[:, 1::2] << 4)
-
-
-def pack_e4m3(x: torch.Tensor) -> torch.Tensor:
-    return (
-        x.reshape(x.shape[0], -1)
-        .float()
-        .clamp(-448.0, 448.0)
-        .to(torch.float8_e4m3fn)
-        .view(torch.uint8)
-    )
+from cdl.api.tensor import QuantizedTensor
 
 
 def swizzle_e4m3(sf: torch.Tensor) -> torch.Tensor:
@@ -41,36 +16,17 @@ def swizzle_e4m3(sf: torch.Tensor) -> torch.Tensor:
     )
 
 
-class NVFP4:
-    def __init__(
-        self,
-        theta: torch.Tensor,
-        q: torch.Tensor,
-        alpha: torch.Tensor,
-    ) -> None:
-        self.theta = theta
-        self.q = q
-        self.alpha = alpha
-
-    @torch.no_grad()
-    def pack(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        theta = pack_e2m1(self.theta)
-        q = pack_e4m3(self.q)
-        alpha = self.alpha.float().reshape(1)
-        return theta, q, alpha
-
-
 class MatMul(torch.autograd.Function):
     @staticmethod
     def forward(
         ctx: torch.autograd.function.FunctionCtx,
-        x: NVFP4,
+        x: QuantizedTensor,
         x_proxy: torch.Tensor,
-        w: NVFP4,
+        w: QuantizedTensor,
         w_proxy: torch.Tensor,
     ) -> torch.Tensor:
-        x_theta, x_q, x_alpha = x.pack()
-        w_theta, w_q, w_alpha = w.pack()
+        x_theta, x_q, x_alpha = x.fp4()
+        w_theta, w_q, w_alpha = w.fp4()
         ctx.save_for_backward(x_theta, x_q, x_alpha, w_theta, w_q, w_alpha)
 
         out = flashinfer.mm_fp4(

@@ -1,16 +1,66 @@
 import abc
 import math
 from collections.abc import Iterable
+from dataclasses import dataclass
 
 import torch
 from torch import nn
 
 from cdl.api.format import Format
+from cdl.api.quant import Quant
+from cdl.api.tensor import QuantizedTensor
 from cdl.core.v2 import cascaded_cdl_topk_forward, cascaded_nearest_round
 from cdl.model.mixin.batchnorm_batch_stats import BatchNormBatchStatsMixin
 
 
-class CascadedCdlQuant(nn.Module, abc.ABC):
+@dataclass
+class CascadedCdlBypassQuantizedTensor(QuantizedTensor):
+    theta: torch.Tensor
+
+    def fp4(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        raise NotImplementedError(
+            "CascadedCdlBypassQuantizedTensor is an unquantized calibration value"
+        )
+
+    def fp8(self) -> tuple[torch.Tensor, torch.Tensor]:
+        raise NotImplementedError(
+            "CascadedCdlBypassQuantizedTensor is an unquantized calibration value"
+        )
+
+    def dequantize(self) -> torch.Tensor:
+        return self.theta
+
+
+@dataclass
+class CascadedCdlQuantizedTensor(QuantizedTensor):
+    theta_indices: torch.Tensor
+    q_indices: torch.Tensor
+    alpha: torch.Tensor
+    grad_proxy: torch.Tensor
+    theta_format: Format
+    q_format: Format
+    dtype: torch.dtype
+
+    def fp4(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        raise NotImplementedError(
+            "CascadedCdlQuantizedTensor stores CDL integer levels and has no "
+            "packed FP4 kernel view"
+        )
+
+    def fp8(self) -> tuple[torch.Tensor, torch.Tensor]:
+        raise NotImplementedError(
+            "CascadedCdlQuantizedTensor stores CDL integer levels and has no "
+            "packed FP8 kernel view"
+        )
+
+    def dequantize(self) -> torch.Tensor:
+        theta = self.theta_format.level[self.theta_indices.long()]
+        q = self.q_format.level[self.q_indices.long()]
+        x = theta * q * self.alpha
+        return (self.grad_proxy + (x - self.grad_proxy).detach()).to(self.dtype)
+
+
+class CascadedCdlQuant(Quant, abc.ABC):
     def __init__(
         self,
         theta_format: Format,
@@ -75,19 +125,26 @@ class CascadedCdlQuant(nn.Module, abc.ABC):
     def scale_q_kappa_lr(self, eta: float) -> float:
         return eta / self.q.numel() ** 0.5
 
-    def forward(
-        self, x: torch.Tensor
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    def forward(self, x: torch.Tensor) -> QuantizedTensor:
         if not self.training:
-            return cascaded_nearest_round(
+            theta_indices, q_indices = cascaded_nearest_round(
                 x,
                 self.theta_format,
                 self.q,
                 self.q_format,
                 self.alpha,
-            ).to(x.dtype)
+            )
+            return CascadedCdlQuantizedTensor(
+                theta_indices,
+                q_indices,
+                self.alpha.detach(),
+                x.new_zeros(()),
+                self.theta_format,
+                self.q_format,
+                x.dtype,
+            )
 
-        theta_indices, q_indices, theta_proxy, _, _ = cascaded_cdl_topk_forward(
+        theta_indices, q_indices, grad_proxy, _, _ = cascaded_cdl_topk_forward(
             x,
             self.theta_format,
             self.theta_kappa,
@@ -99,7 +156,15 @@ class CascadedCdlQuant(nn.Module, abc.ABC):
             self.alpha,
             True,
         )
-        return theta_indices, q_indices, self.alpha.detach(), theta_proxy
+        return CascadedCdlQuantizedTensor(
+            theta_indices,
+            q_indices,
+            self.alpha.detach(),
+            grad_proxy,
+            self.theta_format,
+            self.q_format,
+            x.dtype,
+        )
 
 
 class CascadedCdlQuantForWeight(CascadedCdlQuant):
@@ -208,11 +273,9 @@ class CascadedCdlQuantForActivation(CascadedCdlQuant):
         self.__input_shape = tuple(input_shape)
         self.initialized = True
 
-    def forward(
-        self, input: torch.Tensor
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    def forward(self, input: torch.Tensor) -> QuantizedTensor:
         if self.bypassing:
-            return input
+            return CascadedCdlBypassQuantizedTensor(input)
 
         if not self.initialized:
             raise RuntimeError("quantizer not initialized")
