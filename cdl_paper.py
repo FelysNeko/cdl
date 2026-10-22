@@ -15,6 +15,7 @@ from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 
 from cdl.checkpoint import load_checkpoint, save_checkpoint
+from cdl.core.format.fp4 import E2M1
 from cdl.core.format.intx import IntX
 from cdl.dataset import get_loaders
 from cdl.model.components.conv2d import NativeQuantizedConv2d
@@ -38,6 +39,7 @@ class ModelConfig:
     bits_edge: int = 8
     topk_act: int = 5
     kappa: float = 1.0
+    fp4: bool = False
 
 
 @dataclass
@@ -100,18 +102,28 @@ class CdlResNet(ResNet, CdlQuantMixin):
             child_name = name.rsplit(".", 1)[-1]
 
             if isinstance(module, nn.Conv2d):
-                bits = cfg.bits_edge if name == "stem" else cfg.bits
+                is_edge = name == "stem"
+                if is_edge:
+                    weight_format = IntX(True, cfg.bits_edge, torch.bfloat16)
+                elif cfg.fp4:
+                    weight_format = E2M1(torch.bfloat16)
+                else:
+                    weight_format = IntX(True, cfg.bits, torch.bfloat16)
+                if cfg.fp4 and not is_edge:
+                    act_format = E2M1(torch.bfloat16)
+                else:
+                    act_format = IntX(False, cfg.bits, torch.bfloat16)
                 weight_quant = CdlQuantForWeight(
-                    IntX(True, bits, torch.bfloat16),
+                    weight_format,
                     module.weight,
                     cfg.relaxed,
                     cfg.kappa,
                 )
                 activation_quant = (
                     IdentityQuant()
-                    if name == "stem"
+                    if is_edge
                     else CdlQuantForActivation(
-                        IntX(False, cfg.bits, torch.bfloat16),
+                        act_format,
                         cfg.relaxed,
                         cfg.topk_act,
                         cfg.kappa,
@@ -139,15 +151,14 @@ class CdlResNet(ResNet, CdlQuantMixin):
                 setattr(parent, child_name, replacement)
 
             elif isinstance(module, nn.Linear):
-                bits = cfg.bits_edge if name == "fc" else cfg.bits
                 weight_quant = CdlQuantForWeight(
-                    IntX(True, bits, torch.bfloat16),
+                    IntX(True, cfg.bits_edge, torch.bfloat16),
                     module.weight,
                     cfg.relaxed,
                     cfg.kappa,
                 )
                 activation_quant = CdlQuantForActivation(
-                    IntX(False, cfg.bits, torch.bfloat16),
+                    E2M1(torch.bfloat16) if cfg.fp4 else IntX(False, cfg.bits, torch.bfloat16),
                     cfg.relaxed,
                     cfg.topk_act,
                     cfg.kappa,
@@ -451,3 +462,7 @@ def training_pipeline() -> None:
 
     logger.info("training finished")
     writer.close()
+
+
+if __name__ == "__main__":
+    training_pipeline()

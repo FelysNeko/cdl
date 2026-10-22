@@ -5,6 +5,7 @@ model:
   bits_edge: 8
   topk_act: 5
   kappa: 1.0
+  fp4: false  # true: int6 -> E2M1 (edge layers stay int8)
 
 train:
   lam: 0.0

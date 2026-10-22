@@ -55,9 +55,9 @@ def load_checkpoint(
     optimizer.load_state_dict(ckpt["optimizer"])
     lr_scheduler.load_state_dict(ckpt["lr_scheduler"])
     random.setstate(ckpt["rng"]["python"])
-    torch.set_rng_state(ckpt["rng"]["torch"])
+    torch.set_rng_state(ckpt["rng"]["torch"].cpu())
     if device.type == "cuda" and ckpt["rng"]["cuda"] is not None:
-        torch.cuda.set_rng_state_all(ckpt["rng"]["cuda"])
+        torch.cuda.set_rng_state_all([state.cpu() for state in ckpt["rng"]["cuda"]])
     start_epoch = ckpt["epoch"] + 1
     global_step = ckpt["global_step"]
     logger.info(f"checkpoint loaded from {resume_dir}")

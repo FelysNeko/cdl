@@ -1,0 +1,27 @@
+model:
+  layers: 20
+  weight_block_size: 32
+  act_block_size: 32
+  topk_act: 5
+  kappa: 1.0
+  alpha: 1.0
+  activation_quant: cdl  # cdl | nvfp4
+
+train:
+  epochs: 200
+  freeze_kappa: true
+  batch_size: 64
+  learning_rate: 0.1
+  weight_decay: 0.0005
+  momentum: 0.9
+  milestones:
+    - 60
+    - 120
+    - 160
+  sched_gamma: 0.1
+  calib_batches: 1
+
+logging:
+  eval_every_epochs: 1
+  log_every_steps: 50
+  recal_bn_batches: 100

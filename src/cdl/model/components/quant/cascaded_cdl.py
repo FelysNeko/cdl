@@ -112,7 +112,7 @@ class CascadedCdlQuant(Quant, abc.ABC):
                 f"top-{q_topk} exceeds the {q_format.n} quantization levels"
             )
 
-        q_tensor = torch.as_tensor(q).detach().clone()
+        q_tensor = torch.as_tensor(q).detach().clone().float()
         if not torch.isfinite(q_tensor).all():
             raise ValueError("the initial q must contain only finite values")
         q_tensor = q_tensor.clamp_min(torch.finfo(torch.float32).tiny)
