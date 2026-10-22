@@ -1,12 +1,9 @@
 import argparse
 import json
 import logging
-import os
 import random
 import time
 import uuid
-from collections.abc import Iterable
-from itertools import islice
 from pathlib import Path
 
 import torch
@@ -15,10 +12,11 @@ from omegaconf import OmegaConf
 from torch import nn
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
-from torchvision import datasets, transforms
 
+from cdl.checkpoint import load_checkpoint, save_checkpoint
 from cdl.config import Config, ModelConfig, load_config
 from cdl.core.format.intx import IntX
+from cdl.dataset import get_loaders
 from cdl.model.components.conv2d import NativeQuantizedConv2d
 from cdl.model.components.linear import NativeQuantizedLinear
 from cdl.model.components.quant.cdl import (
@@ -28,42 +26,8 @@ from cdl.model.components.quant.cdl import (
 )
 from cdl.model.components.quant.identity import IdentityQuant
 from cdl.model.resnet import ResNet
-from cdl.trainer import Trainer
-
-MEAN = (0.5071, 0.4865, 0.4409)
-STD = (0.2673, 0.2564, 0.2762)
 
 logger = logging.getLogger(__name__)
-
-
-def get_loaders(
-    batch_size: int,
-    num_calib_batches: int,
-    workers: int,
-) -> tuple[DataLoader, DataLoader, Iterable[torch.Tensor]]:
-    train_tf = transforms.Compose(
-        [
-            transforms.RandomCrop(32, padding=4),
-            transforms.RandomHorizontalFlip(),
-            transforms.ToTensor(),
-            transforms.Normalize(MEAN, STD),
-        ]
-    )
-    test_tf = transforms.Compose(
-        [transforms.ToTensor(), transforms.Normalize(MEAN, STD)]
-    )
-    train_set = datasets.CIFAR100(
-        root="data", train=True, transform=train_tf, download=True
-    )
-    test_set = datasets.CIFAR100(
-        root="data", train=False, transform=test_tf, download=True
-    )
-    train_loader = DataLoader(
-        train_set, batch_size, shuffle=True, num_workers=workers, drop_last=True
-    )
-    test_loader = DataLoader(test_set, batch_size, shuffle=False, num_workers=workers)
-    num_calib_batches = (x for x, _ in islice(train_loader, num_calib_batches))
-    return train_loader, test_loader, num_calib_batches
 
 
 class CdlResNet(ResNet, CdlQuantMixin):
@@ -233,60 +197,6 @@ def save_config(output_dir: Path, cfg: Config, args: argparse.Namespace) -> None
         json.dump(args_payload, f, indent=2, default=str)
 
 
-def save_checkpoint(
-    path: Path,
-    trainer: Trainer,
-    optimizer: torch.optim.Optimizer,
-    lr_scheduler: torch.optim.lr_scheduler.LRScheduler,
-    epoch: int,
-    global_step: int,
-) -> None:
-    resnet = trainer.resnet
-    if hasattr(resnet, "_orig_mod"):
-        resnet = resnet._orig_mod
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    torch.save(
-        {
-            "epoch": epoch,
-            "global_step": global_step,
-            "model": resnet.state_dict(),
-            "optimizer": optimizer.state_dict(),
-            "lr_scheduler": lr_scheduler.state_dict(),
-            "rng": {
-                "python": random.getstate(),
-                "torch": torch.get_rng_state(),
-                "cuda": torch.cuda.get_rng_state_all()
-                if torch.cuda.is_available()
-                else None,
-            },
-        },
-        tmp,
-    )
-    os.replace(tmp, path)
-    logger.info("checkpoint saved")
-
-
-def load_checkpoint(
-    resume_dir: Path,
-    trainer: Trainer,
-    optimizer: torch.optim.Optimizer,
-    lr_scheduler: torch.optim.lr_scheduler.LRScheduler,
-    device: torch.device,
-) -> tuple[int, int]:
-    ckpt = torch.load(resume_dir / "last.ckpt", map_location=device, weights_only=False)
-    trainer.resnet.load_state_dict(ckpt["model"])
-    optimizer.load_state_dict(ckpt["optimizer"])
-    lr_scheduler.load_state_dict(ckpt["lr_scheduler"])
-    random.setstate(ckpt["rng"]["python"])
-    torch.set_rng_state(ckpt["rng"]["torch"])
-    if device.type == "cuda" and ckpt["rng"]["cuda"] is not None:
-        torch.cuda.set_rng_state_all(ckpt["rng"]["cuda"])
-    start_epoch = ckpt["epoch"] + 1
-    global_step = ckpt["global_step"]
-    logger.info("checkpoint loaded")
-    return start_epoch, global_step
-
-
 def current_lr(optimizer: torch.optim.Optimizer) -> float:
     return max(group["lr"] for group in optimizer.param_groups)
 
@@ -318,20 +228,35 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+@torch.no_grad()
+def evaluate(model: nn.Module, loader: DataLoader, device: torch.device) -> float:
+    devices = [device] if device.type == "cuda" else []
+    with torch.random.fork_rng(devices=devices):
+        model.eval()
+        correct = 0
+        total = 0
+        for x, y in loader:
+            x, y = x.to(device), y.to(device)
+            out = model(x)
+            correct += (out.argmax(-1) == y).sum().item()
+            total += y.numel()
+        return correct / total
+
+
 def training_pipeline() -> None:
     args = parse_args()
     device = sanitize_device(args.device)
     output_dir, cfg = resolve_settings(args)
     seed_all(args.seed)
 
-    cifar_resnet = get_q_resnet(cfg.model, 100)
+    cifar_resnet = get_q_resnet(cfg.model, 100).to(device)
     train_loader, test_loader, calibration_batches = get_loaders(
         cfg.train.batch_size,
         cfg.train.calib_batches,
         args.workers,
     )
+    criterion = nn.CrossEntropyLoss()
 
-    trainer = Trainer(cifar_resnet, device)
     cifar_resnet.init_act_q_pass(calibration_batches)
     for key, value in cifar_resnet.quant_stats().items():
         logger.info(f"{key} = {value}")
@@ -351,7 +276,7 @@ def training_pipeline() -> None:
 
     if args.resume:
         start_epoch, global_step = load_checkpoint(
-            args.resume, trainer, optimizer, lr_scheduler, device
+            args.resume, cifar_resnet, optimizer, lr_scheduler, device
         )
 
     if cfg.train.lam != 0.0 or cfg.train.gam != 0.0:
@@ -363,19 +288,28 @@ def training_pipeline() -> None:
 
     writer = SummaryWriter(log_dir=str(output_dir / "tensorboard"))
 
+    model: nn.Module = cifar_resnet
     if args.compile:
         logger.info("torch.compile enabled")
-        trainer.compile()
+        torch._dynamo.config.cache_size_limit = 128
+        model = torch.compile(model, dynamic=False, mode="reduce-overhead")
 
     logger.info(f"training started from epoch {start_epoch}")
     for epoch in range(start_epoch, cfg.train.epochs):
-        trainer.resnet.train()
+        model.train()
 
         start = time.perf_counter()
         for x, y in tqdm.tqdm(train_loader, desc=f"epoch {epoch}"):
-            batch_output = trainer.forward_one_batch(x, y)
-            loss = batch_output.compute_joint_loss(
-                cfg.train.lam / n_weight, cfg.train.gam / n_activation
+            x, y = x.to(device), y.to(device)
+            out = model(x)
+
+            ce_loss = criterion(out, y)
+            weight_entropy, activation_entropy = cifar_resnet.drain_entropies()
+            error_rate = (out.argmax(dim=-1) != y).float().mean()
+            loss = (
+                ce_loss
+                + cfg.train.lam / n_weight * weight_entropy
+                + cfg.train.gam / n_activation * activation_entropy
             )
 
             optimizer.zero_grad(set_to_none=True)
@@ -385,28 +319,28 @@ def training_pipeline() -> None:
                 cfg.logging.log_every_steps > 0
                 and global_step % cfg.logging.log_every_steps == 0
             ):
-                ce_loss = batch_output.ce_loss.item()
-                weight_entropy = batch_output.weight_entropy.item()
-                activation_entropy = batch_output.activation_entropy.item()
+                ce_loss_value = ce_loss.item()
+                weight_entropy_value = weight_entropy.item()
+                activation_entropy_value = activation_entropy.item()
 
                 writer.add_scalar("train/loss", loss.item(), global_step)
                 writer.add_scalar("train/epoch", epoch, global_step)
-                writer.add_scalar("train/ce_loss", ce_loss, global_step)
+                writer.add_scalar("train/ce_loss", ce_loss_value, global_step)
+                writer.add_scalar("train/error_rate", error_rate, global_step)
                 writer.add_scalar(
-                    "train/error_rate", batch_output.error_rate, global_step
+                    "train/weight_entropy", weight_entropy_value, global_step
                 )
-                writer.add_scalar("train/weight_entropy", weight_entropy, global_step)
                 writer.add_scalar(
-                    "train/activation_entropy", activation_entropy, global_step
+                    "train/activation_entropy", activation_entropy_value, global_step
                 )
                 writer.add_scalar(
                     "train/avg_weight_bits",
-                    weight_entropy / n_weight if n_weight else 0.0,
+                    weight_entropy_value / n_weight if n_weight else 0.0,
                     global_step,
                 )
                 writer.add_scalar(
                     "train/avg_activation_bits",
-                    activation_entropy / n_activation if n_activation else 0.0,
+                    activation_entropy_value / n_activation if n_activation else 0.0,
                     global_step,
                 )
                 writer.add_scalar("train/lr", current_lr(optimizer), global_step)
@@ -442,7 +376,7 @@ def training_pipeline() -> None:
         lr_scheduler.step()
         save_checkpoint(
             output_dir / "last.ckpt",
-            trainer,
+            model,
             optimizer,
             lr_scheduler,
             epoch,
@@ -454,8 +388,10 @@ def training_pipeline() -> None:
 
         if epoch % cfg.logging.eval_every_epochs == 0 or epoch == cfg.train.epochs - 1:
             if cfg.logging.recal_bn_batches > 0:
-                trainer.recalibrate_bn(train_loader, cfg.logging.recal_bn_batches)
-            acc = trainer.evaluate(test_loader)
+                cifar_resnet.recalibrate_bn(
+                    train_loader, cfg.logging.recal_bn_batches, device
+                )
+            acc = evaluate(model, test_loader, device)
             acc_percent = acc * 100
             logger.info(f"epoch {epoch} evaluation accuracy is {acc_percent:.1f}%")
             writer.add_scalar("eval/acc", acc, epoch)
