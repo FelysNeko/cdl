@@ -7,6 +7,7 @@ model:
   kappa: 1.0
   fp4_weight: false  # true: int6 -> E2M1 for non-edge weights (stem/fc stay int8)
   fp4_act: true  # true: int6 -> E2M1 for all activation quantizers
+  quant: true  # false: vanilla ResNet-20 baseline, no quantization
 
 train:
   lam: 0.0

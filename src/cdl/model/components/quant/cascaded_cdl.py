@@ -445,6 +445,8 @@ class CdlQuantMixin(BatchNormBatchStatsMixin):
             customized_param_set.add(m.log_alpha)
             if freeze_alpha:
                 m.log_alpha.requires_grad_(False)
+            else:
+                buckets.setdefault((q_lr, 0.0), []).append(m.log_alpha)
 
         decay = []
         no_decay = []

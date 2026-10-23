@@ -41,6 +41,7 @@ class ModelConfig:
     kappa: float = 1.0
     fp4_weight: bool = False
     fp4_act: bool = False
+    quant: bool = True  # false: vanilla ResNet-20 baseline
 
 
 @dataclass
@@ -88,7 +89,8 @@ class CdlResNet(ResNet, CdlQuantMixin):
         cfg: ModelConfig,
     ) -> None:
         super().__init__(num_blocks, num_classes)
-        self._replace_with_cdl_components(cfg)
+        if cfg.quant:
+            self._replace_with_cdl_components(cfg)
 
     @torch.no_grad()
     def _replace_with_cdl_components(self, cfg: ModelConfig) -> None:
@@ -194,6 +196,8 @@ def get_q_resnet(
     logger.info(
         f"built ResNet-{cfg.layers} with blocks {num_blocks} and {num_params} parameters"
     )
+    if not cfg.quant:
+        logger.info("quantization disabled: training the vanilla ResNet baseline")
     return q_resnet
 
 
