@@ -334,6 +334,7 @@ def training_pipeline() -> None:
 
     logger.info(f"weight quantizer: {cfg.model.weight_quant}")
     logger.info(f"activation quantizer: {cfg.model.activation_quant}")
+    logger.info(f"backend: {cfg.model.backend}")
 
     cifar_resnet = get_q_resnet(cfg.model, 100).to(device)
     cast_vanilla_modules_to(cifar_resnet, MODEL_DTYPE)
@@ -377,6 +378,9 @@ def training_pipeline() -> None:
     if args.compile:
         logger.info("torch.compile enabled")
         torch._dynamo.config.cache_size_limit = 128
+        # CUDA graph trees cannot track the tensors cached by the flashinfer
+        # fp4 kernels and abort during warmup, so use the legacy cudagraph path.
+        torch._inductor.config.triton.cudagraph_trees = False
         model = torch.compile(model, dynamic=False, mode="reduce-overhead")
 
     logger.info(f"training started from epoch {start_epoch}")

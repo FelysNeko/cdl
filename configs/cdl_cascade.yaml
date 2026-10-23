@@ -5,8 +5,9 @@ model:
   topk_act: 5
   kappa: 1.0
   alpha: 1.0
-  weight_quant: nvfp4  # cdl | nvfp4
+  weight_quant: cdl  # cdl | nvfp4
   activation_quant: nvfp4  # cdl | nvfp4
+  backend: fp4  # native (dequant + bf16 matmul) | fp4 (mm_fp4 kernel)
 
 train:
   epochs: 200
