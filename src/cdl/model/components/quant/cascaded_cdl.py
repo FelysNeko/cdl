@@ -11,6 +11,7 @@ from cdl.api.format import Format
 from cdl.api.quant import Quant
 from cdl.api.tensor import QuantizedTensor
 from cdl.core.v2 import cascaded_cdl_topk_forward, cascaded_nearest_round
+from cdl.model.components.quant.nvfp4_ste import nvfp4_pack
 from cdl.model.mixin.batchnorm_batch_stats import BatchNormBatchStatsMixin
 
 
@@ -38,9 +39,7 @@ class CascadedCdlBypassQuantizedTensor(QuantizedTensor):
     theta: torch.Tensor
 
     def fp4(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        raise NotImplementedError(
-            "CascadedCdlBypassQuantizedTensor is an unquantized calibration value"
-        )
+        return nvfp4_pack(self.theta)
 
     def fp8(self) -> tuple[torch.Tensor, torch.Tensor]:
         raise NotImplementedError(
@@ -63,10 +62,21 @@ class CascadedCdlQuantizedTensor(QuantizedTensor):
     k: int
 
     def fp4(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        raise NotImplementedError(
-            "CascadedCdlQuantizedTensor stores CDL integer levels and has no "
-            "packed FP4 kernel view"
-        )
+        block_size = self.theta_indices.shape[-1]
+        if block_size != 16:
+            raise NotImplementedError(
+                "the fp4 kernel view requires the NVFP4 block size 16, got "
+                f"{block_size}"
+            )
+        packed = self.theta_format.pack(self.theta_indices).flatten(1)
+        scale = self.q_format.pack(self.q_indices).flatten(1)
+        if scale.shape[0] == 1 and packed.shape[0] > 1:
+            scale = scale.expand(packed.shape[0], -1).contiguous()
+        pad = -(packed.shape[-1] * 2) % 32
+        if pad:
+            packed = F.pad(packed, (0, pad // 2))
+            scale = F.pad(scale, (0, pad // 16))
+        return packed, scale, self.alpha.float().reshape(1)
 
     def fp8(self) -> tuple[torch.Tensor, torch.Tensor]:
         raise NotImplementedError(
@@ -84,6 +94,11 @@ class CascadedCdlQuantizedTensor(QuantizedTensor):
 
         grad_proxy = self.grad_proxy.flatten(1)[:, : self.k]
         return (grad_proxy + (x - grad_proxy).detach()).to(self.dtype)
+
+    def proxy(self) -> torch.Tensor | None:
+        if self.grad_proxy is None:
+            return None
+        return self.grad_proxy.flatten(1)[:, : self.k]
 
 
 class CascadedCdlQuant(Quant, abc.ABC):

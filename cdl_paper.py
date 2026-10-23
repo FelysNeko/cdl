@@ -313,7 +313,7 @@ def training_pipeline() -> None:
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
-        
+
     args = parse_args()
     device = sanitize_device(args.device)
     output_dir, cfg = resolve_settings(args)

@@ -5,6 +5,7 @@ import torch.nn.functional as F
 from torch import nn
 
 from cdl.api.quant import Quant
+from cdl.core.matmul import matmul
 
 
 class NativeQuantizedLinear(nn.Linear):
@@ -24,12 +25,18 @@ class NativeQuantizedLinear(nn.Linear):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         activation = self.activation_quant(x)
         weight = self.weight_quant(self.weight)
-        if self.backend != "native":
-            raise NotImplementedError(
-                f"{self.backend} quantized linear is not implemented"
+
+        if self.backend == "native":
+            return F.linear(
+                activation.dequantize(),
+                weight.dequantize(),
+                self.bias,
             )
-        return F.linear(
-            activation.dequantize(),
-            weight.dequantize(),
-            self.bias,
-        )
+
+        if self.backend == "fp4":
+            out = matmul(activation, weight)
+            if self.bias is not None:
+                out = out + self.bias
+            return out
+
+        raise NotImplementedError(f"{self.backend} quantized linear is not implemented")

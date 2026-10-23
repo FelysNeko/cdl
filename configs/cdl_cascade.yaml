@@ -5,6 +5,7 @@ model:
   topk_act: 5
   kappa: 1.0
   alpha: 1.0
+  weight_quant: nvfp4  # cdl | nvfp4
   activation_quant: nvfp4  # cdl | nvfp4
 
 train:

@@ -5,6 +5,7 @@ import torch.nn.functional as F
 from torch import nn
 
 from cdl.api.quant import Quant
+from cdl.core.matmul import matmul
 
 
 class NativeQuantizedConv2d(nn.Conv2d):
@@ -21,6 +22,8 @@ class NativeQuantizedConv2d(nn.Conv2d):
         nn.init.kaiming_normal_(self.weight, mode="fan_out", nonlinearity="relu")
         if im2col and self.groups != 1:
             raise ValueError("im2col convolution only supports groups=1")
+        if backend == "fp4" and not im2col:
+            raise ValueError("fp4 backend requires im2col=True")
         self.activation_quant = activation_quant
         self.weight_quant = weight_quant
         self.im2col = im2col
@@ -61,12 +64,11 @@ class NativeQuantizedConv2d(nn.Conv2d):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if self.backend != "native":
-            raise NotImplementedError(
-                f"{self.backend} quantized convolution is not implemented"
-            )
-
         if not self.im2col:
+            if self.backend != "native":
+                raise NotImplementedError(
+                    f"{self.backend} quantized convolution is not implemented"
+                )
             activation = self.activation_quant(x)
             weight = self.weight_quant(self.weight)
             return F.conv2d(
@@ -86,10 +88,18 @@ class NativeQuantizedConv2d(nn.Conv2d):
             raise ValueError(f"convolution input must be 3-D or 4-D, got {x.ndim}-D")
 
         im2col_activation = self.im2col_for_activation(x)
-        activation = self.activation_quant(im2col_activation).dequantize()
-        weight = self.weight_quant(self.im2col_weight).dequantize()
+        activation = self.activation_quant(im2col_activation)
+        weight = self.weight_quant(self.im2col_weight)
 
-        output = activation @ weight.T
+        if self.backend == "fp4":
+           output = matmul(activation, weight)
+        elif self.backend == "native":
+            output = activation.dequantize() @ weight.dequantize().T
+        else:
+            raise NotImplementedError(
+                f"{self.backend} quantized convolution is not implemented"
+            )
+
         if self.bias is not None:
             output = output + self.bias
 

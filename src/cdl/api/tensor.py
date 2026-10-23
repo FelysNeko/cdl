@@ -12,3 +12,6 @@ class QuantizedTensor(abc.ABC):
 
     @abc.abstractmethod
     def dequantize(self) -> torch.Tensor: ...
+
+    def proxy(self) -> torch.Tensor | None:
+        return None

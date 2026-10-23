@@ -16,26 +16,62 @@ def swizzle_nvfp4_scale_factors(sf: torch.Tensor) -> torch.Tensor:
     )
 
 
+@torch.library.custom_op("cdl::mm_fp4", mutates_args=())
+def mm_fp4(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    a_scale: torch.Tensor,
+    b_scale: torch.Tensor,
+    alpha: torch.Tensor,
+) -> torch.Tensor:
+    return flashinfer.mm_fp4(
+        a,
+        b,
+        a_scale,
+        b_scale,
+        alpha,
+        torch.bfloat16,
+        block_size=16,
+        backend="b12x",
+    )
+
+
+@mm_fp4.register_fake
+def _(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    a_scale: torch.Tensor,
+    b_scale: torch.Tensor,
+    alpha: torch.Tensor,
+) -> torch.Tensor:
+    return torch.empty(a.shape[0], b.shape[1], dtype=torch.bfloat16, device=a.device)
+
+
+def matmul(x: QuantizedTensor, w: QuantizedTensor) -> torch.Tensor:
+    return MatMul.apply(x, x.proxy(), w, w.proxy())
+
+
 class MatMul(torch.autograd.Function):
     @staticmethod
     def forward(
         ctx: torch.autograd.function.FunctionCtx,
         x: QuantizedTensor,
-        x_proxy: torch.Tensor,
+        x_proxy: torch.Tensor | None,
         w: QuantizedTensor,
-        w_proxy: torch.Tensor,
+        w_proxy: torch.Tensor | None,
     ) -> torch.Tensor:
         x_theta, x_q, x_alpha = x.fp4()
         w_theta, w_q, w_alpha = w.fp4()
         ctx.save_for_backward(x_theta, x_q, x_alpha, w_theta, w_q, w_alpha)
+        ctx.x_k = x_proxy.shape[-1] if x_proxy is not None else None
+        ctx.w_k = w_proxy.shape[-1] if w_proxy is not None else None
 
-        out = flashinfer.mm_fp4(
+        out = mm_fp4(
             x_theta,
             w_theta.T,
             swizzle_nvfp4_scale_factors(x_q),
             swizzle_nvfp4_scale_factors(w_q).T,
             x_alpha * w_alpha,
-            backend="b12x",
         )
         return out
 
@@ -49,9 +85,9 @@ class MatMul(torch.autograd.Function):
         grad_output = grad_output.contiguous()
 
         w = flashinfer.nvfp4_kv_dequantize(w_theta, w_q, w_alpha)
-        dx = grad_output @ w
+        dx = grad_output @ w[:, : ctx.x_k]
 
         x = flashinfer.nvfp4_kv_dequantize(x_theta, x_q, x_alpha)
-        dw = grad_output.T @ x
+        dw = grad_output.T @ x[:, : ctx.w_k]
 
         return None, dx, None, dw

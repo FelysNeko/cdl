@@ -41,7 +41,9 @@ class ModelConfig:
     topk_act: int = 5
     kappa: float = 1.0
     alpha: float = 1.0
+    weight_quant: str = "cdl"  # "cdl" or "nvfp4"
     activation_quant: str = "cdl"  # "cdl" or "nvfp4"
+    backend: str = "native"  # "native" (dequant + bf16 matmul) or "fp4" (mm_fp4 kernel)
 
 
 @dataclass
@@ -102,17 +104,8 @@ class CascadeResNet(ResNet, CdlQuantMixin):
             child_name = name.rsplit(".", 1)[-1]
 
             if isinstance(module, nn.Conv2d):
-                theta_format = E2M1(MODEL_DTYPE)
                 q_format = UE4M3ExcludeZero(MODEL_DTYPE)
-                weight_quant = CascadedCdlQuantForWeight(
-                    module.weight.flatten(1),
-                    theta_format,
-                    cfg.kappa,
-                    q_format,
-                    cfg.kappa,
-                    cfg.alpha,
-                    cfg.weight_block_size,
-                )
+                weight_quant = self._make_weight_quant(cfg, module.weight.flatten(1))
                 activation_quant = self._make_activation_quant(cfg, q_format)
                 replacement = NativeQuantizedConv2d(
                     module.in_channels,
@@ -128,7 +121,7 @@ class CascadeResNet(ResNet, CdlQuantMixin):
                     activation_quant=activation_quant,
                     weight_quant=weight_quant,
                     im2col=True,
-                    backend="native",
+                    backend=cfg.backend,
                 )
                 replacement.weight.copy_(module.weight)
                 if module.bias is not None:
@@ -137,17 +130,8 @@ class CascadeResNet(ResNet, CdlQuantMixin):
                 setattr(parent, child_name, replacement)
 
             elif isinstance(module, nn.Linear):
-                theta_format = E2M1(MODEL_DTYPE)
                 q_format = UE4M3ExcludeZero(MODEL_DTYPE)
-                weight_quant = CascadedCdlQuantForWeight(
-                    module.weight,
-                    theta_format,
-                    cfg.kappa,
-                    q_format,
-                    cfg.kappa,
-                    cfg.alpha,
-                    cfg.weight_block_size,
-                )
+                weight_quant = self._make_weight_quant(cfg, module.weight)
                 activation_quant = self._make_activation_quant(cfg, q_format)
                 replacement = NativeQuantizedLinear(
                     module.in_features,
@@ -157,13 +141,31 @@ class CascadeResNet(ResNet, CdlQuantMixin):
                     dtype=MODEL_DTYPE,
                     activation_quant=activation_quant,
                     weight_quant=weight_quant,
-                    backend="native",
+                    backend=cfg.backend,
                 )
                 replacement.weight.copy_(module.weight)
                 if module.bias is not None:
                     assert replacement.bias is not None
                     replacement.bias.copy_(module.bias)
                 setattr(parent, child_name, replacement)
+
+    @staticmethod
+    def _make_weight_quant(cfg: ModelConfig, theta: torch.Tensor) -> nn.Module:
+        if cfg.weight_quant == "nvfp4":
+            return Nvfp4SteQuant()
+        if cfg.weight_quant != "cdl":
+            raise ValueError(
+                f"unknown weight_quant {cfg.weight_quant!r}; expected 'cdl' or 'nvfp4'"
+            )
+        return CascadedCdlQuantForWeight(
+            theta,
+            E2M1(MODEL_DTYPE),
+            cfg.kappa,
+            UE4M3ExcludeZero(MODEL_DTYPE),
+            cfg.kappa,
+            cfg.alpha,
+            cfg.weight_block_size,
+        )
 
     @staticmethod
     def _make_activation_quant(cfg: ModelConfig, q_format) -> nn.Module:
@@ -206,9 +208,7 @@ def cast_vanilla_modules_to(model: nn.Module, dtype: torch.dtype) -> None:
     from cdl.api.quant import Quant
 
     for module in model.modules():
-        if isinstance(module, Quant) or isinstance(
-            module, (NativeQuantizedConv2d, NativeQuantizedLinear)
-        ):
+        if isinstance(module, (Quant, NativeQuantizedConv2d, NativeQuantizedLinear)):
             continue
         if isinstance(module, (nn.Conv2d, nn.Linear, nn.BatchNorm2d)):
             module.to(dtype)
@@ -332,6 +332,7 @@ def training_pipeline() -> None:
     output_dir, cfg = resolve_settings(args)
     seed_all(args.seed)
 
+    logger.info(f"weight quantizer: {cfg.model.weight_quant}")
     logger.info(f"activation quantizer: {cfg.model.activation_quant}")
 
     cifar_resnet = get_q_resnet(cfg.model, 100).to(device)
@@ -343,9 +344,7 @@ def training_pipeline() -> None:
     )
     criterion = nn.CrossEntropyLoss()
 
-    cifar_resnet.init_act_q_pass(
-        x.to(MODEL_DTYPE) for x in calibration_batches
-    )
+    cifar_resnet.init_act_q_pass(x.to(MODEL_DTYPE) for x in calibration_batches)
     for key, value in cifar_resnet.quant_stats().items():
         logger.info(f"{key} = {value}")
 
@@ -403,7 +402,9 @@ def training_pipeline() -> None:
                 writer.add_scalar("train/epoch", epoch, global_step)
                 writer.add_scalar("train/error_rate", error_rate.item(), global_step)
                 writer.add_scalar("train/lr", current_lr(optimizer), global_step)
-                writer.add_scalar("train/grad_norm", total_grad_norm(optimizer), global_step)
+                writer.add_scalar(
+                    "train/grad_norm", total_grad_norm(optimizer), global_step
+                )
 
                 for key, value in cifar_resnet.quant_stats().items():
                     writer.add_scalar(f"quant/{key}", value, global_step)

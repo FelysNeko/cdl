@@ -12,7 +12,7 @@ from cdl.api.tensor import QuantizedTensor
 def nvfp4_quantize(
     x: torch.Tensor, global_scale: torch.Tensor
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    # x: [rows, k] with k % 16 == 0, bfloat16, row-major.
+    # x: [rows, k] with k % 32 == 0 (mm_fp4 TMA alignment), bfloat16, row-major.
     # Returns (packed fp4 [rows, k / 2] uint8, block scales [rows, k / 16] uint8)
     # in the linear (non-swizzled) scale layout.
     packed, scale = flashinfer.fp4_quantize(
@@ -54,6 +54,28 @@ def _(
     return torch.empty(rows, k, dtype=torch.bfloat16, device=packed.device)
 
 
+@torch.no_grad()
+def nvfp4_pack(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    # Quantizes a [rows, k] tensor to the NVFP4 kernel layout: pads k to a
+    # multiple of 32 (mm_fp4 TMA alignment), derives the per-tensor global
+    # scale from the amax, and returns (packed fp4 [rows, k' / 2] uint8,
+    # linear block scales [rows, k' / 16] uint8, global_scale_inv [1]).
+    k = x.shape[-1]
+    flat = x.bfloat16()
+    r = -k % 32
+    if r:
+        flat = F.pad(flat, (0, r))
+
+    amax = flat.float().abs().amax()
+    global_scale = torch.where(
+        amax > 0,
+        amax.new_full((), 448.0 * 6.0) / amax,
+        amax.new_full((), torch.finfo(torch.float32).max),
+    ).reshape(1)
+    packed, scale = nvfp4_quantize(flat, global_scale)
+    return packed, scale, (1.0 / global_scale).float()
+
+
 @dataclass
 class Nvfp4SteQuantizedTensor(QuantizedTensor):
     packed: torch.Tensor
@@ -74,6 +96,9 @@ class Nvfp4SteQuantizedTensor(QuantizedTensor):
         dense = dense[..., : self.k].to(self.dtype)
         return self.grad_proxy + (dense - self.grad_proxy).detach()
 
+    def proxy(self) -> torch.Tensor:
+        return self.grad_proxy
+
 
 class Nvfp4SteQuant(Quant):
     def forward(self, input: torch.Tensor) -> QuantizedTensor:
@@ -82,26 +107,12 @@ class Nvfp4SteQuant(Quant):
                 f"Nvfp4SteQuant expects a 2-D [rows, k] tensor, got ndim={input.ndim}"
             )
 
-        k = input.shape[-1]
-        with torch.no_grad():
-            flat = input.bfloat16()
-            r = -k % 16
-            if r:
-                flat = F.pad(flat, (0, r))
-
-            amax = flat.float().abs().amax()
-            global_scale = torch.where(
-                amax > 0,
-                amax.new_full((), 448.0 * 6.0) / amax,
-                amax.new_full((), torch.finfo(torch.float32).max),
-            ).reshape(1)
-            packed, scale = nvfp4_quantize(flat, global_scale)
-
+        packed, scale, global_scale_inv = nvfp4_pack(input)
         return Nvfp4SteQuantizedTensor(
             packed=packed,
             scale=scale,
-            global_scale_inv=(1.0 / global_scale).float(),
+            global_scale_inv=global_scale_inv,
             grad_proxy=input,
-            k=k,
+            k=input.shape[-1],
             dtype=input.dtype,
         )
