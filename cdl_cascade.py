@@ -1,6 +1,7 @@
 import argparse
 import json
 import logging
+import math
 import random
 import time
 import uuid
@@ -21,6 +22,7 @@ from cdl.dataset import get_loaders
 from cdl.model.components.conv2d import NativeQuantizedConv2d
 from cdl.model.components.linear import NativeQuantizedLinear
 from cdl.model.components.quant.cascaded_cdl import (
+    CascadedCdlQuant,
     CascadedCdlQuantForActivation,
     CascadedCdlQuantForWeight,
     CdlQuantMixin,
@@ -51,6 +53,7 @@ class TrainingConfig:
     epochs: int = 200
     freeze_kappa: bool = False
     freeze_alpha: bool = False
+    kappa_end: float | None = None  # None = static kappa; else exponential ramp to this value
     batch_size: int = 64
     learning_rate: float = 0.1
     weight_decay: float = 5e-4
@@ -289,6 +292,13 @@ def total_grad_norm(optimizer: torch.optim.Optimizer) -> float:
     return torch.nn.utils.get_total_norm(grads).item()
 
 
+def apply_kappa(model: nn.Module, kappa: float) -> None:
+    for m in model.modules():
+        if isinstance(m, CascadedCdlQuant):
+            m.log_theta_kappa.data.fill_(math.log(kappa))
+            m.log_q_kappa.data.fill_(math.log(kappa))
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
 
@@ -330,11 +340,21 @@ def training_pipeline() -> None:
     args = parse_args()
     device = sanitize_device(args.device)
     output_dir, cfg = resolve_settings(args)
+    if cfg.train.kappa_end is not None and cfg.train.kappa_end < cfg.model.kappa:
+        raise ValueError(
+            "kappa_end must be >= the initial model.kappa for an annealing "
+            f"schedule, got kappa={cfg.model.kappa} -> kappa_end={cfg.train.kappa_end}"
+        )
     seed_all(args.seed)
 
     logger.info(f"weight quantizer: {cfg.model.weight_quant}")
     logger.info(f"activation quantizer: {cfg.model.activation_quant}")
     logger.info(f"backend: {cfg.model.backend}")
+    if cfg.train.kappa_end is not None:
+        logger.info(
+            f"kappa schedule: {cfg.model.kappa} -> {cfg.train.kappa_end} "
+            f"over {cfg.train.epochs} epochs"
+        )
 
     cifar_resnet = get_q_resnet(cfg.model, 100).to(device)
     cast_vanilla_modules_to(cifar_resnet, MODEL_DTYPE)
@@ -352,7 +372,7 @@ def training_pipeline() -> None:
     param_groups = cifar_resnet.get_param_groups(
         cfg.train.learning_rate,
         cfg.train.weight_decay,
-        cfg.train.freeze_kappa,
+        cfg.train.freeze_kappa or cfg.train.kappa_end is not None,
         cfg.train.freeze_alpha,
     )
     optimizer = torch.optim.SGD(param_groups, momentum=cfg.train.momentum, fused=True)
@@ -385,6 +405,12 @@ def training_pipeline() -> None:
 
     logger.info(f"training started from epoch {start_epoch}")
     for epoch in range(start_epoch, cfg.train.epochs):
+        if cfg.train.kappa_end is not None:
+            progress = epoch / max(cfg.train.epochs - 1, 1)
+            kappa_t = cfg.model.kappa * (cfg.train.kappa_end / cfg.model.kappa) ** progress
+            apply_kappa(cifar_resnet, kappa_t)
+            logger.info(f"kappa schedule: epoch {epoch} kappa = {kappa_t:.3f}")
+
         model.train()
 
         start = time.perf_counter()

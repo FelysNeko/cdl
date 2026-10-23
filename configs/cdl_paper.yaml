@@ -4,7 +4,7 @@ model:
   bits: 6
   bits_edge: 8
   topk_act: 5
-  kappa: 1.0
+  kappa: 2.0
   fp4_weight: false  # true: int6 -> E2M1 for non-edge weights (stem/fc stay int8)
   fp4_act: false  # true: int6 -> E2M1 for all activation quantizers
   quant: true  # false: vanilla ResNet-20 baseline, no quantization

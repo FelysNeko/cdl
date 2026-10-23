@@ -3,7 +3,7 @@ model:
   weight_block_size: 16
   act_block_size: 16
   topk_act: 5
-  kappa: 1.0
+  kappa: 2.0
   alpha: 1.0
   weight_quant: cdl  # cdl | nvfp4
   activation_quant: nvfp4  # cdl | nvfp4
@@ -12,6 +12,7 @@ model:
 train:
   epochs: 200
   freeze_kappa: true
+  kappa_end: 8.0  # null = static kappa; else exponential ramp kappa -> kappa_end
   freeze_alpha: false
   batch_size: 64
   learning_rate: 0.1
