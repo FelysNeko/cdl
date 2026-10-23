@@ -75,4 +75,5 @@ dev = [
     "ipykernel>=7.4.0",
     "pypdf>=6.19.0",
     "ruff>=0.16.9",
+    "seaborn>=0.13.2",
 ]
