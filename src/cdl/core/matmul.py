@@ -1,7 +1,7 @@
-import flashinfer
 import torch
 
 from cdl.api.tensor import QuantizedTensor
+from cdl.model.wrapper.flashinfer import mm_fp4, nvfp4_dequantize
 
 
 def swizzle_nvfp4_scale_factors(sf: torch.Tensor) -> torch.Tensor:
@@ -14,37 +14,6 @@ def swizzle_nvfp4_scale_factors(sf: torch.Tensor) -> torch.Tensor:
         .permute(0, 3, 2, 1, 4)
         .reshape(rows, cols)
     )
-
-
-@torch.library.custom_op("cdl::mm_fp4", mutates_args=())
-def mm_fp4(
-    a: torch.Tensor,
-    b: torch.Tensor,
-    a_scale: torch.Tensor,
-    b_scale: torch.Tensor,
-    alpha: torch.Tensor,
-) -> torch.Tensor:
-    return flashinfer.mm_fp4(
-        a,
-        b,
-        a_scale,
-        b_scale,
-        alpha,
-        torch.bfloat16,
-        block_size=16,
-        backend="b12x",
-    )
-
-
-@mm_fp4.register_fake
-def _(
-    a: torch.Tensor,
-    b: torch.Tensor,
-    a_scale: torch.Tensor,
-    b_scale: torch.Tensor,
-    alpha: torch.Tensor,
-) -> torch.Tensor:
-    return torch.empty(a.shape[0], b.shape[1], dtype=torch.bfloat16, device=a.device)
 
 
 def matmul(x: QuantizedTensor, w: QuantizedTensor) -> torch.Tensor:
@@ -84,10 +53,10 @@ class MatMul(torch.autograd.Function):
         x_theta, x_q, x_alpha, w_theta, w_q, w_alpha = saved_tensors
         grad_output = grad_output.contiguous()
 
-        w = flashinfer.nvfp4_kv_dequantize(w_theta, w_q, w_alpha)
+        w = nvfp4_dequantize(w_theta, w_q, w_alpha)
         dx = grad_output @ w[:, : ctx.x_k]
 
-        x = flashinfer.nvfp4_kv_dequantize(x_theta, x_q, x_alpha)
+        x = nvfp4_dequantize(x_theta, x_q, x_alpha)
         dw = grad_output.T @ x[:, : ctx.w_k]
 
         return None, dx, None, dw
