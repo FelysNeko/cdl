@@ -376,11 +376,11 @@ def training_pipeline() -> None:
             ce_loss = criterion(out, y)
             weight_entropy, activation_entropy = cifar_resnet.drain_entropies()
             error_rate = (out.argmax(dim=-1) != y).float().mean()
-            loss = (
-                ce_loss
-                + cfg.train.lam / n_weight * weight_entropy
-                + cfg.train.gam / n_activation * activation_entropy
-            )
+            loss = ce_loss
+            if cfg.train.lam != 0.0 and n_weight:
+                loss = loss + cfg.train.lam / n_weight * weight_entropy
+            if cfg.train.gam != 0.0 and n_activation:
+                loss = loss + cfg.train.gam / n_activation * activation_entropy
 
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
