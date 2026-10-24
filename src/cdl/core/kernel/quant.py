@@ -28,7 +28,7 @@ import torch
 import triton
 import triton.language as tl
 
-from cdl.core.kernel.tables import ue4m3_tables
+from cdl.core.kernel.tables import e2m1_tables, ue4m3_tables
 
 LOG2E = tl.constexpr(1.4426950408889634)
 
@@ -609,6 +609,4 @@ def _(
 
 
 def _tables(device):
-    from cdl.core.kernel.tables import e2m1_tables
-
     return (*e2m1_tables(device), *ue4m3_tables(device))

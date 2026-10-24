@@ -5,7 +5,7 @@ import torch.nn.functional as F
 from torch import nn
 
 from cdl.api.quant import Quant
-from cdl.core.kernel import fusable_quant, fused_cdl_matmul
+from cdl.core.kernel.matmul import fusable_quant, fused_cdl_matmul
 from cdl.core.matmul import matmul
 
 Backend = Literal["native", "fp4", "fp8", "fused"]

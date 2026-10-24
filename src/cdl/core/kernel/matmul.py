@@ -12,13 +12,10 @@ import torch
 
 from cdl.core.format.fp4 import E2M1
 from cdl.core.format.fp8 import UE4M3ExcludeZero
+from cdl.core.kernel.quant import cdl_quant_bwd, cdl_quant_fwd
+from cdl.core.kernel.tables import e2m1_tables, ue4m3_tables
+from cdl.core.matmul import swizzle_nvfp4_scale_factors as swz
 from cdl.model.wrapper.flashinfer import mm_fp4, nvfp4_dequantize, nvfp4_quantize
-
-
-def swz(sf: torch.Tensor) -> torch.Tensor:
-    from cdl.core.matmul import swizzle_nvfp4_scale_factors
-
-    return swizzle_nvfp4_scale_factors(sf)
 
 
 def fusable_quant(quant) -> bool:
@@ -93,7 +90,7 @@ class FusedCdlMatmul(torch.autograd.Function):
         )
 
         seed.add_(1)
-        packed_x, scale_x, x_sw, s_x = torch.ops.cdl.cdl_quant_fwd(
+        packed_x, scale_x, x_sw, s_x = cdl_quant_fwd(
             theta_x,
             q_x,
             theta_level,
@@ -108,7 +105,7 @@ class FusedCdlMatmul(torch.autograd.Function):
             qtopk_x,
         )
         seed.add_(1)
-        packed_w, scale_w, w_sw, s_w = torch.ops.cdl.cdl_quant_fwd(
+        packed_w, scale_w, w_sw, s_w = cdl_quant_fwd(
             theta_w,
             q_w,
             theta_level,
@@ -211,7 +208,7 @@ class FusedCdlMatmul(torch.autograd.Function):
             x_dq = nvfp4_dequantize(packed_x, scale_x, al_x.reshape(1))[:m_x]
             dw = g.T @ x_dq[:, :k_x]
 
-        dtheta_x, dq_x, sums_x = torch.ops.cdl.cdl_quant_bwd(
+        dtheta_x, dq_x, sums_x = cdl_quant_bwd(
             dx,
             theta_x,
             q_x,
@@ -226,7 +223,7 @@ class FusedCdlMatmul(torch.autograd.Function):
             ctx.topk_x,
             ctx.qtopk_x,
         )
-        dtheta_w, dq_w, sums_w = torch.ops.cdl.cdl_quant_bwd(
+        dtheta_w, dq_w, sums_w = cdl_quant_bwd(
             dw,
             theta_w,
             q_w,
@@ -316,6 +313,4 @@ def fused_cdl_matmul(
 
 
 def _resolve_tables(device):
-    from cdl.core.kernel.tables import e2m1_tables, ue4m3_tables
-
     return (*e2m1_tables(device), *ue4m3_tables(device))
