@@ -45,7 +45,8 @@ class ModelConfig:
     alpha: float = 1.0
     weight_quant: str = "cdl"  # "cdl" or "nvfp4"
     activation_quant: str = "cdl"  # "cdl" or "nvfp4"
-    backend: str = "native"  # "native" (dequant + bf16 matmul) or "fp4" (mm_fp4 kernel)
+    backend: str = "native"  # "native" (dequant + bf16 matmul), "fp4" (mm_fp4
+    # kernel), or "fused" (fused Triton CDL quant + mm_fp4, training path)
 
 
 @dataclass
@@ -53,7 +54,9 @@ class TrainingConfig:
     epochs: int = 200
     freeze_kappa: bool = False
     freeze_alpha: bool = False
-    kappa_end: float | None = None  # None = static kappa; else exponential ramp to this value
+    kappa_end: float | None = (
+        None  # None = static kappa; else exponential ramp to this value
+    )
     batch_size: int = 64
     learning_rate: float = 0.1
     weight_decay: float = 5e-4
@@ -340,6 +343,18 @@ def training_pipeline() -> None:
     args = parse_args()
     device = sanitize_device(args.device)
     output_dir, cfg = resolve_settings(args)
+    if cfg.model.backend not in ("native", "fp4", "fused"):
+        raise ValueError(
+            f"unknown backend {cfg.model.backend!r}; expected native, fp4 or fused"
+        )
+    if cfg.model.backend == "fused" and (
+        cfg.model.weight_quant != "cdl" or cfg.model.activation_quant != "cdl"
+    ):
+        raise ValueError(
+            "the fused backend quantizes both operands with cascaded CDL; "
+            f"got weight_quant={cfg.model.weight_quant!r}, "
+            f"activation_quant={cfg.model.activation_quant!r}"
+        )
     if cfg.train.kappa_end is not None and cfg.train.kappa_end < cfg.model.kappa:
         raise ValueError(
             "kappa_end must be >= the initial model.kappa for an annealing "
@@ -407,7 +422,9 @@ def training_pipeline() -> None:
     for epoch in range(start_epoch, cfg.train.epochs):
         if cfg.train.kappa_end is not None:
             progress = epoch / max(cfg.train.epochs - 1, 1)
-            kappa_t = cfg.model.kappa * (cfg.train.kappa_end / cfg.model.kappa) ** progress
+            kappa_t = (
+                cfg.model.kappa * (cfg.train.kappa_end / cfg.model.kappa) ** progress
+            )
             apply_kappa(cifar_resnet, kappa_t)
             logger.info(f"kappa schedule: epoch {epoch} kappa = {kappa_t:.3f}")
 

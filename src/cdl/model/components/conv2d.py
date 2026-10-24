@@ -5,7 +5,10 @@ import torch.nn.functional as F
 from torch import nn
 
 from cdl.api.quant import Quant
+from cdl.core.kernel import fusable_quant, fused_cdl_matmul
 from cdl.core.matmul import matmul
+
+Backend = Literal["native", "fp4", "fp8", "fused"]
 
 
 class NativeQuantizedConv2d(nn.Conv2d):
@@ -15,15 +18,15 @@ class NativeQuantizedConv2d(nn.Conv2d):
         activation_quant: Quant,
         weight_quant: Quant,
         im2col: bool = False,
-        backend: Literal["native", "fp4", "fp8"] = "native",
+        backend: Backend = "native",
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
         nn.init.kaiming_normal_(self.weight, mode="fan_out", nonlinearity="relu")
         if im2col and self.groups != 1:
             raise ValueError("im2col convolution only supports groups=1")
-        if backend == "fp4" and not im2col:
-            raise ValueError("fp4 backend requires im2col=True")
+        if backend in ("fp4", "fused") and not im2col:
+            raise ValueError(f"{backend} backend requires im2col=True")
         self.activation_quant = activation_quant
         self.weight_quant = weight_quant
         self.im2col = im2col
@@ -63,6 +66,42 @@ class NativeQuantizedConv2d(nn.Conv2d):
             0, 3, 1, 2
         )
 
+    def fused_im2col_forward(self, im2col_x: torch.Tensor) -> torch.Tensor:
+        quant_a, quant_w = self.activation_quant, self.weight_quant
+        if not (fusable_quant(quant_a) and fusable_quant(quant_w)):
+            raise NotImplementedError(
+                "the fused backend requires cascaded CDL quantizers on the "
+                "E2M1/UE4M3ExcludeZero formats with block size 16"
+            )
+        k = im2col_x.shape[1]
+        if k % 16 or self.weight.shape[1] % 16:
+            raise NotImplementedError(
+                "the fused backend requires the contraction dimension to be "
+                f"a multiple of 16, got {k}"
+            )
+        return fused_cdl_matmul(
+            im2col_x.contiguous(),
+            quant_a,
+            self.im2col_weight,
+            quant_w,
+            quant_a.kernel_seed,
+        )
+
+    def im2col_forward(self, im2col_x: torch.Tensor) -> torch.Tensor:
+        activation = self.activation_quant(im2col_x)
+        weight = self.weight_quant(self.im2col_weight)
+
+        if self.backend in ("fp4", "fused"):
+            # Eval-mode fused falls back to the deterministic nearest-round
+            # path produced by the quantizers above.
+            return matmul(activation, weight)
+        elif self.backend == "native":
+            return activation.dequantize() @ weight.dequantize().T
+
+        raise NotImplementedError(
+            f"{self.backend} quantized convolution is not implemented"
+        )
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if not self.im2col:
             if self.backend != "native":
@@ -88,17 +127,11 @@ class NativeQuantizedConv2d(nn.Conv2d):
             raise ValueError(f"convolution input must be 3-D or 4-D, got {x.ndim}-D")
 
         im2col_activation = self.im2col_for_activation(x)
-        activation = self.activation_quant(im2col_activation)
-        weight = self.weight_quant(self.im2col_weight)
 
-        if self.backend == "fp4":
-           output = matmul(activation, weight)
-        elif self.backend == "native":
-            output = activation.dequantize() @ weight.dequantize().T
+        if self.backend == "fused" and self.training:
+            output = self.fused_im2col_forward(im2col_activation)
         else:
-            raise NotImplementedError(
-                f"{self.backend} quantized convolution is not implemented"
-            )
+            output = self.im2col_forward(im2col_activation)
 
         if self.bias is not None:
             output = output + self.bias

@@ -146,6 +146,11 @@ class CascadedCdlQuant(Quant, abc.ABC):
         self.log_alpha = nn.Parameter(
             torch.full((), math.log(alpha), dtype=q_tensor.dtype)
         )
+        # RNG counter for the fused CDL kernel (advanced inside the CUDA
+        # graph; unused by the decomposed eager path).
+        self.register_buffer(
+            "kernel_seed", torch.zeros((), dtype=torch.int64), persistent=False
+        )
 
     @property
     def theta_kappa(self) -> torch.Tensor:
