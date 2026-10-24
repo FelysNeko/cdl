@@ -7,12 +7,12 @@ model:
   alpha: 1.0
   weight_quant: cdl  # cdl | nvfp4
   activation_quant: nvfp4  # cdl | nvfp4
-  backend: fp4  # native (dequant + bf16 matmul) | fp4 (mm_fp4 kernel)
+  backend: fp4  # native (dequant + bf16 matmul) | fp4 (mm_fp4 kernel) | fused (triton kernel)
 
 train:
   epochs: 200
   freeze_kappa: true
-  kappa_end: 8.0  # null = static kappa; else exponential ramp kappa -> kappa_end
+  kappa_end: null  # null = static kappa; else exponential ramp kappa -> kappa_end
   freeze_alpha: false
   batch_size: 64
   learning_rate: 0.1
