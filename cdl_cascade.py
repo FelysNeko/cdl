@@ -57,6 +57,9 @@ class TrainingConfig:
     kappa_end: float | None = (
         None  # None = static kappa; else exponential ramp to this value
     )
+    kappa_milestones: list[int] = field(
+        default_factory=list
+    )  # epochs at which kappa steps up by 1
     batch_size: int = 64
     learning_rate: float = 0.1
     weight_decay: float = 5e-4
@@ -360,6 +363,15 @@ def training_pipeline() -> None:
             "kappa_end must be >= the initial model.kappa for an annealing "
             f"schedule, got kappa={cfg.model.kappa} -> kappa_end={cfg.train.kappa_end}"
         )
+    if cfg.train.kappa_end is not None and cfg.train.kappa_milestones:
+        raise ValueError(
+            "kappa_end and kappa_milestones are mutually exclusive kappa schedules"
+        )
+    if any(m <= 0 or m >= cfg.train.epochs for m in cfg.train.kappa_milestones):
+        raise ValueError(
+            "kappa_milestones must lie in (0, epochs) to step within training, "
+            f"got {cfg.train.kappa_milestones} for epochs={cfg.train.epochs}"
+        )
     seed_all(args.seed)
 
     logger.info(f"weight quantizer: {cfg.model.weight_quant}")
@@ -369,6 +381,11 @@ def training_pipeline() -> None:
         logger.info(
             f"kappa schedule: {cfg.model.kappa} -> {cfg.train.kappa_end} "
             f"over {cfg.train.epochs} epochs"
+        )
+    elif cfg.train.kappa_milestones:
+        logger.info(
+            f"kappa schedule: {cfg.model.kappa} + 1 at epochs "
+            f"{cfg.train.kappa_milestones}"
         )
 
     cifar_resnet = get_q_resnet(cfg.model, 100).to(device)
@@ -387,7 +404,9 @@ def training_pipeline() -> None:
     param_groups = cifar_resnet.get_param_groups(
         cfg.train.learning_rate,
         cfg.train.weight_decay,
-        cfg.train.freeze_kappa or cfg.train.kappa_end is not None,
+        cfg.train.freeze_kappa
+        or cfg.train.kappa_end is not None
+        or bool(cfg.train.kappa_milestones),
         cfg.train.freeze_alpha,
     )
     optimizer = torch.optim.SGD(param_groups, momentum=cfg.train.momentum, fused=True)
@@ -426,6 +445,12 @@ def training_pipeline() -> None:
                 cfg.model.kappa * (cfg.train.kappa_end / cfg.model.kappa) ** progress
             )
             apply_kappa(cifar_resnet, kappa_t)
+            logger.info(f"kappa schedule: epoch {epoch} kappa = {kappa_t:.3f}")
+        elif cfg.train.kappa_milestones:
+            kappa_t = cfg.model.kappa + sum(
+                1 for m in cfg.train.kappa_milestones if epoch >= m
+            )
+            apply_kappa(cifar_resnet, float(kappa_t))
             logger.info(f"kappa schedule: epoch {epoch} kappa = {kappa_t:.3f}")
 
         model.train()

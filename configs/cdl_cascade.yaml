@@ -13,6 +13,7 @@ train:
   epochs: 200
   freeze_kappa: true
   kappa_end: null  # null = static kappa; else exponential ramp kappa -> kappa_end
+  kappa_milestones: [100, 150]  # null = static kappa; else exponential ramp kappa -> kappa_end
   freeze_alpha: false
   batch_size: 64
   learning_rate: 0.1
