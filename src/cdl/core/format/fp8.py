@@ -34,14 +34,22 @@ class UE4M3ExcludeZero(Format):
 
 
 class E8M0(Format):
+    """OCP MX E8M0 scale alphabet: 255 power-of-two levels 2**(code - 127).
+
+    `ordinal` uses floor-exponent semantics (truncation of the binary
+    exponent field) rather than round-to-nearest-even so that it matches the
+    fused kernel's bit-field extraction bit-exactly; the companded CDL
+    coordinate absorbs the truncation phase.
+    """
+
     def __init__(self, dtype: torch.dtype) -> None:
         key = torch.arange(255)
         level = key.to(torch.uint8).view(torch.float8_e8m0fnu).to(dtype)
         super().__init__(level)
 
     def ordinal(self, v: torch.Tensor) -> torch.Tensor:
-        u = v.clamp(2.0**-127, 2.0**127).to(torch.float8_e8m0fnu).view(torch.uint8)
-        return u.clamp_(0, 254)
+        v = v.float()
+        return ((v.view(torch.int32) >> 23) & 0xFF).clamp_(0, 254)
 
     def pack(self, i: torch.Tensor) -> torch.Tensor:
         return i.to(torch.uint8)

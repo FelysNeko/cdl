@@ -61,28 +61,41 @@ class CascadedCdlQuantizedTensor(QuantizedTensor):
     dtype: torch.dtype
     k: int
 
+    @property
+    def block_size(self) -> int:
+        return self.theta_indices.shape[-1]
+
     def fp4(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        block_size = self.theta_indices.shape[-1]
-        if block_size != 16:
+        block = self.block_size
+        packed = self.theta_format.pack(self.theta_indices).flatten(1)
+        scale = self.q_format.pack(self.q_indices).flatten(1)
+        if scale.shape[0] == 1 and packed.shape[0] > 1:
+            scale = scale.expand(packed.shape[0], -1).contiguous()
+        if block == 16:
+            pad = -(packed.shape[-1] * 2) % 32
+            if pad:
+                packed = F.pad(packed, (0, pad // 2))
+                scale = F.pad(scale, (0, pad // 16))
+        elif block == 32:
+            pad = -(packed.shape[-1] * 2) % 32
+            if pad:
+                packed = F.pad(packed, (0, pad // 2))
+                scale = F.pad(scale, (0, pad // 32))
+        else:
+            raise NotImplementedError(f"no fp4 kernel view for block size {block}")
+        return packed, scale, self.alpha.float().reshape(1)
+
+    def fp8(self) -> tuple[torch.Tensor, torch.Tensor]:
+        if self.block_size != 32 or self.theta_format.bits != 8:
             raise NotImplementedError(
-                "the fp4 kernel view requires the NVFP4 block size 16, got "
-                f"{block_size}"
+                "the fp8 kernel view requires the MXFP8 layout (E4M3 theta, "
+                "block size 32)"
             )
         packed = self.theta_format.pack(self.theta_indices).flatten(1)
         scale = self.q_format.pack(self.q_indices).flatten(1)
         if scale.shape[0] == 1 and packed.shape[0] > 1:
             scale = scale.expand(packed.shape[0], -1).contiguous()
-        pad = -(packed.shape[-1] * 2) % 32
-        if pad:
-            packed = F.pad(packed, (0, pad // 2))
-            scale = F.pad(scale, (0, pad // 16))
-        return packed, scale, self.alpha.float().reshape(1)
-
-    def fp8(self) -> tuple[torch.Tensor, torch.Tensor]:
-        raise NotImplementedError(
-            "CascadedCdlQuantizedTensor stores CDL integer levels and has no "
-            "packed FP8 kernel view"
-        )
+        return packed, scale
 
     def dequantize(self) -> torch.Tensor:
         theta = self.theta_format.level[self.theta_indices.long()]
@@ -114,6 +127,7 @@ class CascadedCdlQuant(Quant, abc.ABC):
         q_topk: int,
         alpha: float,
         block_size: int,
+        alpha_trainable: bool = True,
     ):
         super().__init__()
         if block_size <= 0:
@@ -140,6 +154,7 @@ class CascadedCdlQuant(Quant, abc.ABC):
         self.theta_num_quantized_params = theta_num_quantized_params
         self.q_format = q_format
         self.q_topk = q_topk
+        self.alpha_trainable = alpha_trainable
         self.log_theta_kappa = nn.Parameter(torch.full((), math.log(theta_kappa)))
         self.log_q = nn.Parameter(q_tensor.log())
         self.log_q_kappa = nn.Parameter(torch.full((), math.log(q_kappa)))
@@ -251,6 +266,7 @@ class CascadedCdlQuantForWeight(CascadedCdlQuant):
         q_kappa: float,
         alpha: float,
         block_size: int,
+        alpha_trainable: bool = True,
     ) -> None:
         if block_size <= 0:
             raise ValueError("block_size must be positive")
@@ -272,7 +288,7 @@ class CascadedCdlQuantForWeight(CascadedCdlQuant):
         super().__init__(
             theta_format,
             theta_kappa,
-            theta_format.n,
+            min(theta_format.n, 33),
             theta.numel(),
             q_tensor,
             q_format,
@@ -280,6 +296,7 @@ class CascadedCdlQuantForWeight(CascadedCdlQuant):
             q_format.n,
             alpha,
             block_size,
+            alpha_trainable,
         )
 
     def scale_q_lr(self, eta: float) -> float:
@@ -297,6 +314,7 @@ class CascadedCdlQuantForActivation(CascadedCdlQuant):
         q_topk: int,
         alpha: float,
         block_size: int,
+        alpha_trainable: bool = True,
     ):
         super().__init__(
             theta_format,
@@ -309,6 +327,7 @@ class CascadedCdlQuantForActivation(CascadedCdlQuant):
             q_topk,
             alpha,
             block_size,
+            alpha_trainable,
         )
         self.initialized = False
         self.bypassing = False
@@ -414,6 +433,11 @@ class CdlQuantMixin(BatchNormBatchStatsMixin):
         self.eval()
         for m in modules:
             m.bypassing = True
+        # Calibration runs as a plain dense pass: the activation quantizers
+        # emit raw values and every quantized layer computes in bf16.
+        layers = [(m, m.backend) for m in self.modules() if hasattr(m, "backend")]
+        for m, _ in layers:
+            m.backend = "native"
         try:
             with self.batchnorm_batch_stats():
                 for x in samples:
@@ -421,6 +445,8 @@ class CdlQuantMixin(BatchNormBatchStatsMixin):
         finally:
             for h in handles:
                 h.remove()
+            for m, backend in layers:
+                m.backend = backend
             for m in modules:
                 m.bypassing = False
             self.train(was_training)
@@ -463,7 +489,7 @@ class CdlQuantMixin(BatchNormBatchStatsMixin):
                 buckets.setdefault((q_kappa_lr, 0.0), []).append(m.log_q_kappa)
 
             customized_param_set.add(m.log_alpha)
-            if freeze_alpha:
+            if freeze_alpha or not m.alpha_trainable:
                 m.log_alpha.requires_grad_(False)
             else:
                 buckets.setdefault((q_lr, 0.0), []).append(m.log_alpha)

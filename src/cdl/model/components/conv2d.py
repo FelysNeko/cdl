@@ -5,10 +5,10 @@ import torch.nn.functional as F
 from torch import nn
 
 from cdl.api.quant import Quant
-from cdl.core.kernel.matmul import fusable_quant, fused_cdl_matmul
+from cdl.core.kernel.matmul import fused_cdl_matmul, gemm_mode, layer_pads
 from cdl.core.matmul import matmul
 
-Backend = Literal["native", "fp4", "fp8", "fused"]
+Backend = Literal["native", "fp4", "fused"]
 
 
 class NativeQuantizedConv2d(nn.Conv2d):
@@ -66,37 +66,47 @@ class NativeQuantizedConv2d(nn.Conv2d):
             0, 3, 1, 2
         )
 
+    def _pad_gemm_layout(self, im2col_x: torch.Tensor, w: torch.Tensor):
+        """Pad im2col x/w to the widths the selected GEMM layout requires.
+
+        `w` must already be the flattened [out, kdim] im2col weight.
+        """
+        kpad, npad = layer_pads(self.activation_quant, w.shape[1], self.weight.shape[0])
+        if kpad:
+            im2col_x = F.pad(im2col_x, (0, kpad))
+        if kpad or npad:
+            w = F.pad(w, (0, kpad, 0, npad))
+        return im2col_x, w
+
     def fused_im2col_forward(self, im2col_x: torch.Tensor) -> torch.Tensor:
         quant_a, quant_w = self.activation_quant, self.weight_quant
-        if not (fusable_quant(quant_a) and fusable_quant(quant_w)):
+        mode = gemm_mode(quant_a)
+        if mode is None or gemm_mode(quant_w) != mode:
             raise NotImplementedError(
-                "the fused backend requires cascaded CDL quantizers on the "
-                "E2M1/UE4M3ExcludeZero formats with block size 16"
+                "the fused backend requires both quantizers on the same "
+                "supported format pair (nvfp4, mxfp4 or mxfp8)"
             )
-        k = im2col_x.shape[1]
-        if k % 16 or self.weight.shape[1] % 16:
-            raise NotImplementedError(
-                "the fused backend requires the contraction dimension to be "
-                f"a multiple of 16, got {k}"
-            )
-        return fused_cdl_matmul(
-            im2col_x.contiguous(),
-            quant_a,
-            self.im2col_weight,
-            quant_w,
-            quant_a.kernel_seed,
+        im2col_x, w = self._pad_gemm_layout(im2col_x, self.im2col_weight)
+        out = fused_cdl_matmul(
+            im2col_x.contiguous(), quant_a, w, quant_w, quant_a.kernel_seed
         )
+        return out[:, : self.weight.shape[0]]
 
     def im2col_forward(self, im2col_x: torch.Tensor) -> torch.Tensor:
+        n, k_raw = self.weight.shape[0], im2col_x.shape[1]
+        im2col_x, w = self._pad_gemm_layout(im2col_x, self.im2col_weight)
+
         activation = self.activation_quant(im2col_x)
-        weight = self.weight_quant(self.im2col_weight)
+        weight = self.weight_quant(w)
+
+        if self.backend == "native":
+            dense_w = weight.dequantize()[:n, :k_raw]
+            return activation.dequantize()[:, :k_raw] @ dense_w.T
 
         if self.backend in ("fp4", "fused"):
             # Eval-mode fused falls back to the deterministic nearest-round
             # path produced by the quantizers above.
-            return matmul(activation, weight)
-        elif self.backend == "native":
-            return activation.dequantize() @ weight.dequantize().T
+            return matmul(activation, weight)[:, :n]
 
         raise NotImplementedError(
             f"{self.backend} quantized convolution is not implemented"

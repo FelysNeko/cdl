@@ -17,7 +17,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 from cdl.checkpoint import load_checkpoint, save_checkpoint
 from cdl.core.format.fp4 import E2M1
-from cdl.core.format.fp8 import UE4M3ExcludeZero
+from cdl.core.format.fp8 import E4M3, E8M0, UE4M3ExcludeZero
 from cdl.dataset import get_loaders
 from cdl.model.components.conv2d import NativeQuantizedConv2d
 from cdl.model.components.linear import NativeQuantizedLinear
@@ -38,15 +38,33 @@ MODEL_DTYPE = torch.bfloat16
 @dataclass
 class ModelConfig:
     layers: int = 20
-    weight_block_size: int = 32
-    act_block_size: int = 32
+    weight_block_size: int = 16
+    act_block_size: int = 16
     topk_act: int = 5
     kappa: float = 1.0
     alpha: float = 1.0
-    weight_quant: str = "cdl"  # "cdl" or "nvfp4"
-    activation_quant: str = "cdl"  # "cdl" or "nvfp4"
+    weight_quant: str = "cdl"  # "cdl", "nvfp4" (STE, nvfp4 format) or "ste"
+    activation_quant: str = "cdl"  # "cdl", "nvfp4" (STE, nvfp4 format) or "ste"
+    weight_format: str = "nvfp4"  # "nvfp4", "mxfp4" or "mxfp8"
+    act_format: str = "nvfp4"  # "nvfp4", "mxfp4" or "mxfp8"
     backend: str = "native"  # "native" (dequant + bf16 matmul), "fp4" (mm_fp4
-    # kernel), or "fused" (fused Triton CDL quant + mm_fp4, training path)
+    # kernel), or "fused" (fused Triton CDL quant + block-scaled GEMM)
+
+
+FORMAT_SPECS = {
+    # name: (theta_format, q_format, block_size, alpha_trainable)
+    "nvfp4": (E2M1, UE4M3ExcludeZero, 16, True),
+    "mxfp4": (E2M1, E8M0, 32, True),
+    "mxfp8": (E4M3, E8M0, 32, False),
+}
+
+
+def format_spec(name: str):
+    if name not in FORMAT_SPECS:
+        raise ValueError(
+            f"unknown format {name!r}; expected one of {sorted(FORMAT_SPECS)}"
+        )
+    return FORMAT_SPECS[name]
 
 
 @dataclass
@@ -113,9 +131,8 @@ class CascadeResNet(ResNet, CdlQuantMixin):
             child_name = name.rsplit(".", 1)[-1]
 
             if isinstance(module, nn.Conv2d):
-                q_format = UE4M3ExcludeZero(MODEL_DTYPE)
                 weight_quant = self._make_weight_quant(cfg, module.weight.flatten(1))
-                activation_quant = self._make_activation_quant(cfg, q_format)
+                activation_quant = self._make_activation_quant(cfg)
                 replacement = NativeQuantizedConv2d(
                     module.in_channels,
                     module.out_channels,
@@ -139,9 +156,8 @@ class CascadeResNet(ResNet, CdlQuantMixin):
                 setattr(parent, child_name, replacement)
 
             elif isinstance(module, nn.Linear):
-                q_format = UE4M3ExcludeZero(MODEL_DTYPE)
                 weight_quant = self._make_weight_quant(cfg, module.weight)
-                activation_quant = self._make_activation_quant(cfg, q_format)
+                activation_quant = self._make_activation_quant(cfg)
                 replacement = NativeQuantizedLinear(
                     module.in_features,
                     module.out_features,
@@ -160,40 +176,52 @@ class CascadeResNet(ResNet, CdlQuantMixin):
 
     @staticmethod
     def _make_weight_quant(cfg: ModelConfig, theta: torch.Tensor) -> nn.Module:
-        if cfg.weight_quant == "nvfp4":
-            return Nvfp4SteQuant()
+        if cfg.weight_quant in ("nvfp4", "ste"):
+            fmt = cfg.weight_format if cfg.weight_quant == "ste" else "nvfp4"
+            return Nvfp4SteQuant(fmt)
         if cfg.weight_quant != "cdl":
             raise ValueError(
-                f"unknown weight_quant {cfg.weight_quant!r}; expected 'cdl' or 'nvfp4'"
+                f"unknown weight_quant {cfg.weight_quant!r}; expected 'cdl', "
+                "'nvfp4' or 'ste'"
             )
+        theta_format, q_format, block, alpha_trainable = format_spec(cfg.weight_format)
+        kpad = -theta.shape[1] % (128 if cfg.weight_format == "mxfp8" else block)
+        npad = max(0, 128 - theta.shape[0]) if cfg.weight_format == "mxfp8" else 0
+        if kpad or npad:
+            theta = torch.nn.functional.pad(theta, (0, kpad, 0, npad))
         return CascadedCdlQuantForWeight(
             theta,
-            E2M1(MODEL_DTYPE),
+            theta_format(MODEL_DTYPE),
             cfg.kappa,
-            UE4M3ExcludeZero(MODEL_DTYPE),
+            q_format(MODEL_DTYPE),
             cfg.kappa,
             cfg.alpha,
-            cfg.weight_block_size,
+            block,
+            alpha_trainable,
         )
 
     @staticmethod
-    def _make_activation_quant(cfg: ModelConfig, q_format) -> nn.Module:
-        if cfg.activation_quant == "nvfp4":
-            return Nvfp4SteQuant()
+    def _make_activation_quant(cfg: ModelConfig) -> nn.Module:
+        if cfg.activation_quant in ("nvfp4", "ste"):
+            fmt = cfg.act_format if cfg.activation_quant == "ste" else "nvfp4"
+            return Nvfp4SteQuant(fmt)
         if cfg.activation_quant != "cdl":
             raise ValueError(
                 f"unknown activation_quant {cfg.activation_quant!r}; "
-                "expected 'cdl' or 'nvfp4'"
+                "expected 'cdl', 'nvfp4' or 'ste'"
             )
+        theta_format, q_format, block, alpha_trainable = format_spec(cfg.act_format)
+        q_format = q_format(MODEL_DTYPE)
         return CascadedCdlQuantForActivation(
-            E2M1(MODEL_DTYPE),
+            theta_format(MODEL_DTYPE),
             cfg.kappa,
             cfg.topk_act,
             q_format,
             cfg.kappa,
             q_format.n,
             cfg.alpha,
-            cfg.act_block_size,
+            block,
+            alpha_trainable,
         )
 
 
@@ -358,6 +386,19 @@ def training_pipeline() -> None:
             f"got weight_quant={cfg.model.weight_quant!r}, "
             f"activation_quant={cfg.model.activation_quant!r}"
         )
+    format_spec(cfg.model.weight_format)
+    format_spec(cfg.model.act_format)
+    for role, fmt in (
+        ("weight", cfg.model.weight_format),
+        ("act", cfg.model.act_format),
+    ):
+        spec_block = format_spec(fmt)[2]
+        cfg_block = getattr(cfg.model, f"{role}_block_size")
+        if cfg_block != spec_block:
+            raise ValueError(
+                f"{role}_block_size must be {spec_block} for the {fmt} format, "
+                f"got {cfg_block}"
+            )
     if cfg.train.kappa_end is not None and cfg.train.kappa_end < cfg.model.kappa:
         raise ValueError(
             "kappa_end must be >= the initial model.kappa for an annealing "
@@ -374,8 +415,12 @@ def training_pipeline() -> None:
         )
     seed_all(args.seed)
 
-    logger.info(f"weight quantizer: {cfg.model.weight_quant}")
-    logger.info(f"activation quantizer: {cfg.model.activation_quant}")
+    logger.info(
+        f"weight quantizer: {cfg.model.weight_quant} ({cfg.model.weight_format})"
+    )
+    logger.info(
+        f"activation quantizer: {cfg.model.activation_quant} ({cfg.model.act_format})"
+    )
     logger.info(f"backend: {cfg.model.backend}")
     if cfg.train.kappa_end is not None:
         logger.info(
