@@ -438,6 +438,9 @@ class FusedCdlMatmul(torch.autograd.Function):
             None,
             None,
             None,
+            None,
+            None,
+            None,
         )
 
 
