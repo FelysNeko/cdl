@@ -51,7 +51,7 @@ Peak memory in MiB is sampled in-process via `torch.cuda.mem_get_info` throughou
 
 Last time, I mentioned that vanilla CDL is not sufficient for low-precision training such as NVFP4, but I only presented results from Cascaded CDL applied to weights only, with activation quantization done by simple rounding and proxied by standard STE. Here is a direct comparison across several interesting variants. Note that the baseline does NVFP4 quantization, but the GEMM is still in `bf16`, which usually gives less than 1% extra precision, yet it's evidently weaker than Cascaded CDL anyway.
 
-![](assets/2026-10-30/cascade-is-necessary.png)
+![](cascade-is-necessary.png)
 
 However, it does not beat the direct post-training NVFP4-quantized model at 65.3%, and it is not even comparable to Hessian-based error-compensation quantization (GPTQ) at 66.1%. All evaluated end-to-end through the real NVFP4 GEMM. According to LLM's PTQ implementation.
 
@@ -63,7 +63,7 @@ The original formula $`[P_\alpha(\cdot|\theta)] = \sigma(-\alpha \cdot ([\theta]
 
 The ranking is as expected.
 
-![](assets/2026-10-30/nvfp4-mxfp4-mxfp8.png)
+![](nvfp4-mxfp4-mxfp8.png)
 
 It's very likely that the MXFP series could perform better if the format were extended with a global scaler. The `flashinfer` backend does have one for MXFP4, and its last-checkpoint evaluation accuracy is 61.4%, an almost 4-point improvement over the original MXFP4.
 
