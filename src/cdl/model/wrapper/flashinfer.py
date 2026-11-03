@@ -1,5 +1,3 @@
-# All flashinfer interop lives here: the custom ops registered for
-# torch.compile tracing plus the scale layout helpers the kernels require.
 import flashinfer
 import torch
 

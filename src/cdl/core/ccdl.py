@@ -41,8 +41,8 @@ def cascaded_cdl_topk_forward(
     q_topk: int,
     alpha: torch.Tensor,
     companded: bool,
-    q_num_quantized_params: int | None = None,
     theta_num_quantized_params: int | None = None,
+    q_num_quantized_params: int | None = None,
 ) -> tuple[
     torch.Tensor,
     torch.Tensor,
@@ -71,7 +71,7 @@ def cascaded_cdl_topk_forward(
         theta_num_quantized_params,
     )
 
-    return theta_indices, q_indices, grad_proxy, q_entropies, theta_entropies
+    return theta_indices, q_indices, grad_proxy, theta_entropies, q_entropies
 
 
 @torch.no_grad()
