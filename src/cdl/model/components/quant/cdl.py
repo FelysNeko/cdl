@@ -1,7 +1,7 @@
 import abc
+import math
 from collections.abc import Iterable
 from dataclasses import dataclass
-import math
 
 import torch
 from torch import nn

@@ -16,7 +16,7 @@ class E4M3(Format):
 
     def pack(self, i: torch.Tensor) -> torch.Tensor:
         u = torch.where(i < 127, 254 - i, i - 127)
-        return u.to(torch.uint8)
+        return u.to(torch.uint8).view(torch.float8_e4m3fn)
 
 
 class UE4M3ExcludeZero(Format):

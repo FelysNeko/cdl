@@ -4,7 +4,9 @@ import torch
 from torch import nn
 
 from cdl.api.quant import MatMul, Quant
-from cdl.core.mm import native
+from cdl.core.mm import mxfp4, mxfp8, native, nvfp4
+
+type Backend = Literal["native", "nvfp4", "mxfp4", "mxfp8"]
 
 
 class QLinear(nn.Linear):
@@ -13,7 +15,7 @@ class QLinear(nn.Linear):
         *args,
         activation_quant: Quant,
         weight_quant: Quant,
-        backend: Literal["native", "nvfp4", "mxfp4", "mxfp8"],
+        backend: Backend,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
@@ -23,7 +25,12 @@ class QLinear(nn.Linear):
 
     @property
     def available_backend_fn(self) -> dict[str, MatMul]:
-        return {"native": native.matmul}
+        return {
+            "native": native.matmul,
+            "nvfp4": nvfp4.matmul,
+            "mxfp4": mxfp4.matmul,
+            "mxfp8": mxfp8.matmul,
+        }
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         activation = self.activation_quant(x)
@@ -35,3 +42,10 @@ class QLinear(nn.Linear):
             out = out + self.bias
 
         return out
+
+
+class QLinearMixin(nn.Module):
+    def switch_backend(self, backend: Backend) -> None:
+        for m in self.modules():
+            if isinstance(m, QLinear):
+                m.backend = backend

@@ -1,11 +1,11 @@
 import abc
+import math
 from collections.abc import Iterable
 from dataclasses import dataclass
-import math
 
 import torch
-from torch import nn
 import torch.nn.functional as F
+from torch import nn
 
 from cdl.api.format import Format
 from cdl.api.quant import QTensor, Quant
@@ -65,6 +65,8 @@ class CascadedCdlBypassTensor(QTensor):
 
 
 class CascadedCdlQuant(Quant):
+    tensor: type[CascadedCdlTensor] = CascadedCdlTensor
+
     def __init__(
         self,
         out_dim_or_broadcast: int,
@@ -83,8 +85,7 @@ class CascadedCdlQuant(Quant):
         self.q_topk = q_topk
         self.block_size = block_size
 
-        extra = k_dim % block_size
-        num_blocks = (k_dim + extra) // block_size
+        num_blocks = (k_dim + block_size - 1) // block_size
 
         self.q_num_quantized_params = out_dim_or_broadcast * num_blocks
         self.theta_num_quantized_params = out_dim_or_broadcast * k_dim
@@ -148,7 +149,7 @@ class CascadedCdlQuant(Quant):
                 self.q_format,
                 self.alpha,
             )
-            return CascadedCdlTensor(
+            return self.tensor(
                 self.theta_format,
                 theta_indices,
                 self.q_format,
@@ -171,7 +172,7 @@ class CascadedCdlQuant(Quant):
             True,
         )
 
-        return CascadedCdlTensor(
+        return self.tensor(
             self.theta_format,
             theta_indices,
             self.q_format,

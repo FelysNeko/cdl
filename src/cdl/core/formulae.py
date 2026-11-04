@@ -78,7 +78,9 @@ def topk_q_d(
     topk_indices: torch.Tensor,
 ) -> torch.Tensor:
     index = topk_indices.long()
-    return (topk_pmf * a[index]).sum(-1) * q
+    underflow = topk_pmf <= torch.finfo(torch.float32).tiny
+    contrib = torch.where(underflow, torch.zeros_like(topk_pmf), topk_pmf) * a[index]
+    return contrib.sum(-1) * q
 
 
 def topk_mpmf_entropy(
