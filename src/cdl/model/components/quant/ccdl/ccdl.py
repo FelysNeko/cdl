@@ -358,7 +358,7 @@ class CascadedCdlQuantMixin(BatchNormBatchStatsMixin):
         def hook(m: nn.Module, args: tuple[torch.Tensor, ...]) -> None:
             x = args[0]
             assert x.ndim == 2
-            blocked, _ = group_tensor_into_blocks(x.detach(), m.block_size)
+            blocked, _ = group_tensor_into_blocks(x, m.block_size)
             block_sums = blocked.abs().sum(dim=(0, 2))
             previous = stats.get(m)
             if previous is None:
