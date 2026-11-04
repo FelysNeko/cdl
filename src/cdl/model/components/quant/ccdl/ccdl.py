@@ -48,15 +48,20 @@ class CascadedCdlTensor(QTensor):
         return x
 
     def proxy(self) -> torch.Tensor | None:
-        return self.grad_proxy
+        if self.grad_proxy is None:
+            return None
+        return self.grad_proxy.flatten(1)[:, : self.k_dim]
 
 
 @dataclass
 class CascadedCdlBypassTensor(QTensor):
     theta: torch.Tensor
 
-    def dequantize(self):
+    def dequantize(self) -> torch.Tensor:
         return self.theta
+
+    def proxy(self) -> torch.Tensor | None:
+        return None
 
 
 class CascadedCdlQuant(Quant):
@@ -110,13 +115,6 @@ class CascadedCdlQuant(Quant):
     def alpha(self) -> torch.Tensor:
         return self.log_alpha.exp()
 
-    def freeze_kappa(self) -> None:
-        self.log_theta_kappa.requires_grad_(False)
-        self.log_q_kappa.requires_grad_(False)
-
-    def freeze_alpha(self) -> None:
-        self.log_alpha.requires_grad_(False)
-
     @abc.abstractmethod
     def get_q_lr(self, eta: float) -> float: ...
 
@@ -129,6 +127,7 @@ class CascadedCdlQuant(Quant):
     def get_q_kappa_lr(self, eta: float) -> float:
         return eta / self.q.numel() ** 0.5
 
+    @torch.no_grad()
     def init_q_from_block_means(self, block_means: torch.Tensor) -> None:
         q_tensor = 2 * block_means / 2 ** ((self.theta_format.bits - 1) / 2)
         log_q_tensor = q_tensor.clamp_min(torch.finfo(torch.float32).tiny).log()
@@ -259,16 +258,6 @@ class CascadedCdlQuantForWeight(CascadedCdlQuant):
 
 
 class CascadedCdlQuantMixin(BatchNormBatchStatsMixin):
-    def freeze_kappa(self) -> None:
-        for m in self.modules():
-            if isinstance(m, CascadedCdlQuant):
-                m.freeze_kappa()
-
-    def freeze_alpha(self) -> None:
-        for m in self.modules():
-            if isinstance(m, CascadedCdlQuant):
-                m.freeze_alpha()
-
     def get_weight_quant_counts(self) -> int:
         return sum(
             m.theta_num_quantized_params
@@ -301,27 +290,33 @@ class CascadedCdlQuantMixin(BatchNormBatchStatsMixin):
         self,
         learning_rate: float,
         weight_decay: float,
+        skip_alpha: bool,
+        skip_kappa: bool,
     ) -> list[dict]:
         customized_param_set: set[nn.Parameter] = set()
         buckets: dict[tuple[float, float], list[nn.Parameter]] = {}
-
-        def add_param(m: nn.Parameter, lr: float):
-            customized_param_set.add(m)
-            buckets.setdefault((lr, 0.0), []).append(m)
 
         for m in self.modules():
             if not isinstance(m, CascadedCdlQuant):
                 continue
 
-            q_lr = m.get_q_lr(learning_rate)
-            alpha_lr = m.get_alpha_lr(learning_rate)
-            theta_kappa_lr = m.get_theta_kappa_lr(learning_rate)
-            q_kappa_lr = m.get_q_kappa_lr(learning_rate)
+            customized_param_set.add(m.log_q)
+            customized_param_set.add(m.log_alpha)
+            customized_param_set.add(m.log_theta_kappa)
+            customized_param_set.add(m.log_q_kappa)
 
-            add_param(m.log_q, q_lr)
-            add_param(m.log_alpha, alpha_lr)
-            add_param(m.log_theta_kappa, theta_kappa_lr)
-            add_param(m.log_q_kappa, q_kappa_lr)
+            q_lr = m.get_q_lr(learning_rate)
+            buckets.setdefault((q_lr, 0.0), []).append(m.log_q)
+
+            if not skip_alpha:
+                alpha_lr = m.get_alpha_lr(learning_rate)
+                buckets.setdefault((alpha_lr, 0.0), []).append(m.log_alpha)
+
+            if not skip_kappa:
+                theta_kappa_lr = m.get_theta_kappa_lr(learning_rate)
+                q_kappa_lr = m.get_q_kappa_lr(learning_rate)
+                buckets.setdefault((theta_kappa_lr, 0.0), []).append(m.log_theta_kappa)
+                buckets.setdefault((q_kappa_lr, 0.0), []).append(m.log_q_kappa)
 
         decay = []
         no_decay = []
@@ -357,3 +352,46 @@ class CascadedCdlQuantMixin(BatchNormBatchStatsMixin):
         ]
         if not modules:
             return
+
+        stats: dict[CascadedCdlQuantForActivation, tuple[torch.Tensor, int, int]] = {}
+
+        def hook(m: nn.Module, args: tuple[torch.Tensor, ...]) -> None:
+            x = args[0]
+            assert x.ndim == 2
+            blocked, _ = group_tensor_into_blocks(x.detach(), m.block_size)
+            block_sums = blocked.abs().sum(dim=(0, 2))
+            previous = stats.get(m)
+            if previous is None:
+                stats[m] = (block_sums, x.shape[0], x.shape[1])
+                return
+            sums, rows, width = previous
+            assert width == x.shape[1]
+            stats[m] = (sums + block_sums, rows + x.shape[0], width)
+
+        handles = [m.register_forward_pre_hook(hook) for m in modules]
+
+        was_training = self.training
+        self.eval()
+        for m in modules:
+            m.bypassing = True
+        try:
+            with self.batchnorm_batch_stats():
+                for x in samples:
+                    self(x)
+        finally:
+            for h in handles:
+                h.remove()
+            for m in modules:
+                m.bypassing = False
+            self.train(was_training)
+
+        for m in modules:
+            assert m in stats
+            sums, rows, width = stats[m]
+            counts = sums.new_full((sums.numel(),), m.block_size)
+            pad_size = -width % m.block_size
+            if pad_size:
+                counts[-1] -= pad_size
+            block_means = (sums / (rows * counts)).reshape(1, -1, 1)
+            m.init_q_from_block_means(block_means)
+            m.initialized = True

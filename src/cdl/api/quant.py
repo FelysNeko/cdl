@@ -1,4 +1,5 @@
 import abc
+from collections.abc import Callable
 
 import torch
 from torch import nn
@@ -27,3 +28,6 @@ class QTensor(abc.ABC):
 class Quant(nn.Module, abc.ABC):
     @abc.abstractmethod
     def forward(self, x: torch.Tensor) -> QTensor: ...
+
+
+type MatMul = Callable[[QTensor, QTensor], torch.Tensor]
