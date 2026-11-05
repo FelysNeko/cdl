@@ -38,6 +38,8 @@ class MatMul(torch.autograd.Function):
             swizzle_scale_factors(x_q),
             swizzle_scale_factors(w_q).T,
             x_alpha * w_alpha,
+            16,
+            True,
         )[:, :n]
 
     @staticmethod

@@ -1,3 +1,5 @@
+import functools
+
 import torch
 
 from cdl.api.quant import QTensor
@@ -5,8 +7,33 @@ from cdl.core.mm.swizzle import expand_rows, pad_k, pad_n, swizzle_scale_factors
 from cdl.model.wrapper.flashinfer import mm_fp4
 
 
+@functools.cache
+def get_e2m1_lut(dtype: torch.dtype, device: torch.device) -> torch.Tensor:
+    return torch.tensor(
+        (
+            -6.0,
+            -4.0,
+            -3.0,
+            -2.0,
+            -1.5,
+            -1.0,
+            -0.5,
+            -0.0,
+            0.0,
+            0.5,
+            1.0,
+            1.5,
+            2.0,
+            3.0,
+            4.0,
+            6.0,
+        ),
+        dtype=dtype,
+        device=device,
+    )
+
+
 def mxfp4_dequant(
-    level: torch.Tensor,
     packed: torch.Tensor,
     scale: torch.Tensor,
     alpha: torch.Tensor,
@@ -15,7 +42,8 @@ def mxfp4_dequant(
     nib = torch.stack((packed & 0xF, packed >> 4), dim=-1).reshape(rows, half_k * 2)
     code = nib.long()
     ordinal = torch.where(code < 8, code + 8, 15 - code)
-    vals = level[ordinal].reshape(rows, half_k // 16, 32)
+    lut = get_e2m1_lut(torch.bfloat16, packed.device)
+    vals = lut[ordinal].reshape(rows, half_k // 16, 32)
     scales = torch.exp2(scale.float() - 127.0)
     out = (vals * scales[..., None]).flatten(1)
     return (out * alpha.float()).to(torch.bfloat16)
@@ -36,7 +64,6 @@ class MatMul(torch.autograd.Function):
     ) -> torch.Tensor:
         ctx.x_k = x_proxy.shape[-1] if x_proxy is not None else None
         ctx.w_k = w_proxy.shape[-1] if w_proxy is not None else None
-        ctx.theta_format = x.theta_format
 
         x_theta, x_q, x_alpha = x.mxfp4()
         w_theta, w_q, w_alpha = w.mxfp4()
@@ -55,8 +82,8 @@ class MatMul(torch.autograd.Function):
             swizzle_scale_factors(x_q),
             swizzle_scale_factors(w_q).T,
             x_alpha * w_alpha,
-            block_size=32,
-            use_nvfp4=False,
+            32,
+            False,
         )[:, :n]
 
     @staticmethod
@@ -66,15 +93,14 @@ class MatMul(torch.autograd.Function):
     ) -> tuple[None, torch.Tensor, None, torch.Tensor]:
         grad_output = grad_output.contiguous()
         x_theta, x_q, x_alpha, w_theta, w_q, w_alpha = ctx.saved_tensors
-        level = ctx.theta_format.level
         dx = dw = None
 
         if ctx.x_k is not None:
-            w = mxfp4_dequant(level, w_theta, w_q, w_alpha)
+            w = mxfp4_dequant(w_theta, w_q, w_alpha)
             dx = grad_output @ w[:, : ctx.x_k]
 
         if ctx.w_k is not None:
-            x = mxfp4_dequant(level, x_theta, x_q, x_alpha)
+            x = mxfp4_dequant(x_theta, x_q, x_alpha)
             dw = grad_output.T @ x[:, : ctx.w_k]
 
         return None, dx, None, dw

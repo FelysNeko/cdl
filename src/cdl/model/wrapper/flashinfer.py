@@ -1,5 +1,6 @@
 import flashinfer
 import torch
+from flashinfer.tllm_enums import SfLayout
 
 
 @torch.library.custom_op("cdl::mm_fp4", mutates_args=())
@@ -9,20 +10,9 @@ def mm_fp4(
     a_scale: torch.Tensor,
     b_scale: torch.Tensor,
     alpha: torch.Tensor,
-    block_size: int = 16,
-    use_nvfp4: bool = True,
+    block_size: int,
+    use_nvfp4: bool,
 ) -> torch.Tensor:
-    if use_nvfp4:
-        return flashinfer.mm_fp4(
-            a,
-            b,
-            a_scale,
-            b_scale,
-            alpha,
-            torch.bfloat16,
-            block_size=16,
-            backend="b12x",
-        )
     return flashinfer.mm_fp4(
         a,
         b,
@@ -30,8 +20,8 @@ def mm_fp4(
         b_scale,
         alpha,
         torch.bfloat16,
-        block_size=32,
-        use_nvfp4=False,
+        block_size=block_size,
+        use_nvfp4=use_nvfp4,
         backend="b12x",
     )
 
@@ -43,8 +33,8 @@ def _(
     a_scale: torch.Tensor,
     b_scale: torch.Tensor,
     alpha: torch.Tensor,
-    block_size: int = 16,
-    use_nvfp4: bool = True,
+    block_size: int,
+    use_nvfp4: bool,
 ) -> torch.Tensor:
     return torch.empty(a.shape[0], b.shape[1], dtype=torch.bfloat16, device=a.device)
 
@@ -76,10 +66,9 @@ def _(
 @torch.library.custom_op("cdl::mxfp4_quantize", mutates_args=())
 def mxfp4_quantize(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     # x: [rows, k] with k % 32 == 0, bfloat16, row-major. Returns (packed fp4
-    # [rows, k / 2] uint8, 128x4 swizzled E8M0 scales [rows_pad, k / 32 pad4]
-    # uint8) as consumed by mm_fp4 with use_nvfp4=False.
-    packed, scale = flashinfer.mxfp4_quantize(x)
-    return packed, scale
+    # [rows, k / 2] uint8, linear E8M0 scales [rows, k / 32] uint8).
+    packed, scale = flashinfer.mxfp4_quantize(x, sfLayout=SfLayout.layout_linear)
+    return packed, scale.reshape(x.shape[0], x.shape[-1] // 32)
 
 
 @mxfp4_quantize.register_fake
@@ -87,12 +76,7 @@ def _(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     rows, k = x.shape
     return (
         torch.empty(rows, k // 2, dtype=torch.uint8, device=x.device),
-        torch.empty(
-            (rows + 127) // 128 * 128,
-            (k // 32 + 3) // 4 * 4,
-            dtype=torch.uint8,
-            device=x.device,
-        ),
+        torch.empty(rows, k // 32, dtype=torch.uint8, device=x.device),
     )
 
 
