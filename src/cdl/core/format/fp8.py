@@ -1,13 +1,12 @@
 import torch
 
 from cdl.api.format import Format
+from cdl.core.tables import e4m3_tables, e8m0_tables, ue4m3_exclude_zero_tables
 
 
 class E4M3(Format):
     def __init__(self, dtype: torch.dtype) -> None:
-        key = torch.arange(254)
-        u = torch.where(key >= 127, key - 127, 254 - key).to(torch.uint8)
-        level = u.view(torch.float8_e4m3fn).to(dtype)
+        level, _ = e4m3_tables(dtype)
         super().__init__(level)
 
     def ordinal(self, v: torch.Tensor) -> torch.Tensor:
@@ -21,8 +20,7 @@ class E4M3(Format):
 
 class UE4M3ExcludeZero(Format):
     def __init__(self, dtype: torch.dtype) -> None:
-        key = torch.arange(1, 127, dtype=torch.uint8)
-        level = key.view(torch.float8_e4m3fn).to(dtype)
+        level, _ = ue4m3_exclude_zero_tables(dtype)
         super().__init__(level)
 
     def ordinal(self, v: torch.Tensor) -> torch.Tensor:
@@ -35,8 +33,7 @@ class UE4M3ExcludeZero(Format):
 
 class E8M0(Format):
     def __init__(self, dtype: torch.dtype) -> None:
-        key = torch.arange(255)
-        level = key.to(torch.uint8).view(torch.float8_e8m0fnu).to(dtype)
+        level, _ = e8m0_tables(dtype)
         super().__init__(level)
 
     def ordinal(self, v: torch.Tensor) -> torch.Tensor:

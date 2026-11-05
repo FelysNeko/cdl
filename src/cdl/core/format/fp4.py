@@ -1,16 +1,15 @@
 import torch
 
 from cdl.api.format import Format
+from cdl.core.tables import e2m1_tables
 
 
 class E2M1(Format):
     def __init__(self, dtype: torch.dtype) -> None:
-        key = torch.arange(16)
-        m = torch.where(key >= 8, key - 8, 7 - key)
-        magnitude = torch.tensor([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0], dtype=dtype)
-        level = torch.where(key >= 8, magnitude[m], -magnitude[m])
+        level, _ = e2m1_tables(dtype)
         super().__init__(level)
-        mid = (magnitude[:-1] + magnitude[1:]) / 2
+        h = level.numel() // 2
+        mid = (level[h:-1] + level[h + 1 :]) / 2
         self.register_buffer("mid", mid, persistent=False)
 
     def ordinal(self, v: torch.Tensor) -> torch.Tensor:

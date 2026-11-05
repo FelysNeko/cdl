@@ -33,7 +33,8 @@ class QLinear(nn.Linear):
         }
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        activation = self.activation_quant(x)
+        x2d = x.reshape(-1, x.shape[-1])
+        activation = self.activation_quant(x2d)
         weight = self.weight_quant(self.weight)
 
         out = self.available_backend_fn[self.backend](activation, weight)
@@ -41,7 +42,7 @@ class QLinear(nn.Linear):
         if self.bias is not None:
             out = out + self.bias
 
-        return out
+        return out.reshape(*x.shape[:-1], out.shape[-1])
 
 
 class QLinearMixin(nn.Module):

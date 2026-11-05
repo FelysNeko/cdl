@@ -134,6 +134,23 @@ class CascadedCdlQuant(Quant):
         log_q_tensor = q_tensor.clamp_min(torch.finfo(torch.float32).tiny).log()
         self.log_q.copy_(log_q_tensor)
 
+    def training_forward(
+        self, theta: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        theta_indices, q_indices, grad_proxy, _, _ = cascaded_cdl_topk_forward(
+            theta,
+            self.theta_format,
+            self.theta_kappa,
+            self.theta_topk,
+            self.q,
+            self.q_format,
+            self.q_kappa,
+            self.q_topk,
+            self.alpha,
+            True,
+        )
+        return theta_indices, q_indices, grad_proxy
+
     def forward(self, x: torch.Tensor) -> QTensor:
         if self.bypassing:
             return CascadedCdlBypassTensor(x)
@@ -159,18 +176,7 @@ class CascadedCdlQuant(Quant):
                 self.k_dim,
             )
 
-        theta_indices, q_indices, grad_proxy, _, _ = cascaded_cdl_topk_forward(
-            theta,
-            self.theta_format,
-            self.theta_kappa,
-            self.theta_topk,
-            self.q,
-            self.q_format,
-            self.q_kappa,
-            self.q_topk,
-            self.alpha,
-            True,
-        )
+        theta_indices, q_indices, grad_proxy = self.training_forward(theta)
 
         return self.tensor(
             self.theta_format,

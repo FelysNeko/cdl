@@ -1,6 +1,9 @@
+from typing import Literal
+
 import torch
 
 from cdl.core.format.fp8 import E4M3, E8M0
+from cdl.core.kernel.mxfp8 import mxfp8_quant
 from cdl.model.components.quant.ccdl.ccdl import (
     CascadedCdlQuantForActivation,
     CascadedCdlQuantForWeight,
@@ -25,14 +28,29 @@ class Mxfp8CascadedCdlQuantForActivation(CascadedCdlQuantForActivation):
         theta_topk: int,
         q_topk: int,
         dtype: torch.dtype,
+        kernel: Literal["torch", "triton"] = "torch",
     ) -> None:
-        super().__init__(
-            k_dim,
-            E4M3(dtype),
-            theta_topk,
-            E8M0(dtype),
-            q_topk,
-            32,
+        super().__init__(k_dim, E4M3(dtype), theta_topk, E8M0(dtype), q_topk, 32)
+        self.kernel = kernel
+        if kernel == "triton":
+            self.register_buffer(
+                "kernel_seed", torch.zeros((), dtype=torch.int64), persistent=False
+            )
+
+    def training_forward(
+        self, theta: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        if self.kernel == "torch":
+            return super().training_forward(theta)
+        return mxfp8_quant(
+            theta,
+            self.q,
+            self.theta_kappa,
+            self.q_kappa,
+            self.alpha,
+            self.kernel_seed,
+            self.theta_topk,
+            self.q_topk,
         )
 
 
@@ -43,10 +61,27 @@ class Mxfp8CascadedCdlQuantForWeight(CascadedCdlQuantForWeight):
         self,
         weight: torch.Tensor,
         dtype: torch.dtype,
+        kernel: Literal["torch", "triton"] = "torch",
     ):
-        super().__init__(
-            weight,
-            E4M3(dtype),
-            E8M0(dtype),
-            32,
+        super().__init__(weight, E4M3(dtype), E8M0(dtype), 32)
+        self.kernel = kernel
+        if kernel == "triton":
+            self.register_buffer(
+                "kernel_seed", torch.zeros((), dtype=torch.int64), persistent=False
+            )
+
+    def training_forward(
+        self, theta: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        if self.kernel == "torch":
+            return super().training_forward(theta)
+        return mxfp8_quant(
+            theta,
+            self.q,
+            self.theta_kappa,
+            self.q_kappa,
+            self.alpha,
+            self.kernel_seed,
+            self.theta_topk,
+            self.q_topk,
         )

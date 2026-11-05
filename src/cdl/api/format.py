@@ -4,14 +4,17 @@ import torch
 from torch import nn
 
 
+def gaps(level: torch.Tensor) -> torch.Tensor:
+    gap = level.diff()
+    gap = torch.cat([gap, gap[-1:]])
+    return torch.where(gap == 0, gap.roll(1), gap)
+
+
 class Format(nn.Module, abc.ABC):
     def __init__(self, level: torch.Tensor) -> None:
         super().__init__()
         self.register_buffer("level", level, persistent=False)
-        gap = self.level.diff()
-        gap = torch.cat([gap, gap[-1:]])
-        gap = torch.where(gap == 0, gap.roll(1), gap)
-        self.register_buffer("gap", gap, persistent=False)
+        self.register_buffer("gap", gaps(level), persistent=False)
 
     @property
     def n(self) -> int:
