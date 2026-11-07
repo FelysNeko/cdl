@@ -17,8 +17,7 @@ def group_tensor_into_blocks(
     theta: torch.Tensor,
     block_size: int,
 ) -> tuple[torch.Tensor, int]:
-    assert len(theta.shape) == 2
-    out_dim, k = theta.shape
+    k = theta.shape[-1]
 
     extra = k % block_size
     pad_size = 0
@@ -27,7 +26,7 @@ def group_tensor_into_blocks(
         theta = F.pad(theta, (0, pad_size))
 
     num_blocks = (k + pad_size) // block_size
-    cdl_style_theta = theta.reshape(out_dim, num_blocks, block_size)
+    cdl_style_theta = theta.reshape(*theta.shape[:-1], num_blocks, block_size)
     return cdl_style_theta, pad_size
 
 
@@ -44,13 +43,13 @@ class CascadedCdlTensor(QTensor):
     def dequantize(self) -> torch.Tensor:
         theta = self.theta_format.level[self.theta_indices.long()]
         q = self.q_format.level[self.q_indices.long()]
-        x = (theta * q * self.alpha).flatten(1)[:, : self.k_dim]
+        x = (theta * q * self.alpha).flatten(-2)[..., : self.k_dim]
         return x
 
     def proxy(self) -> torch.Tensor | None:
         if self.grad_proxy is None:
             return None
-        return self.grad_proxy.flatten(1)[:, : self.k_dim]
+        return self.grad_proxy.flatten(-2)[..., : self.k_dim]
 
 
 @dataclass
@@ -69,8 +68,7 @@ class CascadedCdlQuant(Quant):
 
     def __init__(
         self,
-        out_dim_or_broadcast: int,
-        k_dim: int,
+        input_shape: tuple[int, ...],
         theta_format: Format,
         theta_topk: int,
         q_format: Format,
@@ -78,19 +76,20 @@ class CascadedCdlQuant(Quant):
         block_size: int,
     ):
         super().__init__()
-        self.k_dim = k_dim
+        self.input_shape = input_shape
+        self.k_dim = input_shape[-1]
         self.theta_format = theta_format
         self.theta_topk = theta_topk
         self.q_format = q_format
         self.q_topk = q_topk
         self.block_size = block_size
 
-        num_blocks = (k_dim + block_size - 1) // block_size
+        num_blocks = (self.k_dim + block_size - 1) // block_size
 
-        self.q_num_quantized_params = out_dim_or_broadcast * num_blocks
-        self.theta_num_quantized_params = out_dim_or_broadcast * k_dim
+        self.q_num_quantized_params = math.prod(input_shape[:-1]) * num_blocks
+        self.theta_num_quantized_params = math.prod(input_shape[:-1]) * self.k_dim
 
-        q_shape = (out_dim_or_broadcast, num_blocks, 1)
+        q_shape = input_shape[:-1] + (num_blocks, 1)
 
         self.log_theta_kappa = nn.Parameter(torch.full((), math.log(2)))
         self.log_q_kappa = nn.Parameter(torch.full((), math.log(2)))
@@ -156,6 +155,16 @@ class CascadedCdlQuant(Quant):
             return CascadedCdlBypassTensor(x)
 
         assert self.initialized
+        if x.ndim != len(self.input_shape):
+            raise ValueError(
+                f"expected input shaped like {self.input_shape}, got {tuple(x.shape)}"
+            )
+        for declared, actual in zip(self.input_shape, x.shape):
+            if declared != 1 and declared != actual:
+                raise ValueError(
+                    f"expected input shaped like {self.input_shape}, got {tuple(x.shape)}"
+                )
+
         theta, _ = group_tensor_into_blocks(x, self.block_size)
 
         if not self.training:
@@ -166,17 +175,9 @@ class CascadedCdlQuant(Quant):
                 self.q_format,
                 self.alpha,
             )
-            return self.tensor(
-                self.theta_format,
-                theta_indices,
-                self.q_format,
-                q_indices,
-                self.alpha.detach(),
-                None,
-                self.k_dim,
-            )
-
-        theta_indices, q_indices, grad_proxy = self.training_forward(theta)
+            grad_proxy = None
+        else:
+            theta_indices, q_indices, grad_proxy = self.training_forward(theta)
 
         return self.tensor(
             self.theta_format,
@@ -192,7 +193,7 @@ class CascadedCdlQuant(Quant):
 class CascadedCdlQuantForActivation(CascadedCdlQuant):
     def __init__(
         self,
-        k_dim: int,
+        input_shape: tuple[int, ...],
         theta_format: Format,
         theta_topk: int,
         q_format: Format,
@@ -200,8 +201,7 @@ class CascadedCdlQuantForActivation(CascadedCdlQuant):
         block_size: int,
     ):
         super().__init__(
-            1,
-            k_dim,
+            input_shape,
             theta_format,
             theta_topk,
             q_format,
@@ -230,8 +230,7 @@ class CascadedCdlQuantForWeight(CascadedCdlQuant):
     ):
         out_dim, k_dim = weight.shape
         super().__init__(
-            out_dim,
-            k_dim,
+            (out_dim, k_dim),
             theta_format,
             theta_format.n,
             q_format,
@@ -364,16 +363,19 @@ class CascadedCdlQuantMixin(BatchNormBatchStatsMixin):
 
         def hook(m: nn.Module, args: tuple[torch.Tensor, ...]) -> None:
             x = args[0]
-            assert x.ndim == 2
             blocked, _ = group_tensor_into_blocks(x, m.block_size)
-            block_sums = blocked.abs().sum(dim=(0, 2))
+            reduce_dims = tuple(
+                i for i in range(blocked.ndim - 2) if m.input_shape[i] == 1
+            ) + (blocked.ndim - 1,)
+            block_sums = blocked.abs().sum(dim=reduce_dims)
+            positions = x.numel() // math.prod(m.input_shape)
             previous = stats.get(m)
             if previous is None:
-                stats[m] = (block_sums, x.shape[0], x.shape[1])
+                stats[m] = (block_sums, positions, x.shape[-1])
                 return
-            sums, rows, width = previous
-            assert width == x.shape[1]
-            stats[m] = (sums + block_sums, rows + x.shape[0], width)
+            sums, positions_total, width = previous
+            assert width == x.shape[-1]
+            stats[m] = (sums + block_sums, positions_total + positions, width)
 
         handles = [m.register_forward_pre_hook(hook) for m in modules]
 
@@ -394,11 +396,13 @@ class CascadedCdlQuantMixin(BatchNormBatchStatsMixin):
 
         for m in modules:
             assert m in stats
-            sums, rows, width = stats[m]
+            sums, positions, width = stats[m]
             counts = sums.new_full((sums.numel(),), m.block_size)
             pad_size = -width % m.block_size
             if pad_size:
                 counts[-1] -= pad_size
-            block_means = (sums / (rows * counts)).reshape(1, -1, 1)
+            block_means = (sums.flatten() / (positions * counts)).reshape(
+                m.input_shape[:-1] + (-1, 1)
+            )
             m.init_q_from_block_means(block_means)
             m.initialized = True

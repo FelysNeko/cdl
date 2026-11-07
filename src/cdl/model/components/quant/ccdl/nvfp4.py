@@ -15,9 +15,10 @@ from cdl.model.components.quant.ccdl.ccdl import (
 class Nvfp4CascadedCdlTensor(CascadedCdlTensor):
     def nvfp4(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         assert self.theta_indices.shape[-1] == 16
-        packed = self.theta_format.pack(self.theta_indices).flatten(1)
-        scale = self.q_format.pack(self.q_indices).flatten(1)
-        return packed, scale, self.alpha.float().reshape(1)
+        packed = self.theta_format.pack(self.theta_indices).flatten(-2)
+        scale = self.q_format.pack(self.q_indices).flatten(-2)
+        alpha = self.alpha.float().reshape(1)
+        return packed, scale, alpha
 
 
 class Nvfp4CascadedCdlQuantForActivation(CascadedCdlQuantForActivation):
@@ -25,14 +26,19 @@ class Nvfp4CascadedCdlQuantForActivation(CascadedCdlQuantForActivation):
 
     def __init__(
         self,
-        k_dim: int,
+        input_shape: tuple[int, ...],
         theta_topk: int,
         q_topk: int,
         dtype: torch.dtype,
         kernel: Literal["torch", "triton"] = "torch",
     ) -> None:
         super().__init__(
-            k_dim, E2M1(dtype), theta_topk, UE4M3ExcludeZero(dtype), q_topk, 16
+            input_shape,
+            E2M1(dtype),
+            theta_topk,
+            UE4M3ExcludeZero(dtype),
+            q_topk,
+            16,
         )
         self.kernel = kernel
         if kernel == "triton":

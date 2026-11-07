@@ -1,3 +1,4 @@
+import math
 import os
 
 import torch
@@ -316,6 +317,15 @@ def _cdl_quant_bwd(
     tl.store(part_ptr + pbase + 2, dal)
 
 
+def _flatten_q(lead: torch.Size, nb: int, q: torch.Tensor) -> tuple[torch.Tensor, int]:
+    m = math.prod(lead)
+    if q.numel() == nb:
+        return q.reshape(1, nb), 0
+    if q.numel() == m * nb:
+        return q.reshape(m, nb), nb
+    return (q * q.new_ones(*lead, nb, 1)).reshape(m, nb), nb
+
+
 def quant_fwd(
     theta: torch.Tensor,
     q: torch.Tensor,
@@ -334,10 +344,12 @@ def quant_fwd(
     q_ordinal,
     t_ordinal,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    m, nb, tpb = theta.shape
+    lead = theta.shape[:-2]
+    nb, tpb = theta.shape[-2:]
+    m = math.prod(lead)
+    theta = theta.reshape(m, nb, tpb)
     k = nb * tpb
-    lq = q.reshape(-1, nb)
-    qs = nb if lq.shape[0] == m else 0
+    lq, qs = _flatten_q(lead, nb, q)
     theta_indices = theta.new_empty((m, k), dtype=torch.int16)
     q_indices = torch.empty((m, nb), dtype=torch.uint8, device=theta.device)
     s = torch.empty((m, nb), dtype=torch.float32, device=theta.device)
@@ -369,8 +381,12 @@ def quant_fwd(
         BB=BB,
         num_warps=NUM_WARPS,
     )
+    theta_indices = theta_indices.reshape(*lead, nb, tpb)
     if qs == 0:
-        q_indices = q_indices[:1]
+        q_indices = q_indices[:1].reshape(q.shape)
+    else:
+        q_indices = q_indices.reshape(*lead, nb, 1)
+    s = s.reshape(*lead, nb)
     return theta_indices, q_indices, s
 
 
@@ -393,11 +409,14 @@ def quant_bwd(
     q_ordinal,
     t_ordinal,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    m, nb, tpb = theta.shape
+    lead = theta.shape[:-2]
+    nb, tpb = theta.shape[-2:]
+    m = math.prod(lead)
+    theta = theta.reshape(m, nb, tpb)
     k = nb * tpb
     g = grad_proxy.reshape(m, k)
-    lq = q.reshape(-1, nb)
-    qs = nb if lq.shape[0] == m else 0
+    s = s.reshape(m, nb)
+    lq, qs = _flatten_q(lead, nb, q)
     dtheta = theta.new_empty((m, k), dtype=theta.dtype)
     dq = torch.empty((m, nb), dtype=torch.float32, device=theta.device)
     ngb = triton.cdiv(nb, BB)
@@ -435,10 +454,16 @@ def quant_bwd(
     return dtheta, dq, partials[:, :3].sum(0)
 
 
-def _dq_grad(dq: torch.Tensor, q: torch.Tensor) -> torch.Tensor:
-    if q.shape[0] == dq.shape[0]:
-        return dq.reshape(q.shape)
-    return dq.sum(0, keepdim=True).reshape(q.shape)
+def _dq_grad(dq: torch.Tensor, theta: torch.Tensor, q: torch.Tensor) -> torch.Tensor:
+    full = dq.reshape(*theta.shape[:-2], -1)
+    lead_pad = q.ndim - full.ndim - 1
+    full = full.reshape((1,) * max(lead_pad, 0) + full.shape + (1,))
+    dims = tuple(
+        i for i, size in enumerate(q.shape) if size == 1 and full.shape[i] != 1
+    )
+    if dims:
+        full = full.sum(dim=dims, keepdim=True)
+    return full.reshape(q.shape)
 
 
 class CdlQuantFn(torch.autograd.Function):
@@ -463,9 +488,8 @@ class CdlQuantFn(torch.autograd.Function):
         ctx.save_for_backward(theta, q, s, theta_kappa, q_kappa, alpha)
         ctx.bwd = bwd
         ctx.args = (theta_topk, q_topk)
-        m, nb, tpb = theta.shape
-        carrier = theta.new_zeros((), dtype=torch.float32).expand(m, nb, tpb)
-        return theta_indices.reshape(m, nb, tpb), q_indices.unsqueeze(-1), carrier
+        carrier = theta.new_zeros((), dtype=torch.float32).expand(theta.shape)
+        return theta_indices, q_indices, carrier
 
     @staticmethod
     def backward(ctx, g_ti, g_qi, g_proxy):
@@ -486,7 +510,7 @@ class CdlQuantFn(torch.autograd.Function):
             None,
             None,
             dtheta.reshape(theta.shape),
-            _dq_grad(dq, q),
+            _dq_grad(dq, theta, q),
             sums[0],
             sums[1],
             sums[2],

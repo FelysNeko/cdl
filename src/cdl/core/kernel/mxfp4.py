@@ -1,3 +1,5 @@
+import math
+
 import torch
 
 from cdl.core.kernel.backbone.ccdl import CdlQuantFn, quant_bwd, quant_fwd
@@ -46,12 +48,13 @@ def mxfp4_quant_fwd(
 
 @mxfp4_quant_fwd.register_fake
 def _(theta, q, theta_kappa, q_kappa, alpha, seed, theta_topk, q_topk):
-    m, nb, tpb = theta.shape
-    rq = q.shape[0]
+    lead = theta.shape[:-2]
+    nb, tpb = theta.shape[-2:]
+    qi_shape = q.shape if q.numel() == nb else (*lead, nb, 1)
     return (
-        theta.new_empty((m, nb * tpb), dtype=torch.int16),
-        theta.new_empty((1 if rq == 1 else m, nb), dtype=torch.uint8),
-        theta.new_empty((m, nb), dtype=torch.float32),
+        theta.new_empty((*lead, nb, tpb), dtype=torch.int16),
+        theta.new_empty(qi_shape, dtype=torch.uint8),
+        theta.new_empty((*lead, nb), dtype=torch.float32),
     )
 
 
@@ -92,7 +95,8 @@ def mxfp4_quant_bwd(
 
 @mxfp4_quant_bwd.register_fake
 def _(grad_proxy, theta, q, s, theta_kappa, q_kappa, alpha, theta_topk, q_topk):
-    m, nb, tpb = theta.shape
+    m = math.prod(theta.shape[:-2])
+    nb, tpb = theta.shape[-2:]
     return (
         theta.new_empty((m, nb * tpb), dtype=theta.dtype),
         theta.new_empty((m, nb), dtype=torch.float32),
