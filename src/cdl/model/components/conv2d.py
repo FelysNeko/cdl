@@ -1,4 +1,4 @@
-from typing import Literal
+from typing import Any, Literal
 
 import torch
 import torch.nn.functional as F
@@ -6,6 +6,7 @@ from torch import nn
 
 from cdl.api.quant import MatMul, Quant
 from cdl.core.mm import mxfp4, mxfp8, native, nvfp4
+from cdl.model.components.quant.ste import SteQuant
 
 type Backend = Literal["native", "nvfp4", "mxfp4", "mxfp8"]
 
@@ -13,18 +14,40 @@ type Backend = Literal["native", "nvfp4", "mxfp4", "mxfp8"]
 class QConv2d(nn.Conv2d):
     def __init__(
         self,
-        *args,
-        activation_quant: Quant,
-        weight_quant: Quant,
-        backend: Backend,
-        **kwargs,
+        in_channels: int,
+        out_channels: int,
+        kernel_size: int,
+        stride: int = 1,
+        padding: int = 0,
+        bias: bool = True,
+        device: Any | None = None,
+        dtype: Any | None = None,
     ):
-        super().__init__(*args, **kwargs)
-        if self.groups != 1:
-            raise ValueError("QConv2d only supports groups=1")
+        super().__init__(
+            in_channels,
+            out_channels,
+            kernel_size,
+            stride,
+            padding,
+            dilation=1,
+            groups=1,
+            bias=bias,
+            padding_mode="zeros",
+            device=device,
+            dtype=dtype,
+        )
         nn.init.kaiming_normal_(self.weight, mode="fan_out", nonlinearity="relu")
-        self.activation_quant = activation_quant
-        self.weight_quant = weight_quant
+        self.activation_quant = SteQuant(None)
+        self.weight_quant = SteQuant(None)
+        self.backend = "native"
+
+    def set_activation_quant(self, quant: Quant) -> None:
+        self.activation_quant = quant
+
+    def set_weight_quant(self, quant: Quant) -> None:
+        self.weight_quant = quant
+
+    def set_backend(self, backend: Backend) -> None:
         self.backend = backend
 
     @property
@@ -37,12 +60,6 @@ class QConv2d(nn.Conv2d):
         }
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        unbatched = x.ndim == 3
-        if unbatched:
-            x = x.unsqueeze(0)
-        if x.ndim != 4:
-            raise ValueError(f"convolution input must be 3-D or 4-D, got {x.ndim}-D")
-
         batch, _, height, width = x.shape
         patches = F.unfold(
             x, self.kernel_size, self.dilation, self.padding, self.stride
@@ -68,4 +85,11 @@ class QConv2d(nn.Conv2d):
             - 1
         ) // self.stride[1] + 1
         out = out.reshape(batch, oh, ow, self.out_channels).permute(0, 3, 1, 2)
-        return out.squeeze(0) if unbatched else out
+        return out
+
+
+class QConv2dMixin(nn.Module):
+    def q_conv2d_switch_backend(self, backend: Backend) -> None:
+        for m in self.modules():
+            if isinstance(m, QConv2d):
+                m.set_backend(backend)

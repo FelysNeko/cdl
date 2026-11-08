@@ -1,10 +1,11 @@
-from typing import Literal
+from typing import Any, Literal
 
 import torch
 from torch import nn
 
 from cdl.api.quant import MatMul, Quant
 from cdl.core.mm import mxfp4, mxfp8, native, nvfp4
+from cdl.model.components.quant.ste import SteQuant
 
 type Backend = Literal["native", "nvfp4", "mxfp4", "mxfp8"]
 
@@ -12,15 +13,24 @@ type Backend = Literal["native", "nvfp4", "mxfp4", "mxfp8"]
 class QLinear(nn.Linear):
     def __init__(
         self,
-        *args,
-        activation_quant: Quant,
-        weight_quant: Quant,
-        backend: Backend,
-        **kwargs,
+        in_features: int,
+        out_features: int,
+        bias: bool = True,
+        device: Any | None = None,
+        dtype: Any | None = None,
     ):
-        super().__init__(*args, **kwargs)
-        self.activation_quant = activation_quant
-        self.weight_quant = weight_quant
+        super().__init__(in_features, out_features, bias, device, dtype)
+        self.activation_quant = SteQuant(None)
+        self.weight_quant = SteQuant(None)
+        self.backend = "native"
+
+    def set_activation_quant(self, quant: Quant) -> None:
+        self.activation_quant = quant
+
+    def set_weight_quant(self, quant: Quant) -> None:
+        self.weight_quant = quant
+
+    def set_backend(self, backend: Backend) -> None:
         self.backend = backend
 
     @property
@@ -44,7 +54,7 @@ class QLinear(nn.Linear):
 
 
 class QLinearMixin(nn.Module):
-    def switch_backend(self, backend: Backend) -> None:
+    def q_linear_switch_backend(self, backend: Backend) -> None:
         for m in self.modules():
             if isinstance(m, QLinear):
-                m.backend = backend
+                m.set_backend(backend)
