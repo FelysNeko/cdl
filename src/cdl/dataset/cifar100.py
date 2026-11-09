@@ -35,5 +35,5 @@ def get_loaders(
         train_set, batch_size, shuffle=True, num_workers=workers, drop_last=True
     )
     test_loader = DataLoader(test_set, batch_size, shuffle=False, num_workers=workers)
-    num_calib_batches = (x for x, _ in islice(train_loader, num_calib_batches))
-    return train_loader, test_loader, num_calib_batches
+    calib_batches = (x for x, _ in islice(train_loader, num_calib_batches))
+    return train_loader, test_loader, calib_batches
