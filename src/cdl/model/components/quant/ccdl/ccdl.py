@@ -43,7 +43,8 @@ class CascadedCdlTensor(QTensor):
     def dequantize(self) -> torch.Tensor:
         theta = self.theta_format.level[self.theta_indices.long()]
         q = self.q_format.level[self.q_indices.long()]
-        x = (theta * q * self.alpha).flatten(-2)[..., : self.k_dim]
+        alpha = self.alpha.to(theta.dtype)
+        x = (theta * q * alpha).flatten(-2)[..., : self.k_dim]
         return x
 
     def proxy(self) -> torch.Tensor | None:
@@ -295,61 +296,41 @@ class CascadedCdlQuantMixin(BatchNormBatchStatsMixin):
     def get_param_groups(
         self,
         learning_rate: float,
-        weight_decay: float,
-        skip_alpha: bool,
-        skip_kappa: bool,
-    ) -> list[dict]:
+        train_alpha: bool,
+        train_kappa: bool,
+    ) -> tuple[list[dict], set[nn.Parameter]]:
         customized_param_set: set[nn.Parameter] = set()
-        buckets: dict[tuple[float, float], list[nn.Parameter]] = {}
+        buckets: dict[float, list[nn.Parameter]] = {}
 
         for m in self.modules():
             if not isinstance(m, CascadedCdlQuant):
                 continue
 
-            customized_param_set.add(m.log_q)
-            customized_param_set.add(m.log_alpha)
-            customized_param_set.add(m.log_theta_kappa)
-            customized_param_set.add(m.log_q_kappa)
+            customized_param_set.update(m.parameters())
 
             q_lr = m.get_q_lr(learning_rate)
-            buckets.setdefault((q_lr, 0.0), []).append(m.log_q)
+            buckets.setdefault(q_lr, []).append(m.log_q)
 
-            if not skip_alpha:
+            if train_alpha:
                 alpha_lr = m.get_alpha_lr(learning_rate)
-                buckets.setdefault((alpha_lr, 0.0), []).append(m.log_alpha)
+                buckets.setdefault(alpha_lr, []).append(m.log_alpha)
+            else:
+                m.log_alpha.requires_grad_(False)
 
-            if not skip_kappa:
+            if train_kappa:
                 theta_kappa_lr = m.get_theta_kappa_lr(learning_rate)
                 q_kappa_lr = m.get_q_kappa_lr(learning_rate)
-                buckets.setdefault((theta_kappa_lr, 0.0), []).append(m.log_theta_kappa)
-                buckets.setdefault((q_kappa_lr, 0.0), []).append(m.log_q_kappa)
-
-        decay = []
-        no_decay = []
-        for param in self.parameters():
-            if param in customized_param_set:
-                continue
-            if param.ndim <= 1:
-                no_decay.append(param)
+                buckets.setdefault(theta_kappa_lr, []).append(m.log_theta_kappa)
+                buckets.setdefault(q_kappa_lr, []).append(m.log_q_kappa)
             else:
-                decay.append(param)
+                m.log_theta_kappa.requires_grad_(False)
+                m.log_q_kappa.requires_grad_(False)
 
         groups = [
-            {"params": params, "lr": lr, "weight_decay": wd}
-            for (lr, wd), params in buckets.items()
+            {"params": params, "lr": lr, "weight_decay": 0.0}
+            for lr, params in buckets.items()
         ]
-
-        if decay:
-            groups.append(
-                {"params": decay, "lr": learning_rate, "weight_decay": weight_decay}
-            )
-
-        if no_decay:
-            groups.append(
-                {"params": no_decay, "lr": learning_rate, "weight_decay": 0.0}
-            )
-
-        return groups
+        return groups, customized_param_set
 
     @torch.no_grad()
     def init_act_q_pass(self, samples: Iterable[torch.Tensor]) -> None:

@@ -42,15 +42,30 @@ class QLinear(nn.Linear):
             "mxfp8": mxfp8.matmul,
         }
 
+    @staticmethod
+    def from_linear(linear: nn.Linear) -> "QLinear":
+        new = QLinear(
+            linear.in_features,
+            linear.out_features,
+            bias=linear.bias is not None,
+            device=linear.weight.device,
+            dtype=linear.weight.dtype,
+        )
+        new.weight.copy_(linear.weight)
+        if linear.bias is not None:
+            new.bias.copy_(linear.bias)
+        return new
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        activation = self.activation_quant(x)
+        x2d = x.reshape(-1, x.shape[-1])
+        activation = self.activation_quant(x2d)
         weight = self.weight_quant(self.weight)
 
         out = self.available_backend_fn[self.backend](activation, weight)
         if self.bias is not None:
             out = out + self.bias
 
-        return out
+        return out.reshape(*x.shape[:-1], -1)
 
 
 class QLinearMixin(nn.Module):

@@ -25,12 +25,12 @@ def cdl_topk_forward(
             num_quantized_params,
         )
 
-    q_d = formulae.topk_q_d(f.level, q, topk_pmf, topk_indices)
+    q_d = formulae.topk_q_d(f.level, q, topk_pmf, topk_indices).to(theta.dtype)
 
     if relaxed:
         return q_d, entropies
 
-    q_p = formulae.topk_q_p(f, q, topk_pmf, topk_indices)
+    q_p = formulae.topk_q_p(f, q, topk_pmf, topk_indices).to(theta.dtype)
 
     return q_d + (q_p - q_d).detach(), entropies
 
@@ -41,4 +41,4 @@ def nearest_round(
     f: Format,
     q: torch.Tensor,
 ) -> torch.Tensor:
-    return f.quantize(theta, q)
+    return f.quantize(theta, q).to(theta.dtype)

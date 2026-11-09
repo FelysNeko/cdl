@@ -27,7 +27,7 @@ def cdl_topk_forward(
     proxy = formulae.topk_q_d(f.level, q, topk_pmf, topk_indices)
     chosen = formulae.topk_q_p_indices(topk_pmf, topk_indices)
 
-    return chosen, proxy, entropies
+    return chosen, proxy.to(theta.dtype), entropies
 
 
 def cascaded_cdl_topk_forward(

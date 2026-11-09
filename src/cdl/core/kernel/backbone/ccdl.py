@@ -488,7 +488,7 @@ class CdlQuantFn(torch.autograd.Function):
         ctx.save_for_backward(theta, q, s, theta_kappa, q_kappa, alpha)
         ctx.bwd = bwd
         ctx.args = (theta_topk, q_topk)
-        carrier = theta.new_zeros((), dtype=torch.float32).expand(theta.shape)
+        carrier = theta.new_zeros(()).expand(theta.shape)
         return theta_indices, q_indices, carrier
 
     @staticmethod

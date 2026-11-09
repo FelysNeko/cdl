@@ -152,53 +152,32 @@ class CdlQuantMixin(BatchNormBatchStatsMixin):
     def get_param_groups(
         self,
         learning_rate: float,
-        weight_decay: float,
-        skip_kappa: bool,
-    ) -> list[dict]:
+        train_kappa: bool,
+    ) -> tuple[list[dict], set[nn.Parameter]]:
         customized_param_set: set[nn.Parameter] = set()
-        buckets: dict[tuple[float, float], list[nn.Parameter]] = {}
+        buckets: dict[float, list[nn.Parameter]] = {}
 
         for m in self.modules():
             if not isinstance(m, CdlQuant):
                 continue
             assert m.initialized
 
-            customized_param_set.add(m.log_q)
-            customized_param_set.add(m.log_kappa)
+            customized_param_set.update(m.parameters())
 
             q_lr = m.get_q_lr(learning_rate)
-            buckets.setdefault((q_lr, 0.0), []).append(m.log_q)
+            buckets.setdefault(q_lr, []).append(m.log_q)
 
-            if not skip_kappa:
+            if train_kappa:
                 kappa_lr = m.get_kappa_lr(learning_rate)
-                buckets.setdefault((kappa_lr, 0.0), []).append(m.log_kappa)
-
-        decay = []
-        no_decay = []
-        for param in self.parameters():
-            if param in customized_param_set:
-                continue
-            if param.ndim <= 1:
-                no_decay.append(param)
+                buckets.setdefault(kappa_lr, []).append(m.log_kappa)
             else:
-                decay.append(param)
+                m.log_kappa.requires_grad_(False)
 
         groups = [
-            {"params": params, "lr": lr, "weight_decay": wd}
-            for (lr, wd), params in buckets.items()
+            {"params": params, "lr": lr, "weight_decay": 0.0}
+            for lr, params in buckets.items()
         ]
-
-        if decay:
-            groups.append(
-                {"params": decay, "lr": learning_rate, "weight_decay": weight_decay}
-            )
-
-        if no_decay:
-            groups.append(
-                {"params": no_decay, "lr": learning_rate, "weight_decay": 0.0}
-            )
-
-        return groups
+        return groups, customized_param_set
 
     @torch.no_grad()
     def init_act_q_pass(self, samples: Iterable[torch.Tensor]) -> None:
