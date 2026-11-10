@@ -1,3 +1,4 @@
+import math
 from typing import Any, Literal
 
 import torch
@@ -8,6 +9,28 @@ from cdl.core.mm import mxfp4, mxfp8, native, nvfp4
 from cdl.model.components.quant.ste import SteQuant
 
 type Backend = Literal["native", "nvfp4", "mxfp4", "mxfp8"]
+
+
+class MergedLoRALayer(nn.Module):
+    def __init__(self, hint: nn.Linear, r: int, alpha: int) -> None:
+        super().__init__()
+        device = hint.weight.device
+        dtype = hint.weight.dtype
+
+        self.r = r
+        self.scaling = alpha / r
+
+        self.a = nn.Parameter(
+            torch.empty(r, hint.in_features, device=device, dtype=dtype)
+        )
+        nn.init.kaiming_uniform_(self.a, a=math.sqrt(5))
+        self.b = nn.Parameter(
+            torch.zeros(hint.out_features, r, device=device, dtype=dtype)
+        )
+
+    def forward(self, weight: torch.Tensor) -> torch.Tensor:
+        merged = weight.float() + self.scaling * (self.b.float() @ self.a.float())
+        return merged.to(weight.dtype)
 
 
 class QLinear(nn.Linear):
@@ -23,6 +46,7 @@ class QLinear(nn.Linear):
         self.activation_quant = SteQuant(None)
         self.weight_quant = SteQuant(None)
         self.backend = "native"
+        self.lora = nn.Identity()
 
     def set_activation_quant(self, quant: Quant) -> None:
         self.activation_quant = quant
@@ -32,6 +56,9 @@ class QLinear(nn.Linear):
 
     def set_backend(self, backend: Backend) -> None:
         self.backend = backend
+
+    def set_lora(self, r: int, alpha: int) -> None:
+        self.lora = MergedLoRALayer(self, r, alpha)
 
     @property
     def available_backend_fn(self) -> dict[str, MatMul]:
@@ -52,14 +79,16 @@ class QLinear(nn.Linear):
             dtype=linear.weight.dtype,
         )
         new.weight.copy_(linear.weight)
+        new.weight.requires_grad_(linear.weight.requires_grad)
         if linear.bias is not None:
             new.bias.copy_(linear.bias)
+            new.bias.requires_grad_(linear.bias.requires_grad)
         return new
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x2d = x.reshape(-1, x.shape[-1])
         activation = self.activation_quant(x2d)
-        weight = self.weight_quant(self.weight)
+        weight = self.weight_quant(self.lora(self.weight))
 
         out = self.available_backend_fn[self.backend](activation, weight)
         if self.bias is not None:

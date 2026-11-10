@@ -25,7 +25,6 @@ from cdl.core.format.fp4 import E2M1
 from cdl.core.format.fp8 import UE4M3ExcludeZero
 from cdl.dataset.smollm_corpus import get_dataset
 from cdl.model.components.linear import QLinear, QLinearMixin
-from cdl.model.components.lora import LoRALayerMixin
 from cdl.model.components.quant.ccdl.ccdl import CascadedCdlQuantMixin
 from cdl.model.components.quant.ccdl.nvfp4 import (
     Nvfp4CascadedCdlQuantForActivation,
@@ -59,14 +58,19 @@ class ModelConfig:
     )
     activation: str = "ste"  # "ste" (STE nvfp4) or "nvfp4_ccdl" (cascaded CDL nvfp4)
     weight: str = "nvfp4_ccdl"  # "ste" (STE nvfp4) or "nvfp4_ccdl" (cascaded CDL nvfp4)
+    weight_kappa: float = 2.0  # CDL inverse temperature for weight quant
+    weight_q_init: str = "mean"  # "mean" (paper) or "amax" (nvfp4-style block amax/6)
+    activation_kappa: float = 2.0  # CDL inverse temperature for activation quant
     theta_topk: int = 5  # CDL window over E2M1 levels (activation quant)
     q_topk: int = 5  # CDL window over UE4M3 levels (activation quant)
     block_size: int = 16  # nvfp4 requires 16
     kernel: str = "triton"  # "torch" or "triton" (nvfp4_quant kernel)
     use_lora: bool = True
+    freeze_base: bool = (
+        False  # with use_lora=false, keep the base frozen (q/alpha/head only)
+    )
     lora_r: int = 8
     lora_alpha: int = 16
-    lora_dropout: float = 0.01
 
 
 @dataclass
@@ -85,6 +89,7 @@ class DataConfig:
 @dataclass
 class TrainingConfig:
     epochs: int = 1
+    max_steps: int = 0  # 0 = full epoch; otherwise stop after this many steps
     learning_rate: float = 1e-4  # AdamW eta, base model (decay/no_decay groups)
     quant_learning_rate: float = 0.1  # SGD eta for the q/alpha/kappa buckets
     warmup_steps: int = 200
@@ -93,6 +98,8 @@ class TrainingConfig:
     grad_clip: float = 1.0
     train_alpha: bool = True
     train_kappa: bool = False
+    quant_optimizer: str = "sgd"  # "sgd" (paper: momentum=0.9) or "adamw"
+    quant_adamw_lr: float = 3e-4  # uniform lr when quant_optimizer=adamw
     ce_chunks: int = 8
     gradient_checkpointing: bool = True
     save_every_iters: int = 500
@@ -187,7 +194,7 @@ def seed_all(seed: int) -> None:
 # ---------------------------------------------------------------------------
 
 
-class ModelController(LoRALayerMixin, QLinearMixin, CascadedCdlQuantMixin):
+class ModelController(QLinearMixin, CascadedCdlQuantMixin):
     """Wraps the causal LM so the quant/LoRA mixins can traverse it."""
 
     def __init__(self, model: nn.Module):
@@ -207,6 +214,12 @@ class ModelController(LoRALayerMixin, QLinearMixin, CascadedCdlQuantMixin):
         dtype: torch.dtype,
         kernel: str,
         weight: str = "nvfp4_ccdl",
+        weight_kappa: float = 2.0,
+        weight_q_init: str = "mean",
+        activation_kappa: float = 2.0,
+        use_lora: bool = False,
+        lora_r: int = 8,
+        lora_alpha: int = 16,
     ) -> None:
         if activation == "nvfp4_ccdl":
             if not 1 <= theta_topk <= E2M1(dtype).n:
@@ -223,6 +236,8 @@ class ModelController(LoRALayerMixin, QLinearMixin, CascadedCdlQuantMixin):
             if not isinstance(module, nn.Linear) or leaf not in targets:
                 continue
             qlinear = QLinear.from_linear(module)
+            if use_lora:
+                qlinear.set_lora(lora_r, lora_alpha)
             if activation == "ste":
                 qlinear.set_activation_quant(SteQuant("nvfp4"))
             else:
@@ -233,6 +248,7 @@ class ModelController(LoRALayerMixin, QLinearMixin, CascadedCdlQuantMixin):
                         q_topk,
                         dtype,
                         kernel,
+                        kappa=activation_kappa,
                     )
                 )
             if weight == "ste":
@@ -240,7 +256,11 @@ class ModelController(LoRALayerMixin, QLinearMixin, CascadedCdlQuantMixin):
             else:
                 qlinear.set_weight_quant(
                     Nvfp4CascadedCdlQuantForWeight(
-                        qlinear.weight, dtype=dtype, kernel=kernel
+                        qlinear.weight,
+                        dtype=dtype,
+                        kernel=kernel,
+                        q_init=weight_q_init,
+                        kappa=weight_kappa,
                     )
                 )
             qlinear.set_backend("native")
@@ -251,10 +271,17 @@ class ModelController(LoRALayerMixin, QLinearMixin, CascadedCdlQuantMixin):
             setattr(parent, leaf, qlinear)
 
 
-def untie_and_freeze(model: LlamaForCausalLM, freeze_all: bool = True) -> None:
-    """Untie the output head and freeze the base model. With freeze_all
-    (LoRA mode) everything freezes except the head; otherwise only the
-    input embedding freezes and the full base trains."""
+def untie_and_freeze(
+    model: LlamaForCausalLM, freeze_all: bool = True, train_head: bool = True
+) -> None:
+    """Untie the output head and freeze the base model.
+
+    With freeze_all, everything is frozen; train_head keeps the LM head
+    trainable. LoRA mode passes False because the paper freezes the
+    classification head, while head-only ablations pass True. Without
+    freeze_all only the input embedding is frozen and the full base
+    (including the head) trains.
+    """
     embed = model.get_input_embeddings()
     head = model.lm_head
     if head.weight is embed.weight:
@@ -265,7 +292,8 @@ def untie_and_freeze(model: LlamaForCausalLM, freeze_all: bool = True) -> None:
         return
     for p in model.parameters():
         p.requires_grad_(False)
-    head.weight.requires_grad_(True)
+    if train_head:
+        head.weight.requires_grad_(True)
 
 
 def init_activation_q(
@@ -364,9 +392,24 @@ def build_optimizers(
             continue
         (no_decay if p.ndim <= 1 else decay).append(p)
 
-    sgd_optimizer = None
-    if cdl_groups: # double-STE variants have no CDL params at all
-        sgd_optimizer = torch.optim.SGD(cdl_groups, momentum=0.9)
+    quant_optimizer = None
+    if cdl_groups:  # double-STE variants have no CDL params at all
+        if cfg.quant_optimizer == "sgd":
+            quant_optimizer = torch.optim.SGD(cdl_groups, momentum=0.9)
+        elif cfg.quant_optimizer == "adamw":
+            # AdamW normalizes per-parameter step size, so the per-bucket
+            # lr scaling is replaced by one uniform lr.
+            groups = [
+                {
+                    "params": group["params"],
+                    "lr": cfg.quant_adamw_lr,
+                    "weight_decay": 0.0,
+                }
+                for group in cdl_groups
+            ]
+            quant_optimizer = torch.optim.AdamW(groups, betas=tuple(cfg.betas))
+        else:
+            raise ValueError(f"unknown quant optimizer {cfg.quant_optimizer!r}")
     adamw_groups = [
         {
             "params": decay,
@@ -383,8 +426,8 @@ def build_optimizers(
         return min(1.0, (step + 1) / cfg.warmup_steps)
 
     optimizers: dict[str, torch.optim.Optimizer] = {}
-    if sgd_optimizer is not None:
-        optimizers["sgd"] = sgd_optimizer
+    if quant_optimizer is not None:
+        optimizers["quant"] = quant_optimizer
     optimizers["adamw"] = adamw_optimizer
     lr_schedulers = {
         name: torch.optim.lr_scheduler.LambdaLR(opt, warmup)
@@ -568,7 +611,11 @@ def training_pipeline() -> None:
     seed_all(args.seed)
 
     model = AutoModelForCausalLM.from_pretrained(cfg.model.model_id, dtype=MODEL_DTYPE)
-    untie_and_freeze(model, freeze_all=cfg.model.use_lora)
+    untie_and_freeze(
+        model,
+        freeze_all=cfg.model.use_lora or cfg.model.freeze_base,
+        train_head=not cfg.model.use_lora,
+    )
     tokenizer = AutoTokenizer.from_pretrained(cfg.model.model_id)
 
     train_set, test_set, calib_blocks = build_corpus(cfg.data, tokenizer)
@@ -590,14 +637,13 @@ def training_pipeline() -> None:
         MODEL_DTYPE,
         cfg.model.kernel,
         weight=cfg.model.weight,
+        weight_kappa=cfg.model.weight_kappa,
+        weight_q_init=cfg.model.weight_q_init,
+        activation_kappa=cfg.model.activation_kappa,
+        use_lora=cfg.model.use_lora,
+        lora_r=cfg.model.lora_r,
+        lora_alpha=cfg.model.lora_alpha,
     )
-    if cfg.model.use_lora:
-        controller.replace_linear_with_lora(
-            set(cfg.model.quant_targets),
-            cfg.model.lora_r,
-            cfg.model.lora_alpha,
-            cfg.model.lora_dropout,
-        )
     controller.to(device)
 
     if cfg.train.gradient_checkpointing:
@@ -629,8 +675,8 @@ def training_pipeline() -> None:
         )
 
     quant_trainable = (
-        [p for group in optimizers["sgd"].param_groups for p in group["params"]]
-        if "sgd" in optimizers
+        [p for group in optimizers["quant"].param_groups for p in group["params"]]
+        if "quant" in optimizers
         else []
     )
     cdl_param_ids = {id(p) for p in quant_trainable}
@@ -645,6 +691,7 @@ def training_pipeline() -> None:
     logger.info(f"training started from epoch {start_epoch}")
     last_saved = -1
     epoch = start_epoch
+    stopped_early = False
     for epoch in range(start_epoch, cfg.train.epochs):
         controller.model.train()
         start = time.perf_counter()
@@ -663,13 +710,9 @@ def training_pipeline() -> None:
             for opt in optimizers.values():
                 opt.zero_grad(set_to_none=True)
             loss.backward()
-            gnorm = torch.nn.utils.clip_grad_norm_(
-                base_trainable, cfg.train.grad_clip
-            )
+            gnorm = torch.nn.utils.clip_grad_norm_(base_trainable, cfg.train.grad_clip)
             quant_gnorm = (
-                torch.nn.utils.clip_grad_norm_(
-                    quant_trainable, cfg.train.grad_clip
-                )
+                torch.nn.utils.clip_grad_norm_(quant_trainable, cfg.train.grad_clip)
                 if quant_trainable
                 else None
             )
@@ -684,7 +727,9 @@ def training_pipeline() -> None:
                 and global_step % cfg.logging.log_every_steps == 0
             ):
                 writer.add_scalar("train/loss", loss.item(), global_step)
-                writer.add_scalar("train/lr", current_lr(optimizers["adamw"]), global_step)
+                writer.add_scalar(
+                    "train/lr", current_lr(optimizers["adamw"]), global_step
+                )
                 writer.add_scalar("train/grad_norm", gnorm.item(), global_step)
                 if quant_gnorm is not None:
                     writer.add_scalar(
@@ -729,8 +774,15 @@ def training_pipeline() -> None:
                     tag=f"step {global_step}",
                 )
 
+            if cfg.train.max_steps and global_step >= cfg.train.max_steps:
+                stopped_early = True
+                break
+
         resume_skip = 0
         logger.info(f"epoch {epoch} completed in {time.perf_counter() - start:.1f}s")
+        if stopped_early:
+            logger.info(f"stopping early at step {global_step}")
+            break
 
     if global_step != last_saved:
         save_checkpoint(
