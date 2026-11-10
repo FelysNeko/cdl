@@ -38,6 +38,11 @@ logger = logging.getLogger(__name__)
 MODEL_DTYPE = torch.bfloat16
 
 
+# ---------------------------------------------------------------------------
+# configuration
+# ---------------------------------------------------------------------------
+
+
 @dataclass
 class ModelConfig:
     model_id: str = "HuggingFaceTB/SmolLM2-135M"
@@ -53,6 +58,7 @@ class ModelConfig:
         ]
     )
     activation: str = "ste"  # "ste" (STE nvfp4) or "nvfp4_ccdl" (cascaded CDL nvfp4)
+    weight: str = "nvfp4_ccdl"  # "ste" (STE nvfp4) or "nvfp4_ccdl" (cascaded CDL nvfp4)
     theta_topk: int = 5  # CDL window over E2M1 levels (activation quant)
     q_topk: int = 5  # CDL window over UE4M3 levels (activation quant)
     block_size: int = 16  # nvfp4 requires 16
@@ -79,7 +85,8 @@ class DataConfig:
 @dataclass
 class TrainingConfig:
     epochs: int = 1
-    learning_rate: float = 1e-4
+    learning_rate: float = 1e-4  # AdamW eta, base model (decay/no_decay groups)
+    quant_learning_rate: float = 0.1  # SGD eta for the q/alpha/kappa buckets
     warmup_steps: int = 200
     weight_decay: float = 0.0
     betas: list[float] = field(default_factory=lambda: [0.9, 0.95])
@@ -112,122 +119,23 @@ def load_config(yaml_path: Path) -> Config:
     return OmegaConf.to_object(OmegaConf.merge(schema, OmegaConf.load(yaml_path)))
 
 
-class ModelController(LoRALayerMixin, QLinearMixin, CascadedCdlQuantMixin):
-    """Wraps the causal LM so the quant/LoRA mixins can traverse it."""
-
-    def __init__(self, model: nn.Module):
-        super().__init__()
-        self.model = model
-
-    def forward(self, *args, **kwargs):
-        return self.model(*args, **kwargs)
-
-    @torch.no_grad()
-    def apply_quant(
-        self,
-        targets: set[str],
-        activation: str,
-        theta_topk: int,
-        q_topk: int,
-        dtype: torch.dtype,
-        kernel: str,
-    ) -> None:
-        if activation == "nvfp4_ccdl":
-            if not 1 <= theta_topk <= E2M1(dtype).n:
-                raise ValueError(f"theta_topk {theta_topk} out of range")
-            if not 1 <= q_topk <= UE4M3ExcludeZero(dtype).n:
-                raise ValueError(f"q_topk {q_topk} out of range")
-        elif activation != "ste":
-            raise ValueError(f"unknown activation variant {activation!r}")
-
-        for name, module in list(self.named_modules()):
-            leaf = name.rsplit(".", 1)[-1]
-            if not isinstance(module, nn.Linear) or leaf not in targets:
-                continue
-            qlinear = QLinear.from_linear(module)
-            if activation == "ste":
-                qlinear.set_activation_quant(SteQuant("nvfp4"))
-            else:
-                qlinear.set_activation_quant(
-                    Nvfp4CascadedCdlQuantForActivation(
-                        (1, qlinear.in_features),
-                        theta_topk,
-                        q_topk,
-                        dtype,
-                        kernel,
-                    )
-                )
-            qlinear.set_weight_quant(
-                Nvfp4CascadedCdlQuantForWeight(
-                    qlinear.weight, dtype=dtype, kernel=kernel
-                )
-            )
-            qlinear.set_backend("native")
-
-            parent = (
-                self if "." not in name else self.get_submodule(name.rsplit(".", 1)[0])
-            )
-            setattr(parent, leaf, qlinear)
+# ---------------------------------------------------------------------------
+# cli / run settings
+# ---------------------------------------------------------------------------
 
 
-def untie_and_freeze(model: LlamaForCausalLM, freeze_all: bool = True) -> None:
-    """Untie the output head and freeze the base model. With freeze_all
-    (LoRA mode) everything freezes except the head; otherwise only the
-    input embedding freezes and the full base trains."""
-    embed = model.get_input_embeddings()
-    head = model.lm_head
-    if head.weight is embed.weight:
-        head.weight = nn.Parameter(embed.weight.detach().clone())
-        model.config.tie_word_embeddings = False
-    if not freeze_all:
-        embed.weight.requires_grad_(False)
-        return
-    for p in model.parameters():
-        p.requires_grad_(False)
-    head.weight.requires_grad_(True)
-
-
-def build_corpus(
-    cfg: DataConfig, tokenizer
-) -> tuple[TensorDataset, TensorDataset, torch.Tensor]:
-    """Tokenize the sampled pool, pack into fixed-length blocks, split
-    train/test; calib blocks overlap with the head of train.
-
-    Tokens accumulate in array('q') at 8 B/token; a list[int] would hold
-    ~36 B/token and swap-thrash the box at 100k docs."""
-    pool = get_dataset(cfg.ratios, cfg.num_docs, cfg.seed)
-    eos = tokenizer.eos_token_id
-    texts = pool["text"]
-    n_docs = len(texts)
-    ids = array("q")
-    batch = 1024
-    for start in tqdm.tqdm(range(0, n_docs, batch), desc="tokenize"):
-        for seq in tokenizer(texts[start : start + batch], add_special_tokens=False)[
-            "input_ids"
-        ]:
-            ids.extend(seq)
-            ids.append(eos)
-        if (start // batch) % 20 == 0:
-            done = min(start + batch, n_docs)
-            logger.info(f"tokenized {done:,}/{n_docs:,} docs ({len(ids):,} tokens)")
-    del texts, pool
-
-    n_blocks = len(ids) // cfg.seq_len
-    if n_blocks <= cfg.num_test_blocks:
-        raise ValueError(
-            f"corpus produced only {n_blocks} blocks of seq_len={cfg.seq_len}; "
-            f"need more than num_test_blocks={cfg.num_test_blocks}"
-        )
-    flat = np.asarray(ids)  # zero-copy view of the array buffer
-    blocks = torch.from_numpy(flat[: n_blocks * cfg.seq_len]).view(n_blocks, -1)
-    test_blocks = blocks[-cfg.num_test_blocks :]
-    train_blocks = blocks[: -cfg.num_test_blocks]
-    calib_blocks = train_blocks[: cfg.num_calib_blocks]
-    logger.info(
-        f"{len(ids):,} tokens -> {n_blocks} blocks of {cfg.seq_len} "
-        f"(train {len(train_blocks)}, test {len(test_blocks)}, calib {len(calib_blocks)})"
-    )
-    return TensorDataset(train_blocks), TensorDataset(test_blocks), calib_blocks
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument("--config", type=Path)
+    group.add_argument("--resume", type=Path)
+    parser.add_argument("--workers", type=int, default=2)
+    parser.add_argument("--device", default="auto")
+    parser.add_argument("--compile", action="store_true")
+    parser.add_argument("--output-dir", type=Path)
+    parser.add_argument("--run-name", type=str)
+    parser.add_argument("--seed", type=int, default=42)
+    return parser.parse_args()
 
 
 def sanitize_device(device: str) -> torch.device:
@@ -274,22 +182,224 @@ def seed_all(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
+# ---------------------------------------------------------------------------
+# model / quant setup
+# ---------------------------------------------------------------------------
+
+
+class ModelController(LoRALayerMixin, QLinearMixin, CascadedCdlQuantMixin):
+    """Wraps the causal LM so the quant/LoRA mixins can traverse it."""
+
+    def __init__(self, model: nn.Module):
+        super().__init__()
+        self.model = model
+
+    def forward(self, *args, **kwargs):
+        return self.model(*args, **kwargs)
+
+    @torch.no_grad()
+    def apply_quant(
+        self,
+        targets: set[str],
+        activation: str,
+        theta_topk: int,
+        q_topk: int,
+        dtype: torch.dtype,
+        kernel: str,
+        weight: str = "nvfp4_ccdl",
+    ) -> None:
+        if activation == "nvfp4_ccdl":
+            if not 1 <= theta_topk <= E2M1(dtype).n:
+                raise ValueError(f"theta_topk {theta_topk} out of range")
+            if not 1 <= q_topk <= UE4M3ExcludeZero(dtype).n:
+                raise ValueError(f"q_topk {q_topk} out of range")
+        elif activation != "ste":
+            raise ValueError(f"unknown activation variant {activation!r}")
+        if weight not in ("ste", "nvfp4_ccdl"):
+            raise ValueError(f"unknown weight variant {weight!r}")
+
+        for name, module in list(self.named_modules()):
+            leaf = name.rsplit(".", 1)[-1]
+            if not isinstance(module, nn.Linear) or leaf not in targets:
+                continue
+            qlinear = QLinear.from_linear(module)
+            if activation == "ste":
+                qlinear.set_activation_quant(SteQuant("nvfp4"))
+            else:
+                qlinear.set_activation_quant(
+                    Nvfp4CascadedCdlQuantForActivation(
+                        (1, qlinear.in_features),
+                        theta_topk,
+                        q_topk,
+                        dtype,
+                        kernel,
+                    )
+                )
+            if weight == "ste":
+                qlinear.set_weight_quant(SteQuant("nvfp4"))
+            else:
+                qlinear.set_weight_quant(
+                    Nvfp4CascadedCdlQuantForWeight(
+                        qlinear.weight, dtype=dtype, kernel=kernel
+                    )
+                )
+            qlinear.set_backend("native")
+
+            parent = (
+                self if "." not in name else self.get_submodule(name.rsplit(".", 1)[0])
+            )
+            setattr(parent, leaf, qlinear)
+
+
+def untie_and_freeze(model: LlamaForCausalLM, freeze_all: bool = True) -> None:
+    """Untie the output head and freeze the base model. With freeze_all
+    (LoRA mode) everything freezes except the head; otherwise only the
+    input embedding freezes and the full base trains."""
+    embed = model.get_input_embeddings()
+    head = model.lm_head
+    if head.weight is embed.weight:
+        head.weight = nn.Parameter(embed.weight.detach().clone())
+        model.config.tie_word_embeddings = False
+    if not freeze_all:
+        embed.weight.requires_grad_(False)
+        return
+    for p in model.parameters():
+        p.requires_grad_(False)
+    head.weight.requires_grad_(True)
+
+
+def init_activation_q(
+    controller: ModelController, calib_blocks: torch.Tensor, device: torch.device
+) -> None:
+    """Initialize the activation CDL q from calibration blocks; a no-op for
+    the STE variant."""
+    controller.q_linear_switch_backend("native")
+    controller.init_act_q_pass(
+        calib_blocks[i].unsqueeze(0).to(device) for i in range(calib_blocks.shape[0])
+    )
+    controller.q_linear_switch_backend("nvfp4")
+
+    for key, value in controller.quant_stats().items():
+        logger.info(f"{key} = {value}")
+
+
+def log_trainable_census(controller: ModelController, model: nn.Module) -> None:
+    n_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    logger.info(f"trainable {n_trainable / 1e6:.3f}M params")
+    logger.info(f"quantized weight elements {controller.get_weight_quant_counts():,}")
+    logger.info(
+        f"quantized activation elements {controller.get_activation_quant_counts():,}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# data
+# ---------------------------------------------------------------------------
+
+
+def build_corpus(
+    cfg: DataConfig, tokenizer
+) -> tuple[TensorDataset, TensorDataset, torch.Tensor]:
+    """Tokenize the sampled pool, pack into fixed-length blocks, split
+    train/test; calib blocks overlap with the head of train.
+
+    Tokens accumulate in array('q') at 8 B/token; a list[int] would hold
+    ~36 B/token and swap-thrash the box at 100k docs."""
+    pool = get_dataset(cfg.ratios, cfg.num_docs, cfg.seed)
+    eos = tokenizer.eos_token_id
+    texts = pool["text"]
+    n_docs = len(texts)
+    ids = array("q")
+    batch = 1024
+    for start in tqdm.tqdm(range(0, n_docs, batch), desc="tokenize"):
+        for seq in tokenizer(texts[start : start + batch], add_special_tokens=False)[
+            "input_ids"
+        ]:
+            ids.extend(seq)
+            ids.append(eos)
+        if (start // batch) % 20 == 0:
+            done = min(start + batch, n_docs)
+            logger.info(f"tokenized {done:,}/{n_docs:,} docs ({len(ids):,} tokens)")
+    del texts, pool
+
+    n_blocks = len(ids) // cfg.seq_len
+    if n_blocks <= cfg.num_test_blocks:
+        raise ValueError(
+            f"corpus produced only {n_blocks} blocks of seq_len={cfg.seq_len}; "
+            f"need more than num_test_blocks={cfg.num_test_blocks}"
+        )
+    flat = np.asarray(ids)  # zero-copy view of the array buffer
+    blocks = torch.from_numpy(flat[: n_blocks * cfg.seq_len]).view(n_blocks, -1)
+    test_blocks = blocks[-cfg.num_test_blocks :]
+    train_blocks = blocks[: -cfg.num_test_blocks]
+    calib_blocks = train_blocks[: cfg.num_calib_blocks]
+    logger.info(
+        f"{len(ids):,} tokens -> {n_blocks} blocks of {cfg.seq_len} "
+        f"(train {len(train_blocks)}, test {len(test_blocks)}, calib {len(calib_blocks)})"
+    )
+    return TensorDataset(train_blocks), TensorDataset(test_blocks), calib_blocks
+
+
+# ---------------------------------------------------------------------------
+# optimizers
+# ---------------------------------------------------------------------------
+
+
+def build_optimizers(
+    controller: ModelController, model: nn.Module, cfg: TrainingConfig
+) -> tuple[
+    dict[str, torch.optim.Optimizer],
+    dict[str, torch.optim.lr_scheduler.LambdaLR],
+]:
+    """Quantizer scales (q/alpha/kappa) take SGD with momentum at their
+    per-bucket scaled lrs; all remaining parameters stay on AdamW. Both get
+    the same linear warmup, stepped once per training step."""
+    cdl_groups, cdl_params = controller.get_param_groups(
+        cfg.quant_learning_rate, cfg.train_alpha, cfg.train_kappa
+    )
+    cdl_param_ids = {id(p) for p in cdl_params}
+    decay, no_decay = [], []
+    for _, p in model.named_parameters():
+        if not p.requires_grad or id(p) in cdl_param_ids:
+            continue
+        (no_decay if p.ndim <= 1 else decay).append(p)
+
+    sgd_optimizer = None
+    if cdl_groups: # double-STE variants have no CDL params at all
+        sgd_optimizer = torch.optim.SGD(cdl_groups, momentum=0.9)
+    adamw_groups = [
+        {
+            "params": decay,
+            "lr": cfg.learning_rate,
+            "weight_decay": cfg.weight_decay,
+        },
+        {"params": no_decay, "lr": cfg.learning_rate, "weight_decay": 0.0},
+    ]
+    adamw_optimizer = torch.optim.AdamW(
+        [g for g in adamw_groups if g["params"]], betas=tuple(cfg.betas)
+    )
+
+    def warmup(step: int) -> float:
+        return min(1.0, (step + 1) / cfg.warmup_steps)
+
+    optimizers: dict[str, torch.optim.Optimizer] = {}
+    if sgd_optimizer is not None:
+        optimizers["sgd"] = sgd_optimizer
+    optimizers["adamw"] = adamw_optimizer
+    lr_schedulers = {
+        name: torch.optim.lr_scheduler.LambdaLR(opt, warmup)
+        for name, opt in optimizers.items()
+    }
+    return optimizers, lr_schedulers
+
+
 def current_lr(optimizer: torch.optim.Optimizer) -> float:
     return max(group["lr"] for group in optimizer.param_groups)
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser()
-    group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument("--config", type=Path)
-    group.add_argument("--resume", type=Path)
-    parser.add_argument("--workers", type=int, default=2)
-    parser.add_argument("--device", default="auto")
-    parser.add_argument("--compile", action="store_true")
-    parser.add_argument("--output-dir", type=Path)
-    parser.add_argument("--run-name", type=str)
-    parser.add_argument("--seed", type=int, default=42)
-    return parser.parse_args()
+# ---------------------------------------------------------------------------
+# evaluation
+# ---------------------------------------------------------------------------
 
 
 @torch.no_grad()
@@ -406,6 +516,40 @@ def evaluate(
     return math.exp(total_loss / total_tokens)
 
 
+def run_eval(
+    model: nn.Module,
+    loader: DataLoader,
+    tokenizer,
+    device: torch.device,
+    cfg: Config,
+    writer: SummaryWriter,
+    step: int,
+    tag: str,
+) -> None:
+    """Test ppl + HellaSwag, logged to console and tensorboard."""
+    ppl = evaluate(model, loader, device, cfg.train.ce_chunks)
+    acc, acc_norm = hellaswag_accuracy(
+        model,
+        tokenizer,
+        device,
+        cfg.logging.hellaswag_limit,
+        cfg.logging.hellaswag_batch_size,
+    )
+    logger.info(
+        f"{tag}: test ppl {ppl:.2f} | "
+        f"hellaswag acc {acc * 100:.1f}% / acc_norm {acc_norm * 100:.1f}%"
+    )
+    writer.add_scalar("eval/ppl", ppl, step)
+    writer.add_scalar("eval/hellaswag_acc", acc, step)
+    writer.add_scalar("eval/hellaswag_acc_norm", acc_norm, step)
+    writer.flush()
+
+
+# ---------------------------------------------------------------------------
+# training
+# ---------------------------------------------------------------------------
+
+
 def training_pipeline() -> None:
     logging.basicConfig(
         level=logging.INFO,
@@ -445,6 +589,7 @@ def training_pipeline() -> None:
         cfg.model.q_topk,
         MODEL_DTYPE,
         cfg.model.kernel,
+        weight=cfg.model.weight,
     )
     if cfg.model.use_lora:
         controller.replace_linear_with_lora(
@@ -461,51 +606,16 @@ def training_pipeline() -> None:
         )
         model.enable_input_require_grads()
 
-    controller.q_linear_switch_backend("native")
-    controller.init_act_q_pass(
-        calib_blocks[i].unsqueeze(0).to(device) for i in range(calib_blocks.shape[0])
-    )  # initializes the activation CDL q; no-op for the STE variant
-    controller.q_linear_switch_backend("nvfp4")
-
-    for key, value in controller.quant_stats().items():
-        logger.info(f"{key} = {value}")
-
-    cdl_groups, cdl_params = controller.get_param_groups(
-        cfg.train.learning_rate, cfg.train.train_alpha, cfg.train.train_kappa
-    )
-    cdl_param_ids = {id(p) for p in cdl_params}
-    decay, no_decay = [], []
-    for _, p in model.named_parameters():
-        if not p.requires_grad or id(p) in cdl_param_ids:
-            continue
-        (no_decay if p.ndim <= 1 else decay).append(p)
-    groups = cdl_groups + [
-        {
-            "params": decay,
-            "lr": cfg.train.learning_rate,
-            "weight_decay": cfg.train.weight_decay,
-        },
-        {"params": no_decay, "lr": cfg.train.learning_rate, "weight_decay": 0.0},
-    ]
-    groups = [g for g in groups if g["params"]]
-    optimizer = torch.optim.AdamW(groups, betas=tuple(cfg.train.betas))
-    lr_scheduler = torch.optim.lr_scheduler.LambdaLR(
-        optimizer, lambda step: min(1.0, (step + 1) / cfg.train.warmup_steps)
-    )
-
-    n_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    logger.info(f"trainable {n_trainable / 1e6:.3f}M params")
-    logger.info(f"quantized weight elements {controller.get_weight_quant_counts():,}")
-    logger.info(
-        f"quantized activation elements {controller.get_activation_quant_counts():,}"
-    )
+    init_activation_q(controller, calib_blocks, device)
+    optimizers, lr_schedulers = build_optimizers(controller, model, cfg.train)
+    log_trainable_census(controller, model)
 
     start_step = 0
     if args.resume:
         # epoch is derived from global_step below; the stored epoch field has
         # epoch-boundary semantics (+1 on load) that mid-epoch saves break.
         _, start_step = load_checkpoint(
-            args.resume, controller, optimizer, lr_scheduler, device
+            args.resume, controller, optimizers, lr_schedulers, device
         )
 
     writer = SummaryWriter(log_dir=str(output_dir / "tensorboard"))
@@ -518,7 +628,15 @@ def training_pipeline() -> None:
             controller.model, dynamic=False, mode="reduce-overhead"
         )
 
-    trainable = [p for p in model.parameters() if p.requires_grad]
+    quant_trainable = (
+        [p for group in optimizers["sgd"].param_groups for p in group["params"]]
+        if "sgd" in optimizers
+        else []
+    )
+    cdl_param_ids = {id(p) for p in quant_trainable}
+    base_trainable = [
+        p for p in model.parameters() if p.requires_grad and id(p) not in cdl_param_ids
+    ]
     global_step = start_step
     steps_per_epoch = len(train_loader)
     start_epoch = min(global_step // steps_per_epoch, cfg.train.epochs - 1)
@@ -542,19 +660,36 @@ def training_pipeline() -> None:
             input_ids = input_ids.to(device)
             loss = lm_loss(run_model, input_ids, cfg.train.ce_chunks)
 
-            optimizer.zero_grad(set_to_none=True)
+            for opt in optimizers.values():
+                opt.zero_grad(set_to_none=True)
             loss.backward()
-            gnorm = torch.nn.utils.clip_grad_norm_(trainable, cfg.train.grad_clip)
-            optimizer.step()
+            gnorm = torch.nn.utils.clip_grad_norm_(
+                base_trainable, cfg.train.grad_clip
+            )
+            quant_gnorm = (
+                torch.nn.utils.clip_grad_norm_(
+                    quant_trainable, cfg.train.grad_clip
+                )
+                if quant_trainable
+                else None
+            )
+            for opt in optimizers.values():
+                opt.step()
             global_step += 1
+            for sched in lr_schedulers.values():
+                sched.step()
 
             if (
                 cfg.logging.log_every_steps > 0
                 and global_step % cfg.logging.log_every_steps == 0
             ):
                 writer.add_scalar("train/loss", loss.item(), global_step)
-                writer.add_scalar("train/lr", current_lr(optimizer), global_step)
+                writer.add_scalar("train/lr", current_lr(optimizers["adamw"]), global_step)
                 writer.add_scalar("train/grad_norm", gnorm.item(), global_step)
+                if quant_gnorm is not None:
+                    writer.add_scalar(
+                        "train/quant_grad_norm", quant_gnorm.item(), global_step
+                    )
                 for key, value in controller.quant_stats().items():
                     writer.add_scalar(f"quant/{key}", value, global_step)
                 if device.type == "cuda":
@@ -572,8 +707,8 @@ def training_pipeline() -> None:
                 save_checkpoint(
                     output_dir / "last.ckpt",
                     controller,
-                    optimizer,
-                    lr_scheduler,
+                    optimizers,
+                    lr_schedulers,
                     epoch,
                     global_step,
                 )
@@ -583,33 +718,26 @@ def training_pipeline() -> None:
                 cfg.logging.eval_every_iters > 0
                 and global_step % cfg.logging.eval_every_iters == 0
             ):
-                ppl = evaluate(run_model, test_loader, device, cfg.train.ce_chunks)
-                acc, acc_norm = hellaswag_accuracy(
+                run_eval(
                     run_model,
+                    test_loader,
                     tokenizer,
                     device,
-                    cfg.logging.hellaswag_limit,
-                    cfg.logging.hellaswag_batch_size,
+                    cfg,
+                    writer,
+                    global_step,
+                    tag=f"step {global_step}",
                 )
-                logger.info(
-                    f"step {global_step}: test ppl {ppl:.2f} | "
-                    f"hellaswag acc {acc * 100:.1f}% / acc_norm {acc_norm * 100:.1f}%"
-                )
-                writer.add_scalar("eval/ppl", ppl, global_step)
-                writer.add_scalar("eval/hellaswag_acc", acc, global_step)
-                writer.add_scalar("eval/hellaswag_acc_norm", acc_norm, global_step)
-                writer.flush()
 
         resume_skip = 0
-        lr_scheduler.step()
         logger.info(f"epoch {epoch} completed in {time.perf_counter() - start:.1f}s")
 
     if global_step != last_saved:
         save_checkpoint(
             output_dir / "last.ckpt",
             controller,
-            optimizer,
-            lr_scheduler,
+            optimizers,
+            lr_schedulers,
             min(epoch, cfg.train.epochs - 1),
             global_step,
         )
@@ -618,22 +746,16 @@ def training_pipeline() -> None:
         cfg.logging.eval_every_iters <= 0
         or global_step % cfg.logging.eval_every_iters != 0
     ):
-        ppl = evaluate(run_model, test_loader, device, cfg.train.ce_chunks)
-        acc, acc_norm = hellaswag_accuracy(
+        run_eval(
             run_model,
+            test_loader,
             tokenizer,
             device,
-            cfg.logging.hellaswag_limit,
-            cfg.logging.hellaswag_batch_size,
+            cfg,
+            writer,
+            global_step,
+            tag=f"final (step {global_step})",
         )
-        logger.info(
-            f"final (step {global_step}): test ppl {ppl:.2f} | "
-            f"hellaswag acc {acc * 100:.1f}% / acc_norm {acc_norm * 100:.1f}%"
-        )
-        writer.add_scalar("eval/ppl", ppl, global_step)
-        writer.add_scalar("eval/hellaswag_acc", acc, global_step)
-        writer.add_scalar("eval/hellaswag_acc_norm", acc_norm, global_step)
-        writer.flush()
 
     logger.info("training finished")
     writer.close()
