@@ -29,7 +29,8 @@ class MergedLoRALayer(nn.Module):
         )
 
     def forward(self, weight: torch.Tensor) -> torch.Tensor:
-        merged = weight.float() + self.scaling * (self.b.float() @ self.a.float())
+        update = self.scaling * (self.b @ self.a)
+        merged = weight.float() + update.float()
         return merged.to(weight.dtype)
 
 

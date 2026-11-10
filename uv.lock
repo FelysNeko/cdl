@@ -313,6 +313,7 @@ gpu = [
     { name = "flashinfer-jit-cache" },
     { name = "flashinfer-jit-cache-sm120f" },
     { name = "flashinfer-python" },
+    { name = "liger-kernel" },
     { name = "torch", version = "2.12.1+cu130", source = { registry = "https://download.pytorch.org/whl/cu130" } },
     { name = "torchvision", version = "0.27.1+cu130", source = { registry = "https://download.pytorch.org/whl/cu130" } },
 ]
@@ -332,6 +333,7 @@ requires-dist = [
     { name = "flashinfer-jit-cache", marker = "extra == 'gpu'", specifier = "==0.7.1+cu130", index = "https://flashinfer.ai/whl/cu130" },
     { name = "flashinfer-jit-cache-sm120f", marker = "extra == 'gpu'", specifier = "==0.7.1+cu130", index = "https://flashinfer.ai/whl/cu130" },
     { name = "flashinfer-python", marker = "extra == 'gpu'", specifier = "==0.7.1", index = "https://flashinfer.ai/whl" },
+    { name = "liger-kernel", marker = "extra == 'gpu'", specifier = ">=0.8.5" },
     { name = "omegaconf", specifier = ">=2.3.1" },
     { name = "tensorboard", specifier = ">=2.21.0" },
     { name = "torch", marker = "extra == 'cpu'", specifier = "==2.12.1", index = "https://download.pytorch.org/whl/cpu", conflict = { package = "cdl", extra = "cpu" } },
@@ -1495,6 +1497,19 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/a9/c4/1407df7512a5b36cc79840e01710dc575733c461b13ab866cae77eaf87f3/kiwisolver-1.5.1-graalpy312-graalpy250_312_native-macosx_11_0_arm64.whl", hash = "sha256:482676e5bd48d70ac99d9fc78863469845421e01184fa83f1f9366dc49f7e974", size = 134002, upload-time = "2026-08-28T10:28:08.881Z" },
     { url = "https://files.pythonhosted.org/packages/16/45/c37a21ad5c0ab581a93c55ad544721aaa1f0ae94edb29c6a678a23d013e6/kiwisolver-1.5.1-graalpy312-graalpy250_312_native-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:072bdb15a3c19a5b5dbc8f8fb1f4e1884bf4f3507eeb4cc6334401274d37a5c0", size = 194292, upload-time = "2026-08-28T10:28:11.06Z" },
     { url = "https://files.pythonhosted.org/packages/a6/c1/69f00d627949580e43d57af0aa465df46868d7c29801c137a55374101294/kiwisolver-1.5.1-graalpy312-graalpy250_312_native-win_amd64.whl", hash = "sha256:a5a00665d1a0e26763a7338d7e911d4598fbc1d50dd0d6b7919b7dc6c5d6569f", size = 73362, upload-time = "2026-08-28T10:28:12.449Z" },
+]
+
+[[package]]
+name = "liger-kernel"
+version = "0.8.5"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "torch", version = "2.12.1+cu130", source = { registry = "https://download.pytorch.org/whl/cu130" } },
+    { name = "triton" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/3c/4e/98697a67e4e45f9faad58fe478e5f877137bf7a6ad1068179ff77e9efed6/liger_kernel-0.8.5.tar.gz", hash = "sha256:4e8f8f611a8ad735c37c989410d09820bb08881f131851a3967c34baa7889d66", size = 6832492, upload-time = "2026-10-21T00:35:33.161Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/8f/73/9667e4a05457e99ec921380df8d279fbcb8f8e8bd76b033ee0c82bb1d3a0/liger_kernel-0.8.5-py3-none-any.whl", hash = "sha256:60789cd576af073ab9b192b570d2597fd0cdad489cd62fb44fb16256d43754c9", size = 910117, upload-time = "2026-10-21T00:35:30.998Z" },
 ]
 
 [[package]]

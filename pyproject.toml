@@ -20,6 +20,7 @@ gpu = [
     "flashinfer-cubin==0.7.1",
     "flashinfer-jit-cache==0.7.1+cu130",
     "flashinfer-jit-cache-sm120f==0.7.1+cu130",
+    "liger-kernel>=0.8.5",
 ]
 cpu = [
     "torch==2.12.1",
