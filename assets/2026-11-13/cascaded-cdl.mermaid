@@ -1,0 +1,19 @@
+flowchart TD
+    theta["$$ \theta_i=[\theta_{k_i}]_{k=1}^{16} $$"]
+    kappa_alpha["$$ \kappa_\alpha $$"]
+    s["$$ s_{global} $$"]
+    q["$$ q_i $$"]
+    kappa_beta["$$ \kappa_\beta $$"]
+    theta_hat["$$ \hat{\theta_i} = Q_p(\theta_i, \kappa_\alpha, \hat{q_i} \times s_{global}) $$"]
+    q_hat["$$ \hat{q_i} = Q_p(q_i, \kappa_\beta, 1) $$"]
+    nvfp4["$$ \mathrm{NVFP4}(\theta_i) = (\hat\theta_i, \hat{q_i}, s_{global}) $$"]
+
+    theta --> theta_hat
+    kappa_alpha --> theta_hat
+    q --> q_hat
+    kappa_beta --> q_hat
+    q_hat --> nvfp4
+    s --> theta_hat
+    q_hat --> theta_hat
+    theta_hat --> nvfp4
+    s --> nvfp4

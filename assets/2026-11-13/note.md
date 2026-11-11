@@ -1,5 +1,7 @@
 # The Big Picture
 
+[Coded Deep Learning: Framework and Algorithm](https://arxiv.org/abs/2501.09849) - C2
+
 ## Family of Formats
 
 `✓` supported · `△` emulated by another datapath · `✗` not supported
@@ -43,9 +45,34 @@ In other words, static quantization block scalers only work perfectly on weights
 
 ## Case Studies
 
-### DeepSeek v4.1
+Both papers apply quantization during post-training rather than pre-training, but with different emphases: DeepSeek uses QAT on the KV cache for storage compression without touching weights, while Kimi uses QAT on expert weights to reduce serving cost and keeps the cache untouched.
+
+### DeepSeek-V4.1-Flash
+
+The quantization focus is on KV caches.
+
+| Tensor           | Format                                            | Notes                                                                     |
+| ---------------- | ------------------------------------------------- | ------------------------------------------------------------------------- |
+| Main (global) KV | FP4 (E2M1 + one E4M3 scale per 16 channels)       | NVFP4 layout without the second-level global scale; quantized after RoPE. |
+| SWA KV           | FP8                                               | Kept at higher precision due to quantization sensitivity.                 |
+| Indexer Q/K      | FP4 (inherited from DeepSeek-V4)                  | Via QAT.                                                                  |
+| Weights          | BF16                                              | Backbone weights not quantized.                                           |
+| Activations      | BF16 (FP8 for Engram embeddings & KV projections) | KV quantization targets storage, not GEMM.                                |
+
+Some other noteworthy details:
+
+- The global scale is deliberately omitted: E2M1×E4M3 spans up to $`448 \times 6 = 2688`$, while post-RoPE KV values stay below $`\sqrt{512} \approx 22.6`$, so a tensor scale is provably unnecessary.
+- KV caches are dequantized before CSA2, so no native FP4 attention kernel is required.
 
 ### Kimi K3
+
+The quantization focus is on reducing model size and speeding up GEMM.
+
+| Tensor                    | Format | Notes                                                                   |
+| ------------------------- | ------ | ----------------------------------------------------------------------- |
+| Routed expert weights     | MXFP4  | Expert weights dominate parameter memory.                               |
+| Expert activations        | MXFP8  | Unlocks the full GEMM speedup for expert layers.                        |
+| Other weights/activations | BF16   | Attention projections, latent MoE projections, shared experts, routers. |
 
 ## Preliminary Results
 
@@ -67,3 +94,27 @@ HellaSwag accuracy on SmolLM2-135M. Activations are dynamically quantized and ap
 | Cascaded CDL with LoRA              | **19.37** | **33.33** |           **39.87** | 11.520M          |
 
 Full HellaSwag, 10,042 docs. Test perplexity is on the same 64-block test split.
+
+## Design Choices
+
+### Cascaded CDL
+
+Two main challenges: too many trainable parameters and an inability to handle activations.
+
+![](cascaded-cdl.png)
+
+### Extended CDL
+
+A simpler design in which only the tensor scale is learnable.
+
+![](extended-cdl.png)
+
+To compute the block scale dynamically:
+
+```math
+q_i = \frac{\max \lvert \theta_i \rvert \times 448}{\max \lvert \theta \rvert} = \frac{\max \lvert \theta_i \rvert}{6} \div \frac{\max \lvert \theta \rvert}{6 \times 448}
+```
+
+where $`\max_{q \in \mathcal{F}_{\mathrm{E2M1}}} \lvert q \rvert = 6`$ and $`\max_{q \in \mathcal{F}_{\mathrm{E4M3}}} \lvert q \rvert = 448`$.
+
+Note: The $`round`$ operation can be replaced by stochastic rounding $`SR`$ or probabilistic quantization $`Q_p`$. No gradients pass through this part.
