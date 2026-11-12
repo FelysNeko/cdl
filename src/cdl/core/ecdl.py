@@ -32,7 +32,7 @@ def cdl_topk_forward(
 
 def compute_block_scale(theta: torch.Tensor, q_max: torch.Tensor) -> torch.Tensor:
     global_abs_max = theta.abs().amax().clamp_min(torch.finfo(theta.dtype).tiny)
-    block_abs_max = theta.amax(dim=-1, keepdim=True)
+    block_abs_max = theta.abs().amax(dim=-1, keepdim=True)
     q = block_abs_max * q_max / global_abs_max
     return q
 
@@ -54,7 +54,7 @@ def extended_cdl_topk_forward(
 ]:
     q = compute_block_scale(theta, q_format.level.amax())
     q_indices = q_format.ordinal(q)
-    q_hat = q_format.level[q_indices]
+    q_hat = q_format.level[q_indices.long()]
 
     theta_indices, grad_proxy, entropies = cdl_topk_forward(
         theta,
@@ -78,7 +78,7 @@ def extended_nearest_round(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     q = compute_block_scale(theta, q_format.level.amax())
     q_indices = q_format.ordinal(q)
-    q_hat = q_format.level[q_indices]
+    q_hat = q_format.level[q_indices.long()]
     scale = q_hat * alpha
     theta_indices = theta_format.ordinal(theta / scale)
     return theta_indices, q_indices

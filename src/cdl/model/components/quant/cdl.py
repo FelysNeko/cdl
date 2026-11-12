@@ -123,14 +123,14 @@ class CdlQuantForActivation(CdlQuant):
 
 
 class CdlQuantMixin(BatchNormBatchStatsMixin):
-    def get_weight_quant_counts(self) -> int:
+    def cdl_get_weight_quant_counts(self) -> int:
         return sum(
             m.num_quantized_params
             for m in self.modules()
             if isinstance(m, CdlQuantForWeight)
         )
 
-    def get_activation_quant_counts(self) -> int:
+    def cdl_get_activation_quant_counts(self) -> int:
         return sum(
             m.num_quantized_params
             for m in self.modules()
@@ -138,7 +138,7 @@ class CdlQuantMixin(BatchNormBatchStatsMixin):
         )
 
     @torch.no_grad()
-    def quant_stats(self) -> dict[str, float]:
+    def cdl_quant_stats(self) -> dict[str, float]:
         out: dict[str, float] = {}
         for name, m in self.named_modules():
             if not isinstance(m, CdlQuant):
@@ -149,7 +149,7 @@ class CdlQuantMixin(BatchNormBatchStatsMixin):
         return out
 
     @torch.no_grad()
-    def get_param_groups(
+    def cdl_get_param_groups(
         self,
         learning_rate: float,
         train_kappa: bool,
@@ -180,7 +180,7 @@ class CdlQuantMixin(BatchNormBatchStatsMixin):
         return groups, customized_param_set
 
     @torch.no_grad()
-    def init_act_q_pass(self, samples: Iterable[torch.Tensor]) -> None:
+    def cdl_init_act_q_pass(self, samples: Iterable[torch.Tensor]) -> None:
         modules = [m for m in self.modules() if isinstance(m, CdlQuantForActivation)]
         if not modules:
             return

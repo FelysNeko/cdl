@@ -74,6 +74,7 @@ class ExtendedCdlQuant(Quant):
         theta_topk: int,
         q_format: Format,
         block_size: int,
+        kappa: float,
     ):
         super().__init__()
         self.input_shape = input_shape
@@ -84,7 +85,7 @@ class ExtendedCdlQuant(Quant):
         self.block_size = block_size
         self.num_quantized_params = math.prod(input_shape)
 
-        self.log_kappa = nn.Parameter(torch.full((), math.log(2)))
+        self.log_kappa = nn.Parameter(torch.full((), math.log(kappa)))
         self.log_alpha = nn.Parameter(torch.full((), math.log(1)))
 
         self.initialized = False
@@ -173,6 +174,7 @@ class ExtendedCdlQuantForActivation(ExtendedCdlQuant):
         theta_topk: int,
         q_format: Format,
         block_size: int,
+        kappa: float,
     ):
         super().__init__(
             input_shape,
@@ -180,6 +182,7 @@ class ExtendedCdlQuantForActivation(ExtendedCdlQuant):
             theta_topk,
             q_format,
             block_size,
+            kappa=kappa,
         )
 
     def get_alpha_lr(self, eta: float) -> float:
@@ -195,6 +198,7 @@ class ExtendedCdlQuantForWeight(ExtendedCdlQuant):
         theta_format: Format,
         q_format: Format,
         block_size: int,
+        kappa: float,
     ):
         super().__init__(
             tuple(weight.shape),
@@ -202,6 +206,7 @@ class ExtendedCdlQuantForWeight(ExtendedCdlQuant):
             theta_format.n,
             q_format,
             block_size,
+            kappa=kappa,
         )
         self.init_alpha_from_amax(weight.detach().abs().amax())
 
@@ -212,14 +217,14 @@ class ExtendedCdlQuantForWeight(ExtendedCdlQuant):
 
 
 class ExtendedCdlQuantMixin(BatchNormBatchStatsMixin):
-    def get_weight_quant_counts(self) -> int:
+    def extended_cdl_get_weight_quant_counts(self) -> int:
         return sum(
             m.num_quantized_params
             for m in self.modules()
             if isinstance(m, ExtendedCdlQuantForWeight)
         )
 
-    def get_activation_quant_counts(self) -> int:
+    def extended_cdl_get_activation_quant_counts(self) -> int:
         return sum(
             m.num_quantized_params
             for m in self.modules()
@@ -227,7 +232,7 @@ class ExtendedCdlQuantMixin(BatchNormBatchStatsMixin):
         )
 
     @torch.no_grad()
-    def quant_stats(self) -> dict[str, float]:
+    def extended_cdl_quant_stats(self) -> dict[str, float]:
         out: dict[str, float] = {}
         for name, m in self.named_modules():
             if not isinstance(m, ExtendedCdlQuant):
@@ -238,7 +243,7 @@ class ExtendedCdlQuantMixin(BatchNormBatchStatsMixin):
         return out
 
     @torch.no_grad()
-    def get_param_groups(
+    def extended_cdl_get_param_groups(
         self,
         learning_rate: float,
         train_alpha: bool,
@@ -273,7 +278,7 @@ class ExtendedCdlQuantMixin(BatchNormBatchStatsMixin):
         return groups, customized_param_set
 
     @torch.no_grad()
-    def init_act_q_pass(self, samples: Iterable[torch.Tensor]) -> None:
+    def extended_cdl_init_act_q_pass(self, samples: Iterable[torch.Tensor]) -> None:
         modules = [
             m for m in self.modules() if isinstance(m, ExtendedCdlQuantForActivation)
         ]
