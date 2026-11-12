@@ -30,10 +30,12 @@ def cdl_topk_forward(
     return chosen, proxy.to(theta.dtype), entropies
 
 
+@torch.no_grad()
 def compute_block_scale(theta: torch.Tensor, q_max: torch.Tensor) -> torch.Tensor:
-    global_abs_max = theta.abs().amax().clamp_min(torch.finfo(theta.dtype).tiny)
-    block_abs_max = theta.abs().amax(dim=-1, keepdim=True)
-    q = block_abs_max * q_max / global_abs_max
+    theta_f = theta.float()
+    global_abs_max = theta_f.abs().amax().clamp_min(torch.finfo(torch.float32).tiny)
+    block_abs_max = theta_f.abs().amax(dim=-1, keepdim=True)
+    q = block_abs_max * q_max.float() / global_abs_max
     return q
 
 

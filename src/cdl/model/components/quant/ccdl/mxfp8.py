@@ -3,7 +3,7 @@ from typing import Literal
 import torch
 
 from cdl.core.format.fp8 import E4M3, E8M0
-from cdl.core.kernel.mxfp8 import mxfp8_quant
+from cdl.core.kernel import mxfp8_ccdl_quant
 from cdl.model.components.quant.ccdl.ccdl import (
     CascadedCdlQuantForActivation,
     CascadedCdlQuantForWeight,
@@ -43,7 +43,7 @@ class Mxfp8CascadedCdlQuantForActivation(CascadedCdlQuantForActivation):
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         if self.kernel == "torch":
             return super().training_forward(theta)
-        return mxfp8_quant(
+        return mxfp8_ccdl_quant(
             theta,
             self.q,
             self.theta_kappa,
@@ -76,7 +76,7 @@ class Mxfp8CascadedCdlQuantForWeight(CascadedCdlQuantForWeight):
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         if self.kernel == "torch":
             return super().training_forward(theta)
-        return mxfp8_quant(
+        return mxfp8_ccdl_quant(
             theta,
             self.q,
             self.theta_kappa,

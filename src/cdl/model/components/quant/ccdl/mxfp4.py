@@ -4,7 +4,7 @@ import torch
 
 from cdl.core.format.fp4 import E2M1
 from cdl.core.format.fp8 import E8M0
-from cdl.core.kernel.mxfp4 import mxfp4_quant
+from cdl.core.kernel import mxfp4_ccdl_quant
 from cdl.model.components.quant.ccdl.ccdl import (
     CascadedCdlQuantForActivation,
     CascadedCdlQuantForWeight,
@@ -44,7 +44,7 @@ class Mxfp4CascadedCdlQuantForActivation(CascadedCdlQuantForActivation):
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         if self.kernel == "torch":
             return super().training_forward(theta)
-        return mxfp4_quant(
+        return mxfp4_ccdl_quant(
             theta,
             self.q,
             self.theta_kappa,
@@ -77,7 +77,7 @@ class Mxfp4CascadedCdlQuantForWeight(CascadedCdlQuantForWeight):
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         if self.kernel == "torch":
             return super().training_forward(theta)
-        return mxfp4_quant(
+        return mxfp4_ccdl_quant(
             theta,
             self.q,
             self.theta_kappa,
