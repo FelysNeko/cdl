@@ -1,16 +1,19 @@
 flowchart TD
     theta["$$ \theta_i = [\theta_{i_k}]_{k=1}^{16} $$"]
     kappa["$$ \kappa $$"]
-    s["$$ s_{global} $$"]
-    q_hat["$$ \hat{q_i} = round(\frac{\max \lvert \theta_i \rvert \times 448}{\max \lvert \theta \rvert}) $$"]
+    beta["$$ \beta $$"]
+    s["$$ s_{global} = \max \lvert \theta \rvert \times \beta$$"]
+    q_hat["$$ \hat{q_i} = \mathrm{round}(\frac{\max \lvert \theta_i \rvert \times 448}{\max \lvert \theta \rvert}) $$"]
     theta_hat["$$ \hat\theta_i = Q_p(\theta_i, \kappa, \hat{q_i} \times s_{global}) $$"]
     nvfp4["$$ \mathrm{NVFP4}(\theta_i) = (\hat\theta_i, \hat{q_i}, s_{global}) $$"]
 
     theta --> q_hat
     theta --> theta_hat
     kappa --> theta_hat
-    q_hat --> theta_hat
+    theta --> s
+    beta --> s
     s --> theta_hat
     s --> nvfp4
+    q_hat --> theta_hat
     q_hat --> nvfp4
     theta_hat --> nvfp4
