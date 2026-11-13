@@ -76,24 +76,46 @@ The quantization focus is on reducing model size and speeding up GEMM.
 
 ## Preliminary Results
 
-HellaSwag accuracy on SmolLM2-135M. Activations are dynamically quantized and approximated using a straight-through estimator (STE). Weights are quantized using STE or Cascaded CDL. The target modules are all linear layers except for the final output head, and their matrix multiplications are performed using NVFP4 kernels. The entire base model is frozen.
+All results are on SmolLM2-135M. Activations are dynamically quantized and approximated using a straight-through estimator (STE). Weights are quantized using STE, Cascaded CDL, or Extended CDL. The target modules are all linear layers except for the final output head, and their matrix multiplications are performed using NVFP4 kernels. The entire base model is frozen.
 
 - **Dataset**: 100k documents sampled from the final-stage pre-training corpus of SmolLM2
 - **LoRA**: $`r=16`$ and $`\alpha=32`$
 - **LR Scheduler**: constant with a 200/1500-step warmup
-- **Optimizers**: SGD ($`\eta=0.1`$) for the quantizers and AdamW ($`\eta=10^{-4}`$) for the rest
+- **Optimizers**: SGD ($`\eta=0.1`$, $`\mu=0.9`$) for the quantizers and AdamW ($`\eta=10^{-4}`$) for the rest
 - **Batch**: batch size of 16 with a sequence length of 1024
 - **CDL**: `amax` instead of `mean` for scaler initialization, and $`\kappa=64`$
 
-| Weight Quantization Variants        |  Test PPL |    HS Acc | HS Acc (normalized) | Trainable Params |
-| ----------------------------------- | --------: | --------: | ------------------: | ---------------- |
-| None (BF16 Base)                    |     15.76 |     34.77 |               41.86 | 0                |
-| None (NVFP4 direct conversion)      |     22.67 |     32.15 |               38.58 | 0                |
-| STE with LoRA                       |     19.67 |     33.25 |               39.73 | 4.884M           |
-| Cascaded CDL only scalers trainable |     21.12 |     32.73 |               39.59 | 6.636M           |
-| Cascaded CDL with LoRA              | **19.37** | **33.33** |           **39.87** | 11.520M          |
+Note: the variants with a `AdamW` tag train the quantizer parameters with a single AdamW LR of $`3\times10^{-4}`$ instead.
 
-Full HellaSwag, 10,042 docs. Test perplexity is on the same 64-block test split.
+### Zero-shot Commonsense Accuracy
+
+Accuracies are length-normalized for HellaSwag, ARC, and OBQA.
+
+| Weight Quantization Variant    | $`\uparrow`$ BoolQ | $`\uparrow`$ PIQA | $`\uparrow`$ SIQA | $`\uparrow`$ HS | $`\uparrow`$ WG | $`\uparrow`$ ARC-e | $`\uparrow`$ ARC-c | $`\uparrow`$ OBQA |
+| ------------------------------ | -----------------: | ----------------: | ----------------: | --------------: | --------------: | -----------------: | -----------------: | ----------------: |
+| **None (BF16 Base)**           |           **60.6** |          **68.3** |          **38.5** |        **41.9** |        **51.8** |           **59.3** |           **29.3** |          **32.0** |
+| STE with LoRA                  |               54.6 |              64.2 |              37.2 |            39.8 |            51.8 |               53.7 |               27.7 |              30.0 |
+| Cascaded CDL scalers only      |               51.4 |              62.8 |              36.6 |            39.8 |            49.8 |               54.1 |               26.8 |              31.2 |
+| Cascaded CDL + LoRA            |           **57.4** |              63.7 |              37.2 |        **40.2** |        **52.1** |               54.6 |               27.9 |              30.8 |
+| Cascaded CDL + LoRA, AdamW     |               56.3 |              64.0 |              37.3 |            40.0 |            49.7 |               54.1 |               27.6 |              30.4 |
+| Extended CDL scalers only      |               53.2 |              63.1 |              37.8 |            39.3 |            51.0 |               53.8 |               27.9 |              28.8 |
+| Extended CDL + LoRA            |               53.9 |          **65.2** |          **38.1** |            39.7 |            50.2 |               55.1 |               27.9 |              30.2 |
+| **Extended CDL + LoRA, AdamW** |               56.4 |              64.2 |              36.6 |            40.1 |            51.9 |           **55.3** |           **28.2** |          **31.8** |
+
+### Overall Performance
+
+We report WikiText-2/C4 perplexity, average zero-shot commonsense accuracy, and the number of trainable parameters.
+
+| Weight Quantization Variant    | $`\downarrow`$ Wiki2 | $`\downarrow`$ C4 | $`\uparrow`$ Commonsense | Parameters |
+| ------------------------------ | -------------------: | ----------------: | -----------------------: | ---------: |
+| **None (BF16 Base)**           |            **15.43** |         **21.62** |                **47.69** |          0 |
+| STE with LoRA                  |                19.57 |             26.21 |                    44.86 |     4.884M |
+| Cascaded CDL scalers only      |                20.80 |             28.12 |                    44.06 |     6.636M |
+| Cascaded CDL + LoRA            |                19.21 |             25.77 |                    45.49 |    11.520M |
+| Cascaded CDL + LoRA, AdamW     |                19.18 |         **25.75** |                    44.94 |    11.520M |
+| Extended CDL scalers only      |                21.33 |             29.03 |                    44.35 |        210 |
+| Extended CDL + LoRA            |                19.25 |             25.84 |                    45.03 |     4.885M |
+| **Extended CDL + LoRA, AdamW** |            **19.17** |             25.82 |                **45.58** |     4.885M |
 
 ## Design Choices
 
