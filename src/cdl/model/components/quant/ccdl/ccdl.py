@@ -75,6 +75,7 @@ class CascadedCdlQuant(Quant):
         q_format: Format,
         q_topk: int,
         block_size: int,
+        kappa: float,
     ):
         super().__init__()
         self.input_shape = input_shape
@@ -92,10 +93,13 @@ class CascadedCdlQuant(Quant):
 
         q_shape = input_shape[:-1] + (num_blocks, 1)
 
-        self.log_theta_kappa = nn.Parameter(torch.full((), math.log(2)))
-        self.log_q_kappa = nn.Parameter(torch.full((), math.log(2)))
+        self.log_theta_kappa = nn.Parameter(torch.full((), math.log(kappa)))
+        self.log_q_kappa = nn.Parameter(torch.full((), math.log(kappa)))
         self.log_q = nn.Parameter(torch.full(q_shape, math.log(1)))
         self.log_alpha = nn.Parameter(torch.full((), math.log(1)))
+        self.register_buffer(
+            "log_q_init", self.log_q.detach().clone(), persistent=False
+        )
 
         self.initialized = False
         self.bypassing = False
@@ -129,10 +133,15 @@ class CascadedCdlQuant(Quant):
         return eta / self.q.numel() ** 0.5
 
     @torch.no_grad()
-    def init_q_from_block_means(self, block_means: torch.Tensor) -> None:
-        q_tensor = 2 * block_means / 2 ** ((self.theta_format.bits - 1) / 2)
-        log_q_tensor = q_tensor.clamp_min(torch.finfo(torch.float32).tiny).log()
+    def copy_log_q(self, log_q_tensor: torch.Tensor) -> None:
         self.log_q.copy_(log_q_tensor)
+        self.log_q_init.copy_(log_q_tensor)
+
+    @torch.no_grad()
+    def init_q_from_block_amax(self, block_amax: torch.Tensor) -> None:
+        q_tensor = block_amax / self.theta_format.level[-1]
+        log_q_tensor = q_tensor.clamp_min(torch.finfo(torch.float32).tiny).log()
+        self.copy_log_q(log_q_tensor)
 
     def training_forward(
         self, theta: torch.Tensor
@@ -200,6 +209,7 @@ class CascadedCdlQuantForActivation(CascadedCdlQuant):
         q_format: Format,
         q_topk: int,
         block_size: int,
+        kappa: float,
     ):
         super().__init__(
             input_shape,
@@ -208,6 +218,7 @@ class CascadedCdlQuantForActivation(CascadedCdlQuant):
             q_format,
             q_topk,
             block_size,
+            kappa,
         )
 
     def get_q_lr(self, eta: float) -> float:
@@ -228,6 +239,7 @@ class CascadedCdlQuantForWeight(CascadedCdlQuant):
         theta_format: Format,
         q_format: Format,
         block_size: int,
+        kappa: float,
     ):
         out_dim, k_dim = weight.shape
         super().__init__(
@@ -237,6 +249,7 @@ class CascadedCdlQuantForWeight(CascadedCdlQuant):
             q_format,
             q_format.n,
             block_size,
+            kappa,
         )
         self.init_q_from_weight(weight)
         self.initialized = True
@@ -253,26 +266,19 @@ class CascadedCdlQuantForWeight(CascadedCdlQuant):
 
     @torch.no_grad()
     def init_q_from_weight(self, weight: torch.Tensor) -> None:
-        blocked, pad_size = group_tensor_into_blocks(weight, self.block_size)
-        block_sums = blocked.abs().sum(dim=-1, keepdim=True)
-
-        per_block_len = blocked.new_full((blocked.shape[1],), self.block_size)
-        if pad_size:
-            per_block_len[-1] -= pad_size
-        block_means = block_sums / per_block_len[None, :, None]
-
-        self.init_q_from_block_means(block_means)
+        blocked, _ = group_tensor_into_blocks(weight, self.block_size)
+        self.init_q_from_block_amax(blocked.abs().amax(dim=-1, keepdim=True))
 
 
 class CascadedCdlQuantMixin(BatchNormBatchStatsMixin):
-    def get_weight_quant_counts(self) -> int:
+    def cascaded_cdl_get_weight_quant_counts(self) -> int:
         return sum(
             m.theta_num_quantized_params
             for m in self.modules()
             if isinstance(m, CascadedCdlQuantForWeight)
         )
 
-    def get_activation_quant_counts(self) -> int:
+    def cascaded_cdl_get_activation_quant_counts(self) -> int:
         return sum(
             m.theta_num_quantized_params
             for m in self.modules()
@@ -280,7 +286,7 @@ class CascadedCdlQuantMixin(BatchNormBatchStatsMixin):
         )
 
     @torch.no_grad()
-    def quant_stats(self) -> dict[str, float]:
+    def cascaded_cdl_quant_stats(self) -> dict[str, float]:
         out: dict[str, float] = {}
         for name, m in self.named_modules():
             if not isinstance(m, CascadedCdlQuant):
@@ -288,12 +294,14 @@ class CascadedCdlQuantMixin(BatchNormBatchStatsMixin):
             name = name.removeprefix("_orig_mod.")
             out[f"{name}.theta_kappa"] = m.theta_kappa.item()
             out[f"{name}.q"] = m.q.detach().float().mean().item()
+            rel = (m.log_q - m.log_q_init).float().abs().mean()
+            out[f"{name}.q_rel"] = rel.item()
             out[f"{name}.q_kappa"] = m.q_kappa.item()
             out[f"{name}.alpha"] = m.alpha.item()
         return out
 
     @torch.no_grad()
-    def get_param_groups(
+    def cascaded_cdl_get_param_groups(
         self,
         learning_rate: float,
         train_alpha: bool,
@@ -333,14 +341,14 @@ class CascadedCdlQuantMixin(BatchNormBatchStatsMixin):
         return groups, customized_param_set
 
     @torch.no_grad()
-    def init_act_q_pass(self, samples: Iterable[torch.Tensor]) -> None:
+    def cascaded_cdl_init_act_q_pass(self, samples: Iterable[torch.Tensor]) -> None:
         modules = [
             m for m in self.modules() if isinstance(m, CascadedCdlQuantForActivation)
         ]
         if not modules:
             return
 
-        stats: dict[CascadedCdlQuantForActivation, tuple[torch.Tensor, int, int]] = {}
+        stats: dict[CascadedCdlQuantForActivation, torch.Tensor] = {}
 
         def hook(m: nn.Module, args: tuple[torch.Tensor, ...]) -> None:
             x = args[0]
@@ -348,15 +356,11 @@ class CascadedCdlQuantMixin(BatchNormBatchStatsMixin):
             reduce_dims = tuple(
                 i for i in range(blocked.ndim - 2) if m.input_shape[i] == 1
             ) + (blocked.ndim - 1,)
-            block_sums = blocked.abs().sum(dim=reduce_dims)
-            positions = x.numel() // math.prod(m.input_shape)
+            block_amax = blocked.abs().amax(dim=reduce_dims)
             previous = stats.get(m)
-            if previous is None:
-                stats[m] = (block_sums, positions, x.shape[-1])
-                return
-            sums, positions_total, width = previous
-            assert width == x.shape[-1]
-            stats[m] = (sums + block_sums, positions_total + positions, width)
+            stats[m] = (
+                block_amax if previous is None else torch.maximum(previous, block_amax)
+            )
 
         handles = [m.register_forward_pre_hook(hook) for m in modules]
 
@@ -377,13 +381,6 @@ class CascadedCdlQuantMixin(BatchNormBatchStatsMixin):
 
         for m in modules:
             assert m in stats
-            sums, positions, width = stats[m]
-            counts = sums.new_full((sums.numel(),), m.block_size)
-            pad_size = -width % m.block_size
-            if pad_size:
-                counts[-1] -= pad_size
-            block_means = (sums.flatten() / (positions * counts)).reshape(
-                m.input_shape[:-1] + (-1, 1)
-            )
-            m.init_q_from_block_means(block_means)
+            block_amax = stats[m].flatten().reshape(m.input_shape[:-1] + (-1, 1))
+            m.init_q_from_block_amax(block_amax)
             m.initialized = True

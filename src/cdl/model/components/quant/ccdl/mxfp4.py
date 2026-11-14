@@ -30,9 +30,12 @@ class Mxfp4CascadedCdlQuantForActivation(CascadedCdlQuantForActivation):
         theta_topk: int,
         q_topk: int,
         dtype: torch.dtype,
+        kappa: float,
         kernel: Literal["torch", "triton"] = "torch",
     ) -> None:
-        super().__init__(input_shape, E2M1(dtype), theta_topk, E8M0(dtype), q_topk, 32)
+        super().__init__(
+            input_shape, E2M1(dtype), theta_topk, E8M0(dtype), q_topk, 32, kappa
+        )
         self.kernel = kernel
         if kernel == "triton":
             self.register_buffer(
@@ -63,9 +66,10 @@ class Mxfp4CascadedCdlQuantForWeight(CascadedCdlQuantForWeight):
         self,
         weight: torch.Tensor,
         dtype: torch.dtype,
+        kappa: float,
         kernel: Literal["torch", "triton"] = "torch",
     ):
-        super().__init__(weight, E2M1(dtype), E8M0(dtype), 32)
+        super().__init__(weight, E2M1(dtype), E8M0(dtype), 32, kappa)
         self.kernel = kernel
         if kernel == "triton":
             self.register_buffer(

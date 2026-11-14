@@ -4,7 +4,7 @@ import torch
 
 from cdl.core.format.fp4 import E2M1
 from cdl.core.format.fp8 import UE4M3ExcludeZero
-from cdl.core.kernel.nvfp4 import nvfp4_quant
+from cdl.core.kernel import nvfp4_ccdl_quant
 from cdl.model.components.quant.ccdl.ccdl import (
     CascadedCdlQuantForActivation,
     CascadedCdlQuantForWeight,
@@ -30,6 +30,7 @@ class Nvfp4CascadedCdlQuantForActivation(CascadedCdlQuantForActivation):
         theta_topk: int,
         q_topk: int,
         dtype: torch.dtype,
+        kappa: float,
         kernel: Literal["torch", "triton"] = "torch",
     ) -> None:
         super().__init__(
@@ -39,6 +40,7 @@ class Nvfp4CascadedCdlQuantForActivation(CascadedCdlQuantForActivation):
             UE4M3ExcludeZero(dtype),
             q_topk,
             16,
+            kappa,
         )
         self.kernel = kernel
         if kernel == "triton":
@@ -51,7 +53,7 @@ class Nvfp4CascadedCdlQuantForActivation(CascadedCdlQuantForActivation):
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         if self.kernel == "torch":
             return super().training_forward(theta)
-        return nvfp4_quant(
+        return nvfp4_ccdl_quant(
             theta,
             self.q,
             self.theta_kappa,
@@ -70,9 +72,10 @@ class Nvfp4CascadedCdlQuantForWeight(CascadedCdlQuantForWeight):
         self,
         weight: torch.Tensor,
         dtype: torch.dtype,
+        kappa: float,
         kernel: Literal["torch", "triton"] = "torch",
     ):
-        super().__init__(weight, E2M1(dtype), UE4M3ExcludeZero(dtype), 16)
+        super().__init__(weight, E2M1(dtype), UE4M3ExcludeZero(dtype), 16, kappa)
         self.kernel = kernel
         if kernel == "triton":
             self.register_buffer(
@@ -84,7 +87,7 @@ class Nvfp4CascadedCdlQuantForWeight(CascadedCdlQuantForWeight):
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         if self.kernel == "torch":
             return super().training_forward(theta)
-        return nvfp4_quant(
+        return nvfp4_ccdl_quant(
             theta,
             self.q,
             self.theta_kappa,
