@@ -1,6 +1,5 @@
 import abc
 import math
-from collections.abc import Iterable
 from dataclasses import dataclass
 
 import torch
@@ -74,7 +73,8 @@ class ExtendedCdlQuant(Quant):
         theta_topk: int,
         q_format: Format,
         block_size: int,
-        kappa: float,
+        kappa_forward: float,
+        kappa_backward: float,
     ):
         super().__init__()
         self.input_shape = input_shape
@@ -85,10 +85,14 @@ class ExtendedCdlQuant(Quant):
         self.block_size = block_size
         self.num_quantized_params = math.prod(input_shape)
 
-        self.log_kappa = nn.Parameter(torch.full((), math.log(kappa)))
-        self.log_alpha = nn.Parameter(torch.full((), math.log(1)))
+        self.log_kappa = nn.Parameter(torch.full((), math.log(kappa_forward)))
+        self.log_beta = nn.Parameter(torch.zeros(()))
+        self.register_buffer(
+            "kappa_backward",
+            torch.tensor(kappa_backward, dtype=torch.float32),
+            persistent=False,
+        )
 
-        self.initialized = False
         self.bypassing = False
 
     @property
@@ -96,42 +100,36 @@ class ExtendedCdlQuant(Quant):
         return self.log_kappa.exp()
 
     @property
-    def alpha(self) -> torch.Tensor:
-        return self.log_alpha.exp()
+    def beta(self) -> torch.Tensor:
+        return self.log_beta.exp()
 
     @abc.abstractmethod
-    def get_alpha_lr(self, eta: float) -> float: ...
-
-    @torch.no_grad()
-    def init_alpha_from_amax(self, abs_amax: torch.Tensor) -> None:
-        f_max = self.theta_format.level.amax() * self.q_format.level.amax()
-        alpha = abs_amax / f_max
-        log_alpha = alpha.clamp_min(torch.finfo(torch.float32).tiny).log().item()
-        self.log_alpha.fill_(log_alpha)
-        self.initialized = True
+    def get_scale_lr(self, eta: float) -> float: ...
 
     def get_kappa_lr(self, eta: float) -> float:
         return eta / self.num_quantized_params**0.5
 
     def training_forward(
         self, theta: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        theta_indices, q_indices, grad_proxy, _ = extended_cdl_topk_forward(
-            theta,
-            self.theta_format,
-            self.theta_topk,
-            self.q_format,
-            self.kappa,
-            self.alpha,
-            True,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        theta_indices, q_indices, grad_proxy, global_scale, _ = (
+            extended_cdl_topk_forward(
+                theta,
+                self.theta_format,
+                self.theta_topk,
+                self.q_format,
+                self.kappa,
+                self.kappa_backward,
+                self.beta,
+                True,
+            )
         )
-        return theta_indices, q_indices, grad_proxy
+        return theta_indices, q_indices, grad_proxy, global_scale
 
     def forward(self, x: torch.Tensor) -> QTensor:
         if self.bypassing:
             return ExtendedCdlBypassTensor(x)
 
-        assert self.initialized
         if x.ndim != len(self.input_shape):
             raise ValueError(
                 f"expected input shaped like {self.input_shape}, got {tuple(x.shape)}"
@@ -145,22 +143,22 @@ class ExtendedCdlQuant(Quant):
         theta, _ = group_tensor_into_blocks(x, self.block_size)
 
         if not self.training:
-            theta_indices, q_indices = extended_nearest_round(
+            theta_indices, q_indices, global_scale = extended_nearest_round(
                 theta,
                 self.theta_format,
                 self.q_format,
-                self.alpha,
+                self.beta,
             )
             grad_proxy = None
         else:
-            theta_indices, q_indices, grad_proxy = self.training_forward(theta)
+            theta_indices, q_indices, grad_proxy, global_scale = self.training_forward(theta)
 
         return self.tensor(
             self.theta_format,
             theta_indices,
             self.q_format,
             q_indices,
-            self.alpha.detach(),
+            global_scale.detach(),
             grad_proxy,
             self.k_dim,
         )
@@ -174,7 +172,8 @@ class ExtendedCdlQuantForActivation(ExtendedCdlQuant):
         theta_topk: int,
         q_format: Format,
         block_size: int,
-        kappa: float,
+        kappa_forward: float,
+        kappa_backward: float,
     ):
         super().__init__(
             input_shape,
@@ -182,10 +181,11 @@ class ExtendedCdlQuantForActivation(ExtendedCdlQuant):
             theta_topk,
             q_format,
             block_size,
-            kappa=kappa,
+            kappa_forward,
+            kappa_backward,
         )
 
-    def get_alpha_lr(self, eta: float) -> float:
+    def get_scale_lr(self, eta: float) -> float:
         n = self.num_quantized_params
         bits = self.theta_format.bits
         return eta / math.sqrt(n * (2**bits))
@@ -198,7 +198,7 @@ class ExtendedCdlQuantForWeight(ExtendedCdlQuant):
         theta_format: Format,
         q_format: Format,
         block_size: int,
-        kappa: float,
+        kappa_forward: float,
     ):
         super().__init__(
             tuple(weight.shape),
@@ -206,11 +206,11 @@ class ExtendedCdlQuantForWeight(ExtendedCdlQuant):
             theta_format.n,
             q_format,
             block_size,
-            kappa=kappa,
+            kappa_forward,
+            kappa_forward,
         )
-        self.init_alpha_from_amax(weight.detach().abs().amax())
 
-    def get_alpha_lr(self, eta: float) -> float:
+    def get_scale_lr(self, eta: float) -> float:
         n = self.num_quantized_params
         bits = self.theta_format.bits
         return eta / math.sqrt(n * (2 ** (bits - 1)))
@@ -239,7 +239,7 @@ class ExtendedCdlQuantMixin(BatchNormBatchStatsMixin):
                 continue
             name = name.removeprefix("_orig_mod.")
             out[f"{name}.kappa"] = m.kappa.item()
-            out[f"{name}.alpha"] = m.alpha.item()
+            out[f"{name}.beta"] = m.beta.item()
         return out
 
     @torch.no_grad()
@@ -255,15 +255,14 @@ class ExtendedCdlQuantMixin(BatchNormBatchStatsMixin):
         for m in self.modules():
             if not isinstance(m, ExtendedCdlQuant):
                 continue
-            assert m.initialized
 
             customized_param_set.update(m.parameters())
 
             if train_alpha:
-                alpha_lr = m.get_alpha_lr(learning_rate)
-                buckets.setdefault(alpha_lr, []).append(m.log_alpha)
+                beta_lr = m.get_scale_lr(learning_rate)
+                buckets.setdefault(beta_lr, []).append(m.log_beta)
             else:
-                m.log_alpha.requires_grad_(False)
+                m.log_beta.requires_grad_(False)
 
             if train_kappa:
                 theta_kappa_lr = m.get_kappa_lr(learning_rate)
@@ -276,41 +275,3 @@ class ExtendedCdlQuantMixin(BatchNormBatchStatsMixin):
             for lr, params in buckets.items()
         ]
         return groups, customized_param_set
-
-    @torch.no_grad()
-    def extended_cdl_init_act_q_pass(self, samples: Iterable[torch.Tensor]) -> None:
-        modules = [
-            m for m in self.modules() if isinstance(m, ExtendedCdlQuantForActivation)
-        ]
-        if not modules:
-            return
-
-        stats: dict[ExtendedCdlQuantForActivation, torch.Tensor] = {}
-
-        def hook(m: nn.Module, args: tuple[torch.Tensor, ...]) -> None:
-            x = args[0]
-            assert x.ndim == 2
-            abs_amax = x.abs().amax()
-            previous = stats.get(m)
-            stats[m] = abs_amax if previous is None else previous.maximum(abs_amax)
-
-        handles = [m.register_forward_pre_hook(hook) for m in modules]
-
-        was_training = self.training
-        self.eval()
-        for m in modules:
-            m.bypassing = True
-        try:
-            with self.batchnorm_batch_stats():
-                for x in samples:
-                    self(x)
-        finally:
-            for h in handles:
-                h.remove()
-            for m in modules:
-                m.bypassing = False
-            self.train(was_training)
-
-        for m in modules:
-            assert m in stats
-            m.init_alpha_from_amax(stats[m])

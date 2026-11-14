@@ -10,12 +10,12 @@ from cdl.core.kernel.layout import flatten_theta
 def launch_ecdl_fwd(
     theta: torch.Tensor,
     theta_kappa: torch.Tensor,
-    alpha: torch.Tensor,
+    beta: torch.Tensor,
     seed: torch.Tensor,
     fmt: FormatSpec,
     theta_topk: int,
     config: KernelConfig = DEFAULT_CONFIG,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     flat, lead, m, nb, tpb = flatten_theta(theta)
     k = nb * tpb
     ngb = triton.cdiv(nb, config.block_chunk)
@@ -31,6 +31,7 @@ def launch_ecdl_fwd(
         num_warps=config.num_warps,
     )
     global_absmax = bamax.max()
+    alpha_eff = global_absmax / fmt.f_max * beta
 
     theta_indices = theta.new_empty((m, k), dtype=torch.int16)
     q_indices = torch.empty((m, nb), dtype=torch.uint8, device=theta.device)
@@ -44,7 +45,7 @@ def launch_ecdl_fwd(
         fmt.theta_gap,
         fmt.q_level,
         theta_kappa,
-        alpha,
+        alpha_eff,
         seed,
         theta_indices,
         q_indices,
@@ -64,14 +65,14 @@ def launch_ecdl_fwd(
     theta_indices = theta_indices.reshape(*lead, nb, tpb)
     q_indices = q_indices.reshape(*lead, nb, 1)
     s = s.reshape(*lead, nb)
-    return theta_indices, q_indices, s
+    return theta_indices, q_indices, s, alpha_eff
 
 
 def launch_ecdl_bwd(
     grad_proxy: torch.Tensor,
     theta: torch.Tensor,
     s: torch.Tensor,
-    theta_kappa: torch.Tensor,
+    kappa_backward: torch.Tensor,
     alpha: torch.Tensor,
     fmt: FormatSpec,
     theta_topk: int,
@@ -91,7 +92,7 @@ def launch_ecdl_bwd(
         s_flat,
         fmt.theta_level,
         fmt.theta_gap,
-        theta_kappa,
+        kappa_backward,
         alpha,
         dtheta,
         partials,

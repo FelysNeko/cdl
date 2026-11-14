@@ -78,15 +78,17 @@ def mxfp8_ccdl_quant(
 
 def nvfp4_ecdl_quant(
     theta: torch.Tensor,
-    theta_kappa: torch.Tensor,
-    alpha: torch.Tensor,
+    kappa_forward: torch.Tensor,
+    kappa_backward: torch.Tensor,
+    beta: torch.Tensor,
     seed: torch.Tensor,
     theta_topk: int,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     return ecdl_quant(
         theta,
-        theta_kappa,
-        alpha,
+        kappa_forward,
+        kappa_backward,
+        beta,
         seed,
         FormatId.NVFP4,
         theta_topk,

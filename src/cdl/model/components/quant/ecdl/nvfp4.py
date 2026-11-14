@@ -29,7 +29,8 @@ class Nvfp4ExtendedCdlQuantForActivation(ExtendedCdlQuantForActivation):
         input_shape: tuple[int, ...],
         theta_topk: int,
         dtype: torch.dtype,
-        kappa: float,
+        kappa_forward: float,
+        kappa_backward: float,
         kernel: Literal["torch", "triton"] = "torch",
     ) -> None:
         super().__init__(
@@ -38,7 +39,8 @@ class Nvfp4ExtendedCdlQuantForActivation(ExtendedCdlQuantForActivation):
             theta_topk,
             UE4M3ExcludeZero(dtype),
             16,
-            kappa=kappa,
+            kappa_forward,
+            kappa_backward,
         )
         self.kernel = kernel
         if kernel == "triton":
@@ -48,13 +50,14 @@ class Nvfp4ExtendedCdlQuantForActivation(ExtendedCdlQuantForActivation):
 
     def training_forward(
         self, theta: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         if self.kernel == "torch":
             return super().training_forward(theta)
         return nvfp4_ecdl_quant(
             theta,
             self.kappa,
-            self.alpha,
+            self.kappa_backward,
+            self.beta,
             self.kernel_seed,
             self.theta_topk,
         )
@@ -67,7 +70,7 @@ class Nvfp4ExtendedCdlQuantForWeight(ExtendedCdlQuantForWeight):
         self,
         weight: torch.Tensor,
         dtype: torch.dtype,
-        kappa: float,
+        kappa_forward: float,
         kernel: Literal["torch", "triton"] = "torch",
     ) -> None:
         super().__init__(
@@ -75,7 +78,7 @@ class Nvfp4ExtendedCdlQuantForWeight(ExtendedCdlQuantForWeight):
             E2M1(dtype),
             UE4M3ExcludeZero(dtype),
             16,
-            kappa=kappa,
+            kappa_forward=kappa_forward,
         )
         self.kernel = kernel
         if kernel == "triton":
@@ -85,13 +88,14 @@ class Nvfp4ExtendedCdlQuantForWeight(ExtendedCdlQuantForWeight):
 
     def training_forward(
         self, theta: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         if self.kernel == "torch":
             return super().training_forward(theta)
         return nvfp4_ecdl_quant(
             theta,
             self.kappa,
-            self.alpha,
+            self.kappa_backward,
+            self.beta,
             self.kernel_seed,
             self.theta_topk,
         )

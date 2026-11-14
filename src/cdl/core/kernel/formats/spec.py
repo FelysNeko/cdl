@@ -37,6 +37,7 @@ class FormatSpec:
     tn: int
     qn: int
     q_max: float
+    f_max: float
     theta_level: torch.Tensor
     theta_gap: torch.Tensor
     q_level: torch.Tensor
@@ -54,6 +55,7 @@ def _build(fmt_id: FormatId, device: torch.device) -> FormatSpec:
             theta_level.numel(),
             q_level.numel(),
             float(q_level[-1]),
+            float(theta_level.amax().item()) * float(q_level.amax().item()),
             theta_level,
             theta_gap,
             q_level,
@@ -69,6 +71,7 @@ def _build(fmt_id: FormatId, device: torch.device) -> FormatSpec:
             theta_level.numel(),
             q_level.numel(),
             float(q_level[-1]),
+            float(theta_level.amax().item()) * float(q_level.amax().item()),
             theta_level,
             theta_gap,
             q_level,
@@ -84,6 +87,7 @@ def _build(fmt_id: FormatId, device: torch.device) -> FormatSpec:
             theta_level.numel(),
             q_level.numel(),
             float(q_level[-1]),
+            float(theta_level.amax().item()) * float(q_level.amax().item()),
             theta_level,
             theta_gap,
             q_level,
