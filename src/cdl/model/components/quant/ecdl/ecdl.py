@@ -1,4 +1,3 @@
-import abc
 import math
 from dataclasses import dataclass
 
@@ -103,12 +102,6 @@ class ExtendedCdlQuant(Quant):
     def beta(self) -> torch.Tensor:
         return self.log_beta.exp()
 
-    @abc.abstractmethod
-    def get_scale_lr(self, eta: float) -> float: ...
-
-    def get_kappa_lr(self, eta: float) -> float:
-        return eta / self.num_quantized_params**0.5
-
     def training_forward(
         self, theta: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -185,11 +178,6 @@ class ExtendedCdlQuantForActivation(ExtendedCdlQuant):
             kappa_backward,
         )
 
-    def get_scale_lr(self, eta: float) -> float:
-        n = self.num_quantized_params
-        bits = self.theta_format.bits
-        return eta / math.sqrt(n * (2**bits))
-
 
 class ExtendedCdlQuantForWeight(ExtendedCdlQuant):
     def __init__(
@@ -209,11 +197,6 @@ class ExtendedCdlQuantForWeight(ExtendedCdlQuant):
             kappa_forward,
             kappa_forward,
         )
-
-    def get_scale_lr(self, eta: float) -> float:
-        n = self.num_quantized_params
-        bits = self.theta_format.bits
-        return eta / math.sqrt(n * (2 ** (bits - 1)))
 
 
 class ExtendedCdlQuantMixin(BatchNormBatchStatsMixin):
@@ -246,11 +229,11 @@ class ExtendedCdlQuantMixin(BatchNormBatchStatsMixin):
     def extended_cdl_get_param_groups(
         self,
         learning_rate: float,
-        train_alpha: bool,
+        train_beta: bool,
         train_kappa: bool,
     ) -> tuple[list[dict], set[nn.Parameter]]:
         customized_param_set: set[nn.Parameter] = set()
-        buckets: dict[float, list[nn.Parameter]] = {}
+        params: list[nn.Parameter] = []
 
         for m in self.modules():
             if not isinstance(m, ExtendedCdlQuant):
@@ -258,20 +241,19 @@ class ExtendedCdlQuantMixin(BatchNormBatchStatsMixin):
 
             customized_param_set.update(m.parameters())
 
-            if train_alpha:
-                beta_lr = m.get_scale_lr(learning_rate)
-                buckets.setdefault(beta_lr, []).append(m.log_beta)
+            if train_beta:
+                params.append(m.log_beta)
             else:
                 m.log_beta.requires_grad_(False)
 
             if train_kappa:
-                theta_kappa_lr = m.get_kappa_lr(learning_rate)
-                buckets.setdefault(theta_kappa_lr, []).append(m.log_kappa)
+                params.append(m.log_kappa)
             else:
                 m.log_kappa.requires_grad_(False)
 
-        groups = [
-            {"params": params, "lr": lr, "weight_decay": 0.0}
-            for lr, params in buckets.items()
-        ]
+        groups = (
+            [{"params": params, "lr": learning_rate, "weight_decay": 0.0}]
+            if params
+            else []
+        )
         return groups, customized_param_set

@@ -58,7 +58,7 @@ KERNEL_VARIANTS = ("torch", "triton")
 # Removed flags that may still appear in old run configs.
 REMOVED_MODEL_FLAGS = ("activation_theta_ste", "activation_theta_norm")
 # Weight q init is always amax now; old run configs still carry the key.
-IGNORED_MODEL_KEYS = ("weight_q_init",)
+IGNORED_MODEL_KEYS = ("weight_q_init", "activation_absolute_alpha")
 
 
 # ---------------------------------------------------------------------------
@@ -137,16 +137,16 @@ class TrainingConfig:
     epochs: int = 1
     max_steps: int = 0  # 0 = full epoch; otherwise stop after this many steps
     learning_rate: float = 1e-4  # AdamW eta, base model (decay/no_decay groups)
-    quant_learning_rate: float = 0.1  # SGD eta for the q/alpha/kappa buckets
     warmup_steps: int = 200
     weight_decay: float = 0.0
     betas: list[float] = field(default_factory=lambda: [0.9, 0.95])
     grad_clip: float = 1.0
-    # Learned quant scale (alpha for weights, beta for activations).
+    # Learned quant scales: alpha = CCDL weight global scale (log_alpha),
+    # beta = ECDL global scale (log_beta).
     train_alpha: bool = True
+    train_beta: bool = True
     train_kappa: bool = False
-    quant_optimizer: str = "sgd"  # "sgd" (paper: momentum=0.9) or "adamw"
-    quant_adamw_lr: float = 3e-4  # uniform lr when quant_optimizer=adamw
+    quant_adamw_lr: float = 3e-4  # uniform lr for all quant params (AdamW)
     # Liger fused CE keeps the LM-head logits out of the graph, so bs16 fits
     # without activation checkpointing; leave the escape hatch for larger models.
     gradient_checkpointing: bool = False
@@ -183,6 +183,12 @@ def load_config(yaml_path: Path) -> Config:
             model.pop(key, None)
         for key in IGNORED_MODEL_KEYS:
             model.pop(key, None)
+    train = raw.get("train")
+    if train is not None:
+        # legacy keys no longer in the schema (old run dirs still carry them)
+        for key in ("quant_optimizer", "quant_learning_rate",
+                    "activation_train_alpha", "weight_train_alpha"):
+            train.pop(key, None)
     schema = OmegaConf.structured(Config)
     return OmegaConf.to_object(OmegaConf.merge(schema, raw))
 
@@ -469,13 +475,15 @@ def _quant_param_groups(
     controller: ModelController, cfg: TrainingConfig
 ) -> tuple[list[dict], set[int]]:
     cdl_groups, cdl_params = controller.cdl_get_param_groups(
-        cfg.quant_learning_rate, cfg.train_kappa
+        cfg.quant_adamw_lr, cfg.train_kappa
     )
     cascaded_groups, cascaded_params = controller.cascaded_cdl_get_param_groups(
-        cfg.quant_learning_rate, cfg.train_alpha, cfg.train_kappa
+        cfg.quant_adamw_lr, cfg.train_alpha, cfg.train_kappa
     )
     extended_groups, extended_params = controller.extended_cdl_get_param_groups(
-        cfg.quant_learning_rate, cfg.train_alpha, cfg.train_kappa
+        cfg.quant_adamw_lr,
+        cfg.train_beta,
+        cfg.train_kappa,
     )
     groups = cdl_groups + cascaded_groups + extended_groups
     param_ids = {id(p) for p in (cdl_params | cascaded_params | extended_params)}
@@ -487,21 +495,15 @@ def _build_quant_optimizer(
 ) -> torch.optim.Optimizer | None:
     if not groups:  # STE-only variants have no CDL params at all
         return None
-    if cfg.quant_optimizer == "sgd":
-        return torch.optim.SGD(groups, momentum=0.9)
-    if cfg.quant_optimizer == "adamw":
-        # AdamW normalizes per-parameter step size, so the per-bucket lr
-        # scaling is replaced by one uniform lr.
-        flattened = [
-            {
-                "params": group["params"],
-                "lr": cfg.quant_adamw_lr,
-                "weight_decay": 0.0,
-            }
-            for group in groups
-        ]
-        return torch.optim.AdamW(flattened, betas=tuple(cfg.betas))
-    raise ValueError(f"unknown quant optimizer {cfg.quant_optimizer!r}")
+    flattened = [
+        {
+            "params": group["params"],
+            "lr": cfg.quant_adamw_lr,
+            "weight_decay": 0.0,
+        }
+        for group in groups
+    ]
+    return torch.optim.AdamW(flattened, betas=tuple(cfg.betas))
 
 
 def build_optimizers(
