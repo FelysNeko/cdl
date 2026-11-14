@@ -11,18 +11,16 @@ import math
 import random
 import time
 import uuid
-from array import array
 from dataclasses import dataclass, field
 from itertools import islice
 from pathlib import Path
 
-import numpy as np
 import torch
 import tqdm
 from liger_kernel.transformers.functional import liger_fused_linear_cross_entropy
 from omegaconf import OmegaConf
 from torch import nn
-from torch.utils.data import DataLoader, TensorDataset
+from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from transformers import (
     AutoModelForCausalLM,
@@ -34,7 +32,7 @@ from transformers import (
 from cdl.checkpoint import load_checkpoint, save_checkpoint
 from cdl.core.format.fp4 import E2M1
 from cdl.core.format.fp8 import UE4M3ExcludeZero
-from cdl.dataset.smollm_corpus import get_dataset
+from cdl.dataset.token_cache import CacheSpec, TokenCache
 from cdl.model.components.linear import QLinear, QLinearMixin
 from cdl.model.components.quant.ccdl.ccdl import CascadedCdlQuantMixin
 from cdl.model.components.quant.ccdl.nvfp4 import (
@@ -52,7 +50,6 @@ from cdl.model.components.quant.ste import SteQuant
 logger = logging.getLogger(__name__)
 
 MODEL_DTYPE = torch.bfloat16
-TOKENIZE_BATCH = 1024
 
 ACTIVATION_VARIANTS = ("ste", "nvfp4_ccdl", "nvfp4_ecdl")
 WEIGHT_VARIANTS = ("ste", "nvfp4_ccdl", "nvfp4_ecdl")
@@ -132,6 +129,7 @@ class DataConfig:
     batch_size: int = 16
     num_test_blocks: int = 64
     num_calib_blocks: int = 8
+    cache_dir: str | None = None  # None = auto-derived append-only token cache
 
 
 @dataclass
@@ -205,6 +203,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--run-name", type=str)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--cache-dir", type=Path)
+    parser.add_argument("--rebuild-cache", action="store_true")
     return parser.parse_args()
 
 
@@ -223,7 +223,10 @@ def resolve_settings(args: argparse.Namespace) -> tuple[Path, Config]:
         resume_dir: Path = args.resume.expanduser()
         yaml_path = resume_dir / "config.yaml"
         logger.info(f"using {yaml_path} as config file")
-        return resume_dir, load_config(yaml_path)
+        cfg = load_config(yaml_path)
+        if args.cache_dir is not None:
+            cfg.data.cache_dir = str(args.cache_dir)
+        return resume_dir, cfg
 
     output_dir = (args.output_dir or Path("output")).expanduser()
     run_name = args.run_name
@@ -231,10 +234,12 @@ def resolve_settings(args: argparse.Namespace) -> tuple[Path, Config]:
         timestamp = time.strftime("%Y-%m-%dT%H-%M-%S")
         run_name = f"{timestamp}-{uuid.uuid4().hex[:6]}"
     output_dir = output_dir / run_name
-    output_dir.mkdir(parents=True, exist_ok=True)
-    logger.info(f"setting output directory to {output_dir}")
 
     cfg = load_config(args.config)
+    if args.cache_dir is not None:
+        cfg.data.cache_dir = str(args.cache_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    logger.info(f"setting output directory to {output_dir}")
     OmegaConf.save(OmegaConf.structured(cfg), output_dir / "config.yaml")
     with open(output_dir / "args.json", "w", encoding="utf-8") as f:
         json.dump(vars(args).copy(), f, indent=2, default=str)
@@ -414,63 +419,45 @@ def log_trainable_census(controller: ModelController, model: nn.Module) -> None:
 # ---------------------------------------------------------------------------
 
 
-def build_corpus(
-    cfg: DataConfig, tokenizer: PreTrainedTokenizerBase
-) -> tuple[TensorDataset, TensorDataset, torch.Tensor]:
-    """Tokenize the sampled pool, pack into fixed-length blocks, and split.
-
-    Calibration blocks overlap with the head of the training split. Tokens
-    accumulate in ``array('q')`` at 8 B/token; a ``list[int]`` would hold
-    ~36 B/token and swap-thrash the box at 100k docs.
-    """
-    pool = get_dataset(cfg.ratios, cfg.num_docs, cfg.seed)
-    eos = tokenizer.eos_token_id
-    texts = pool["text"]
-    n_docs = len(texts)
-    ids = array("q")
-    for start in tqdm.tqdm(range(0, n_docs, TOKENIZE_BATCH), desc="tokenize"):
-        batch = tokenizer(
-            texts[start : start + TOKENIZE_BATCH], add_special_tokens=False
-        )["input_ids"]
-        for seq in batch:
-            ids.extend(seq)
-            ids.append(eos)
-        if (start // TOKENIZE_BATCH) % 20 == 0:
-            done = min(start + TOKENIZE_BATCH, n_docs)
-            logger.info(f"tokenized {done:,}/{n_docs:,} docs ({len(ids):,} tokens)")
-    del texts, pool
-
-    n_blocks = len(ids) // cfg.seq_len
-    if n_blocks <= cfg.num_test_blocks:
-        raise ValueError(
-            f"corpus produced only {n_blocks} blocks of seq_len={cfg.seq_len}; "
-            f"need more than num_test_blocks={cfg.num_test_blocks}"
-        )
-    flat = np.asarray(ids)  # zero-copy view of the array buffer
-    blocks = torch.from_numpy(flat[: n_blocks * cfg.seq_len]).view(n_blocks, -1)
-    test_blocks = blocks[-cfg.num_test_blocks :]
-    train_blocks = blocks[: -cfg.num_test_blocks]
-    calib_blocks = train_blocks[: cfg.num_calib_blocks]
-    logger.info(
-        f"{len(ids):,} tokens -> {n_blocks} blocks of {cfg.seq_len} "
-        f"(train {len(train_blocks)}, test {len(test_blocks)}, calib {len(calib_blocks)})"
+def build_cache(
+    cfg: Config,
+    tokenizer: PreTrainedTokenizerBase,
+    cache_dir: str | Path | None,
+    rebuild: bool,
+) -> TokenCache:
+    spec = CacheSpec(
+        model_id=cfg.model.model_id,
+        tokenizer=tokenizer,
+        ratios=dict(cfg.data.ratios),
+        seed=cfg.data.seed,
+        seq_len=cfg.data.seq_len,
+        num_docs=cfg.data.num_docs,
+        num_test_blocks=cfg.data.num_test_blocks,
+        num_calib_blocks=cfg.data.num_calib_blocks,
     )
-    return TensorDataset(train_blocks), TensorDataset(test_blocks), calib_blocks
+    target_blocks = (
+        cfg.train.max_steps * cfg.data.batch_size if cfg.train.max_steps > 0 else 0
+    )
+    return TokenCache.open(
+        spec,
+        directory=cache_dir,
+        rebuild=rebuild,
+        target_blocks=target_blocks,
+    )
 
 
 def build_loaders(
-    cfg: DataConfig, tokenizer: PreTrainedTokenizerBase, workers: int
+    cache: TokenCache, cfg: DataConfig, workers: int
 ) -> tuple[DataLoader, DataLoader, torch.Tensor]:
-    train_set, test_set, calib_blocks = build_corpus(cfg, tokenizer)
     train_loader = DataLoader(
-        train_set,
+        cache.train_dataset,
         cfg.batch_size,
         shuffle=True,
         drop_last=True,
         num_workers=workers,
     )
-    test_loader = DataLoader(test_set, batch_size=cfg.batch_size)
-    return train_loader, test_loader, calib_blocks
+    test_loader = DataLoader(cache.test_dataset, batch_size=cfg.batch_size)
+    return train_loader, test_loader, cache.calib_blocks(cfg.num_calib_blocks)
 
 
 # ---------------------------------------------------------------------------
@@ -688,7 +675,7 @@ def evaluate(model: nn.Module, loader: DataLoader, device: torch.device) -> floa
     was_training = model.training
     model.eval()
     total_loss, total_tokens = 0.0, 0
-    for (input_ids,) in loader:
+    for input_ids in loader:
         input_ids = input_ids.to(device)
         loss = lm_loss(model, input_ids)
         tokens = input_ids.numel() - input_ids.shape[0]
@@ -796,7 +783,7 @@ def run_training(
         batches = (
             islice(train_loader, resume_skip, None) if resume_skip else train_loader
         )
-        for (input_ids,) in tqdm.tqdm(
+        for input_ids in tqdm.tqdm(
             batches,
             desc=f"epoch {epoch}",
             initial=resume_skip,
@@ -923,8 +910,10 @@ def training_pipeline() -> None:
         train_head=not cfg.model.use_lora and cfg.model.train_head,
     )
     tokenizer = AutoTokenizer.from_pretrained(cfg.model.model_id)
+    cache = build_cache(cfg, tokenizer, cfg.data.cache_dir, args.rebuild_cache)
+    logger.info(f"token cache {cache.directory}: train {cache.n_train_blocks:,} blocks")
     train_loader, test_loader, calib_blocks = build_loaders(
-        cfg.data, tokenizer, args.workers
+        cache, cfg.data, args.workers
     )
 
     controller = ModelController(model)

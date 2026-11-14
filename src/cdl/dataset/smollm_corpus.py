@@ -1,5 +1,3 @@
-from itertools import islice
-
 from datasets import Dataset, concatenate_datasets, load_dataset
 
 SOURCES = {
@@ -11,15 +9,17 @@ SOURCES = {
 }
 
 
-def get_dataset(ratios: dict[str, float], num_docs: int, seed: int = 0) -> Dataset:
+def source_counts(ratios: dict[str, float], num_docs: int) -> dict[str, int]:
+    """Docs drawn from each source for a given total and ratio mix."""
     total = sum(ratios.values())
+    return {name: round(ratio / total * num_docs) for name, ratio in ratios.items()}
+
+
+def get_dataset(ratios: dict[str, float], num_docs: int, seed: int = 0) -> Dataset:
     parts = []
-    for name, ratio in ratios.items():
+    for name, count in source_counts(ratios, num_docs).items():
         repo, config, column = SOURCES[name]
         stream = load_dataset(repo, config, split="train", streaming=True)
-        docs = [
-            {"text": doc[column]}
-            for doc in islice(stream, round(ratio / total * num_docs))
-        ]
+        docs = [{"text": doc[column]} for doc in stream.take(count)]
         parts.append(Dataset.from_list(docs))
     return concatenate_datasets(parts).shuffle(seed=seed)
