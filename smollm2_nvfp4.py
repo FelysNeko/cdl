@@ -41,6 +41,7 @@ from cdl.model.components.quant.ccdl.nvfp4 import (
 )
 from cdl.model.components.quant.cdl import CdlQuantMixin
 from cdl.model.components.quant.ecdl.ecdl import ExtendedCdlQuantMixin
+from cdl.model.components.quant.identity import IdentityQuant
 from cdl.model.components.quant.ecdl.nvfp4 import (
     Nvfp4ExtendedCdlQuantForActivation,
     Nvfp4ExtendedCdlQuantForWeight,
@@ -51,9 +52,10 @@ logger = logging.getLogger(__name__)
 
 MODEL_DTYPE = torch.bfloat16
 
-ACTIVATION_VARIANTS = ("ste", "nvfp4_ccdl", "nvfp4_ecdl")
-WEIGHT_VARIANTS = ("ste", "nvfp4_ccdl", "nvfp4_ecdl")
+ACTIVATION_VARIANTS = ("ste", "nvfp4_ccdl", "nvfp4_ecdl", "none")
+WEIGHT_VARIANTS = ("ste", "nvfp4_ccdl", "nvfp4_ecdl", "none")
 KERNEL_VARIANTS = ("torch", "triton")
+BACKEND_VARIANTS = ("native", "nvfp4", "mxfp4", "mxfp8")
 
 # Removed flags that may still appear in old run configs.
 REMOVED_MODEL_FLAGS = ("activation_theta_ste", "activation_theta_norm")
@@ -91,6 +93,7 @@ class ModelConfig:
     q_topk: int = 5  # CDL window over UE4M3 levels (activation quant)
     block_size: int = 16  # nvfp4 requires 16
     kernel: str = "triton"  # "torch" or "triton"
+    backend: str = "nvfp4"
     use_lora: bool = True
     freeze_base: bool = False  # with use_lora=false, keep the base frozen
     # With use_lora=false and freeze_base=true, train lm_head (head-only
@@ -104,6 +107,8 @@ class ModelConfig:
             raise ValueError("nvfp4 requires block_size=16")
         if self.kernel not in KERNEL_VARIANTS:
             raise ValueError(f"unknown kernel {self.kernel!r}")
+        if self.backend not in BACKEND_VARIANTS:
+            raise ValueError(f"unknown backend {self.backend!r}")
         if self.activation not in ACTIVATION_VARIANTS:
             raise ValueError(f"unknown activation variant {self.activation!r}")
         if self.weight not in WEIGHT_VARIANTS:
@@ -300,6 +305,8 @@ class ModelController(
 
 
 def _build_activation_quant(cfg: ModelConfig, in_features: int, dtype: torch.dtype):
+    if cfg.activation == "none":
+        return IdentityQuant()
     if cfg.activation == "ste":
         return SteQuant("nvfp4")
     if cfg.activation == "nvfp4_ccdl":
@@ -329,6 +336,8 @@ def _build_activation_quant(cfg: ModelConfig, in_features: int, dtype: torch.dty
 
 
 def _build_weight_quant(cfg: ModelConfig, weight: torch.Tensor, dtype: torch.dtype):
+    if cfg.weight == "none":
+        return IdentityQuant()
     if cfg.weight == "ste":
         return SteQuant("nvfp4")
     if cfg.weight == "nvfp4_ccdl":
@@ -398,14 +407,17 @@ def total_activation_quant_counts(controller: ModelController) -> int:
 
 
 def init_activation_q(
-    controller: ModelController, calib_blocks: torch.Tensor, device: torch.device
+    controller: ModelController,
+    calib_blocks: torch.Tensor,
+    device: torch.device,
+    backend: str = "nvfp4",
 ) -> None:
     """Initialize activation CDL scales from calibration blocks (no-op for STE)."""
     controller.q_linear_switch_backend("native")
     samples = [block.unsqueeze(0).to(device) for block in calib_blocks]
     controller.cdl_init_act_q_pass(iter(samples))
     controller.cascaded_cdl_init_act_q_pass(iter(samples))
-    controller.q_linear_switch_backend("nvfp4")
+    controller.q_linear_switch_backend(backend)
 
     for key, value in collect_quant_stats(controller).items():
         logger.info(f"{key} = {value}")
@@ -928,7 +940,7 @@ def training_pipeline() -> None:
         )
         model.enable_input_require_grads()
 
-    init_activation_q(controller, calib_blocks, device)
+    init_activation_q(controller, calib_blocks, device, cfg.model.backend)
     optimizers, lr_schedulers = build_optimizers(controller, model, cfg.train)
     log_trainable_census(controller, model)
 
