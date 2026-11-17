@@ -84,9 +84,9 @@ def _ecdl_fwd(
         q_hat = tl.load(ql_ptr + q_indices, mask=bmask, other=0.0).to(tl.float32)
         s = q_hat * al
     elif MODE == 0:
-        block_absmax = tl.load(
-            bamax_ptr + r * NB + offs_b, mask=bmask, other=0.0
-        ).to(tl.float32)
+        block_absmax = tl.load(bamax_ptr + r * NB + offs_b, mask=bmask, other=0.0).to(
+            tl.float32
+        )
         global_absmax = tl.maximum(tl.load(gmax_ptr).to(tl.float32), FP32_TINY)
         qv = block_absmax * qmax / global_absmax
         q_indices = q_ordinal(qv, QN)
@@ -112,7 +112,8 @@ def _ecdl_fwd(
 def _ecdl_bwd(
     g_ptr,
     th_ptr,
-    s_ptr,
+    qi_ptr,
+    ql_ptr,
     thl_ptr,
     thg_ptr,
     kt_ptr,
@@ -137,10 +138,12 @@ def _ecdl_bwd(
     offs_b = b0 + tl.arange(0, BB)
     bmask = offs_b < NB
 
-    s = tl.load(s_ptr + r * NB + offs_b, mask=bmask, other=1.0)
-    # Masked lanes load s = 1; with a tiny alpha their q_hat = 1/alpha
-    # overflows and 0 * inf = NaN would poison the d(alpha) partial.
-    q_hat = tl.where(bmask, s / al, 0.0)
+    qi = tl.load(qi_ptr + r * NB + offs_b, mask=bmask, other=0).to(tl.int32)
+    q_hat = tl.load(ql_ptr + qi, mask=bmask, other=0.0).to(tl.float32)
+    # Masked lanes use s = 1 so v stays finite; their q_hat is 0 so the
+    # zero gradient cannot poison the d(alpha) partial with 0 * inf NaNs.
+    s = tl.where(bmask, q_hat * al, 1.0)
+    q_hat = tl.where(bmask, q_hat, 0.0)
 
     ar_t = tl.arange(0, TPB)
     idx = (offs_b[:, None] * TPB + ar_t[None, :]).to(tl.int32)

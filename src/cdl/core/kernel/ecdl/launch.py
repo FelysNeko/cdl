@@ -91,7 +91,7 @@ def launch_ecdl_fwd(
 def launch_ecdl_bwd(
     grad_proxy: torch.Tensor,
     theta: torch.Tensor,
-    s: torch.Tensor,
+    q_indices: torch.Tensor,
     kappa_backward: torch.Tensor,
     alpha: torch.Tensor,
     fmt: FormatSpec,
@@ -101,7 +101,7 @@ def launch_ecdl_bwd(
     flat, _lead, m, nb, tpb = flatten_theta(theta)
     k = nb * tpb
     g = grad_proxy.reshape(m, k)
-    s_flat = s.reshape(m, nb)
+    qi_flat = q_indices.reshape(m, nb)
 
     dtheta = theta.new_empty((m, k), dtype=theta.dtype)
     ngb = triton.cdiv(nb, config.block_chunk)
@@ -109,7 +109,8 @@ def launch_ecdl_bwd(
     _ecdl_bwd[(m, ngb)](
         g,
         flat,
-        s_flat,
+        qi_flat,
+        fmt.q_level,
         fmt.theta_level,
         fmt.theta_gap,
         kappa_backward,

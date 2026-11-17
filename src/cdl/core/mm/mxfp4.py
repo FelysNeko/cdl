@@ -1,52 +1,9 @@
-import functools
-
 import torch
 
 from cdl.api.quant import QTensor
+from cdl.core.kernel.dequant import mxfp4_dequant
 from cdl.core.mm.swizzle import expand_rows, pad_k, pad_n, swizzle_scale_factors
 from cdl.model.wrapper.flashinfer import mm_fp4
-
-
-@functools.cache
-def get_e2m1_lut(dtype: torch.dtype, device: torch.device) -> torch.Tensor:
-    return torch.tensor(
-        (
-            -6.0,
-            -4.0,
-            -3.0,
-            -2.0,
-            -1.5,
-            -1.0,
-            -0.5,
-            -0.0,
-            0.0,
-            0.5,
-            1.0,
-            1.5,
-            2.0,
-            3.0,
-            4.0,
-            6.0,
-        ),
-        dtype=dtype,
-        device=device,
-    )
-
-
-def mxfp4_dequant(
-    packed: torch.Tensor,
-    scale: torch.Tensor,
-    alpha: torch.Tensor,
-) -> torch.Tensor:
-    rows, half_k = packed.shape
-    nib = torch.stack((packed & 0xF, packed >> 4), dim=-1).reshape(rows, half_k * 2)
-    code = nib.long()
-    ordinal = torch.where(code < 8, code + 8, 15 - code)
-    lut = get_e2m1_lut(torch.bfloat16, packed.device)
-    vals = lut[ordinal].reshape(rows, half_k // 16, 32)
-    scales = torch.exp2(scale.float() - 127.0)
-    out = (vals * scales[..., None]).flatten(1)
-    return (out * alpha.float()).to(torch.bfloat16)
 
 
 def matmul(x: QTensor, w: QTensor) -> torch.Tensor:

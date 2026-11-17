@@ -41,10 +41,6 @@ from cdl.model.components.quant.ccdl.nvfp4 import (
 )
 from cdl.model.components.quant.cdl import CdlQuantMixin
 from cdl.model.components.quant.ecdl.ecdl import ExtendedCdlQuantMixin
-from cdl.model.components.quant.ecdl.nvfp4 import (
-    Nvfp4ExtendedCdlQuantForActivation,
-    Nvfp4ExtendedCdlQuantForWeight,
-)
 from cdl.model.components.quant.ecdl.mxfp4 import (
     Mxfp4ExtendedCdlQuantForActivation,
     Mxfp4ExtendedCdlQuantForWeight,
@@ -52,6 +48,10 @@ from cdl.model.components.quant.ecdl.mxfp4 import (
 from cdl.model.components.quant.ecdl.mxfp8 import (
     Mxfp8ExtendedCdlQuantForActivation,
     Mxfp8ExtendedCdlQuantForWeight,
+)
+from cdl.model.components.quant.ecdl.nvfp4 import (
+    Nvfp4ExtendedCdlQuantForActivation,
+    Nvfp4ExtendedCdlQuantForWeight,
 )
 from cdl.model.components.quant.identity import IdentityQuant
 from cdl.model.components.quant.ste import SteQuant

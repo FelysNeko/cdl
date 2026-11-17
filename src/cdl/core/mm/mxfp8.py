@@ -1,20 +1,9 @@
 import torch
 
 from cdl.api.quant import QTensor
+from cdl.core.kernel.dequant import mxfp8_dequant
 from cdl.core.mm.swizzle import expand_rows, pad_k, pad_n, swizzle_scale_factors
 from cdl.model.wrapper.flashinfer import mm_mxfp8
-
-
-def mxfp8_dequant(
-    packed: torch.Tensor,
-    scale: torch.Tensor,
-    alpha: torch.Tensor,
-) -> torch.Tensor:
-    rows, k = packed.shape
-    vals = packed.float().reshape(rows, k // 32, 32)
-    scales = torch.exp2(scale.float() - 127.0)
-    out = (vals * scales[..., None]).flatten(1)
-    return (out * alpha.float()).to(torch.bfloat16)
 
 
 def matmul(x: QTensor, w: QTensor) -> torch.Tensor:

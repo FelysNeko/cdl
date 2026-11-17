@@ -49,7 +49,7 @@ class FormatSpec:
 
 
 def _theta_emax(theta_level: torch.Tensor) -> int:
-    return int(math.floor(math.log2(float(theta_level.abs().amax()))))
+    return math.floor(math.log2(float(theta_level.abs().amax())))
 
 
 def _build(fmt_id: FormatId, device: torch.device) -> FormatSpec:

@@ -42,7 +42,7 @@ def _ecdl_quant_fwd_fake(theta, theta_kappa, seed, format_id, theta_topk, scale_
 def ecdl_quant_bwd(
     grad_proxy: torch.Tensor,
     theta: torch.Tensor,
-    s: torch.Tensor,
+    q_indices: torch.Tensor,
     kappa_backward: torch.Tensor,
     alpha: torch.Tensor,
     format_id: int,
@@ -52,7 +52,7 @@ def ecdl_quant_bwd(
     return launch_ecdl_bwd(
         grad_proxy,
         theta,
-        s,
+        q_indices,
         kappa_backward,
         alpha,
         fmt,
@@ -62,7 +62,7 @@ def ecdl_quant_bwd(
 
 @ecdl_quant_bwd.register_fake
 def _ecdl_quant_bwd_fake(
-    grad_proxy, theta, s, kappa_backward, alpha, format_id, theta_topk
+    grad_proxy, theta, q_indices, kappa_backward, alpha, format_id, theta_topk
 ):
     m = math.prod(theta.shape[:-2])
     nb, tpb = theta.shape[-2:]
@@ -85,7 +85,7 @@ class EcdlQuantFn(torch.autograd.Function):
         scale_mode: str,
     ):
         seed.add_(1)
-        theta_indices, q_indices, s, alpha_eff = ecdl_quant_fwd(
+        theta_indices, q_indices, _s, alpha_eff = ecdl_quant_fwd(
             theta,
             kappa_forward,
             seed,
@@ -93,7 +93,9 @@ class EcdlQuantFn(torch.autograd.Function):
             theta_topk,
             scale_mode,
         )
-        ctx.save_for_backward(theta, s, kappa_forward, kappa_backward, alpha_eff)
+        ctx.save_for_backward(
+            theta, q_indices, kappa_forward, kappa_backward, alpha_eff
+        )
         ctx.format_id = format_id
         ctx.theta_topk = theta_topk
         carrier = theta.new_zeros(()).expand(theta.shape)
@@ -102,13 +104,13 @@ class EcdlQuantFn(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, g_theta_indices, g_q_indices, g_proxy, g_alpha_eff):
-        theta, s, kappa_forward, kappa_backward, alpha_eff = ctx.saved_tensors
+        theta, q_indices, kappa_forward, kappa_backward, alpha_eff = ctx.saved_tensors
         # scalars[1] is d(alpha_eff); alpha_eff carries no learnable parameter
         # in either scale mode, so it is dropped.
         dtheta, _scalars = ecdl_quant_bwd(
             g_proxy.contiguous(),
             theta,
-            s,
+            q_indices,
             kappa_backward,
             alpha_eff,
             ctx.format_id,
