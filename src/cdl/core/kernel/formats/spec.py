@@ -5,6 +5,7 @@ A :class:`FormatSpec` couples the host-side tables of a quantization format
 inside the kernels.  All tensors are cached per ``(format, device)``.
 """
 
+import math
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import IntEnum
@@ -44,6 +45,11 @@ class FormatSpec:
     q_gap: torch.Tensor
     theta_ordinal: Callable
     q_ordinal: Callable
+    theta_emax: int
+
+
+def _theta_emax(theta_level: torch.Tensor) -> int:
+    return int(math.floor(math.log2(float(theta_level.abs().amax()))))
 
 
 def _build(fmt_id: FormatId, device: torch.device) -> FormatSpec:
@@ -62,6 +68,7 @@ def _build(fmt_id: FormatId, device: torch.device) -> FormatSpec:
             q_gap,
             e2m1_triton_ordinal,
             ue4m3_triton_ordinal,
+            _theta_emax(theta_level),
         )
     if fmt_id is FormatId.MXFP4:
         theta_level, theta_gap = e2m1_tables(torch.float32, device)
@@ -78,6 +85,7 @@ def _build(fmt_id: FormatId, device: torch.device) -> FormatSpec:
             q_gap,
             e2m1_triton_ordinal,
             e8m0_triton_ordinal,
+            _theta_emax(theta_level),
         )
     if fmt_id is FormatId.MXFP8:
         theta_level, theta_gap = e4m3_tables(torch.float32, device)
@@ -94,6 +102,7 @@ def _build(fmt_id: FormatId, device: torch.device) -> FormatSpec:
             q_gap,
             e4m3_triton_ordinal,
             e8m0_triton_ordinal,
+            _theta_emax(theta_level),
         )
     raise ValueError(f"unknown format id {fmt_id!r}")
 

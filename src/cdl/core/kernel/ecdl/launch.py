@@ -10,28 +10,46 @@ from cdl.core.kernel.layout import flatten_theta
 def launch_ecdl_fwd(
     theta: torch.Tensor,
     theta_kappa: torch.Tensor,
-    beta: torch.Tensor,
     seed: torch.Tensor,
     fmt: FormatSpec,
     theta_topk: int,
+    scale_mode: str = "nvidia",
     config: KernelConfig = DEFAULT_CONFIG,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     flat, lead, m, nb, tpb = flatten_theta(theta)
     k = nb * tpb
     ngb = triton.cdiv(nb, config.block_chunk)
 
-    bamax = torch.empty((m, nb), dtype=torch.float32, device=theta.device)
-    _ecdl_absmax[(m, ngb)](
-        flat,
-        bamax,
-        k,
-        nb,
-        TPB=tpb,
-        BB=config.block_chunk,
-        num_warps=config.num_warps,
-    )
-    global_absmax = bamax.max()
-    alpha_eff = global_absmax / fmt.f_max * beta
+    if scale_mode == "nvidia":
+        mode = 0
+        bamax = torch.empty((m, nb), dtype=torch.float32, device=theta.device)
+        _ecdl_absmax[(m, ngb)](
+            flat,
+            bamax,
+            k,
+            nb,
+            TPB=tpb,
+            BB=config.block_chunk,
+            num_warps=config.num_warps,
+        )
+        global_absmax = bamax.max().clamp_min(torch.finfo(torch.float32).tiny)
+        qmax = fmt.q_max
+        alpha_eff = global_absmax / fmt.f_max
+    elif scale_mode == "ocp":
+        # Single pass: the fwd kernel derives the block scale from the raw
+        # exponent bits, so the bamax/gmax/qmax arguments are dead pointers.
+        mode = 1
+        bamax = flat
+        global_absmax = flat
+        qmax = 0.0
+        alpha_eff = theta.new_ones((), dtype=torch.float32)
+    else:
+        # Unknown mode: brute fallback, block and global scales both 1.
+        mode = 2
+        bamax = flat
+        global_absmax = flat
+        qmax = 0.0
+        alpha_eff = theta.new_ones((), dtype=torch.float32)
 
     theta_indices = theta.new_empty((m, k), dtype=torch.int16)
     q_indices = torch.empty((m, nb), dtype=torch.uint8, device=theta.device)
@@ -40,7 +58,7 @@ def launch_ecdl_fwd(
         flat,
         bamax,
         global_absmax,
-        fmt.q_max,
+        qmax,
         fmt.theta_level,
         fmt.theta_gap,
         fmt.q_level,
@@ -59,6 +77,8 @@ def launch_ecdl_fwd(
         TN=fmt.tn,
         QN=fmt.qn,
         BB=config.block_chunk,
+        MODE=mode,
+        EMAX=fmt.theta_emax,
         num_warps=config.num_warps,
     )
 

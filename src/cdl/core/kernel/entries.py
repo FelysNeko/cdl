@@ -80,7 +80,6 @@ def nvfp4_ecdl_quant(
     theta: torch.Tensor,
     kappa_forward: torch.Tensor,
     kappa_backward: torch.Tensor,
-    beta: torch.Tensor,
     seed: torch.Tensor,
     theta_topk: int,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -88,8 +87,44 @@ def nvfp4_ecdl_quant(
         theta,
         kappa_forward,
         kappa_backward,
-        beta,
         seed,
         FormatId.NVFP4,
         theta_topk,
+        "nvidia",
+    )
+
+
+def mxfp4_ecdl_quant(
+    theta: torch.Tensor,
+    kappa_forward: torch.Tensor,
+    kappa_backward: torch.Tensor,
+    seed: torch.Tensor,
+    theta_topk: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    return ecdl_quant(
+        theta,
+        kappa_forward,
+        kappa_backward,
+        seed,
+        FormatId.MXFP4,
+        theta_topk,
+        "ocp",
+    )
+
+
+def mxfp8_ecdl_quant(
+    theta: torch.Tensor,
+    kappa_forward: torch.Tensor,
+    kappa_backward: torch.Tensor,
+    seed: torch.Tensor,
+    theta_topk: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    return ecdl_quant(
+        theta,
+        kappa_forward,
+        kappa_backward,
+        seed,
+        FormatId.MXFP8,
+        theta_topk,
+        "ocp",
     )

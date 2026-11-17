@@ -4,6 +4,7 @@ import torch
 
 from cdl.core.format.fp4 import E2M1
 from cdl.core.format.fp8 import E8M0
+from cdl.core.kernel import mxfp4_ecdl_quant
 from cdl.model.components.quant.ecdl.ecdl import (
     ExtendedCdlQuantForActivation,
     ExtendedCdlQuantForWeight,
@@ -53,8 +54,12 @@ class Mxfp4ExtendedCdlQuantForActivation(ExtendedCdlQuantForActivation):
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         if self.kernel == "torch":
             return super().training_forward(theta)
-        raise NotImplementedError(
-            "triton ECDL awaits the kernel scale-mode rework; use kernel='torch'"
+        return mxfp4_ecdl_quant(
+            theta,
+            self.kappa,
+            self.kappa_backward,
+            self.kernel_seed,
+            self.theta_topk,
         )
 
 
@@ -87,6 +92,10 @@ class Mxfp4ExtendedCdlQuantForWeight(ExtendedCdlQuantForWeight):
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         if self.kernel == "torch":
             return super().training_forward(theta)
-        raise NotImplementedError(
-            "triton ECDL awaits the kernel scale-mode rework; use kernel='torch'"
+        return mxfp4_ecdl_quant(
+            theta,
+            self.kappa,
+            self.kappa_backward,
+            self.kernel_seed,
+            self.theta_topk,
         )

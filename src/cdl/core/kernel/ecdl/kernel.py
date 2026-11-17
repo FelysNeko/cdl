@@ -53,6 +53,8 @@ def _ecdl_fwd(
     TN: tl.constexpr,
     QN: tl.constexpr,
     BB: tl.constexpr,
+    MODE: tl.constexpr,
+    EMAX: tl.constexpr,
 ):
     r = tl.program_id(0)
     gb = tl.program_id(1)
@@ -63,21 +65,42 @@ def _ecdl_fwd(
     offs_b = b0 + tl.arange(0, BB)
     bmask = offs_b < NB
 
-    block_absmax = tl.load(bamax_ptr + r * NB + offs_b, mask=bmask, other=0.0).to(
-        tl.float32
-    )
-    global_absmax = tl.maximum(tl.load(gmax_ptr).to(tl.float32), FP32_TINY)
-    qv = block_absmax * qmax / global_absmax
-    q_indices = q_ordinal(qv, QN)
-    q_hat = tl.load(ql_ptr + q_indices, mask=bmask, other=0.0).to(tl.float32)
-    s = q_hat * al
-    tl.store(s_ptr + r * NB + offs_b, s, mask=bmask)
-    tl.store(qi_ptr + r * NB + offs_b, q_indices.to(tl.uint8), mask=bmask)
-
     ar_t = tl.arange(0, TPB)
     idx = (offs_b[:, None] * TPB + ar_t[None, :]).to(tl.int32)
     lmask = bmask[:, None]
     raw = tl.load(th_ptr + r * K + idx, mask=lmask, other=0.0)
+
+    if MODE == 1:
+        # OCP MX scales: byte = floor(log2(block_amax)) - emax + 127, single
+        # pass (no global-amax reduction).  q_hat comes from the q level
+        # table, not exp2: byte 0 maps to the fp32-subnormal 2**-127, which
+        # tl.exp2 flushes to zero.  The bamax/gmax/qmax/q_ordinal arguments
+        # are dead in this branch.
+        block_absmax = tl.max(tl.abs(raw.to(tl.float32)), axis=1)
+        clamped = tl.maximum(block_absmax, FP32_TINY)
+        bits = tl.cast(clamped, tl.uint32, bitcast=True)
+        floor_log2 = (bits >> 23).to(tl.int32) - 127
+        q_indices = tl.minimum(tl.maximum(floor_log2 - EMAX + 127, 0), 254)
+        q_hat = tl.load(ql_ptr + q_indices, mask=bmask, other=0.0).to(tl.float32)
+        s = q_hat * al
+    elif MODE == 0:
+        block_absmax = tl.load(
+            bamax_ptr + r * NB + offs_b, mask=bmask, other=0.0
+        ).to(tl.float32)
+        global_absmax = tl.maximum(tl.load(gmax_ptr).to(tl.float32), FP32_TINY)
+        qv = block_absmax * qmax / global_absmax
+        q_indices = q_ordinal(qv, QN)
+        q_hat = tl.load(ql_ptr + q_indices, mask=bmask, other=0.0).to(tl.float32)
+        s = q_hat * al
+    else:
+        # Unknown mode: brute fallback, block and global scales both 1.
+        q_indices = q_ordinal(tl.full((BB,), 1.0, tl.float32), QN)
+        q_hat = tl.load(ql_ptr + q_indices, mask=bmask, other=0.0).to(tl.float32)
+        s = q_hat * al
+
+    tl.store(s_ptr + r * NB + offs_b, s, mask=bmask)
+    tl.store(qi_ptr + r * NB + offs_b, q_indices.to(tl.uint8), mask=bmask)
+
     v = raw.to(tl.float32) / s[:, None]
     seed = tl.load(seed_ptr).to(tl.int32)
     u_t = tl.rand(seed, r * K + idx)
@@ -115,7 +138,9 @@ def _ecdl_bwd(
     bmask = offs_b < NB
 
     s = tl.load(s_ptr + r * NB + offs_b, mask=bmask, other=1.0)
-    q_hat = s / al
+    # Masked lanes load s = 1; with a tiny alpha their q_hat = 1/alpha
+    # overflows and 0 * inf = NaN would poison the d(alpha) partial.
+    q_hat = tl.where(bmask, s / al, 0.0)
 
     ar_t = tl.arange(0, TPB)
     idx = (offs_b[:, None] * TPB + ar_t[None, :]).to(tl.int32)
