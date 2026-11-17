@@ -93,9 +93,7 @@ class EcdlQuantFn(torch.autograd.Function):
             format_id,
             theta_topk,
         )
-        ctx.save_for_backward(
-            theta, s, kappa_forward, kappa_backward, beta, alpha_eff
-        )
+        ctx.save_for_backward(theta, s, kappa_forward, kappa_backward, beta, alpha_eff)
         ctx.format_id = format_id
         ctx.theta_topk = theta_topk
         carrier = theta.new_zeros(()).expand(theta.shape)
@@ -104,9 +102,7 @@ class EcdlQuantFn(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, g_theta_indices, g_q_indices, g_proxy, g_alpha_eff):
-        theta, s, kappa_forward, kappa_backward, beta, alpha_eff = (
-            ctx.saved_tensors
-        )
+        theta, s, kappa_forward, kappa_backward, beta, alpha_eff = ctx.saved_tensors
         # The kernel returns d(alpha_eff); alpha_eff = A_b / f_max * beta, so
         # d(beta) = d(alpha_eff) * alpha_eff / beta.
         dtheta, scalars = ecdl_quant_bwd(

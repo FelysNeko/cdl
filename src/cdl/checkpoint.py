@@ -61,7 +61,13 @@ def load_checkpoint(
     if hasattr(model, "_orig_mod"):
         model = model._orig_mod
     ckpt = torch.load(resume_dir / "last.ckpt", map_location=device, weights_only=False)
-    model.load_state_dict(ckpt["model"])
+    state = ckpt["model"]
+    beta_keys = [key for key in state if key.endswith(".log_beta")]
+    for key in beta_keys:
+        del state[key]
+    if beta_keys:
+        logger.info(f"dropped {len(beta_keys)} removed log_beta entries")
+    model.load_state_dict(state)
     if isinstance(optimizer, dict):
         for key, opt in optimizer.items():
             opt.load_state_dict(ckpt["optimizer"][key])

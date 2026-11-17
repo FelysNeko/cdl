@@ -1,5 +1,6 @@
 import math
 from dataclasses import dataclass
+from typing import Literal
 
 import torch
 import torch.nn.functional as F
@@ -74,6 +75,7 @@ class ExtendedCdlQuant(Quant):
         block_size: int,
         kappa_forward: float,
         kappa_backward: float,
+        scale_mode: Literal["ocp", "nvidia"],
     ):
         super().__init__()
         self.input_shape = input_shape
@@ -83,9 +85,9 @@ class ExtendedCdlQuant(Quant):
         self.q_format = q_format
         self.block_size = block_size
         self.num_quantized_params = math.prod(input_shape)
+        self.scale_mode = scale_mode
 
         self.log_kappa = nn.Parameter(torch.full((), math.log(kappa_forward)))
-        self.log_beta = nn.Parameter(torch.zeros(()))
         self.register_buffer(
             "kappa_backward",
             torch.tensor(kappa_backward, dtype=torch.float32),
@@ -98,10 +100,6 @@ class ExtendedCdlQuant(Quant):
     def kappa(self) -> torch.Tensor:
         return self.log_kappa.exp()
 
-    @property
-    def beta(self) -> torch.Tensor:
-        return self.log_beta.exp()
-
     def training_forward(
         self, theta: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -113,8 +111,8 @@ class ExtendedCdlQuant(Quant):
                 self.q_format,
                 self.kappa,
                 self.kappa_backward,
-                self.beta,
                 True,
+                self.scale_mode,
             )
         )
         return theta_indices, q_indices, grad_proxy, global_scale
@@ -140,11 +138,13 @@ class ExtendedCdlQuant(Quant):
                 theta,
                 self.theta_format,
                 self.q_format,
-                self.beta,
+                self.scale_mode,
             )
             grad_proxy = None
         else:
-            theta_indices, q_indices, grad_proxy, global_scale = self.training_forward(theta)
+            theta_indices, q_indices, grad_proxy, global_scale = self.training_forward(
+                theta
+            )
 
         return self.tensor(
             self.theta_format,
@@ -167,6 +167,7 @@ class ExtendedCdlQuantForActivation(ExtendedCdlQuant):
         block_size: int,
         kappa_forward: float,
         kappa_backward: float,
+        scale_mode: Literal["ocp", "nvidia"],
     ):
         super().__init__(
             input_shape,
@@ -176,6 +177,7 @@ class ExtendedCdlQuantForActivation(ExtendedCdlQuant):
             block_size,
             kappa_forward,
             kappa_backward,
+            scale_mode,
         )
 
 
@@ -187,6 +189,7 @@ class ExtendedCdlQuantForWeight(ExtendedCdlQuant):
         q_format: Format,
         block_size: int,
         kappa_forward: float,
+        scale_mode: Literal["ocp", "nvidia"],
     ):
         super().__init__(
             tuple(weight.shape),
@@ -196,6 +199,7 @@ class ExtendedCdlQuantForWeight(ExtendedCdlQuant):
             block_size,
             kappa_forward,
             kappa_forward,
+            scale_mode,
         )
 
 
@@ -222,14 +226,12 @@ class ExtendedCdlQuantMixin(BatchNormBatchStatsMixin):
                 continue
             name = name.removeprefix("_orig_mod.")
             out[f"{name}.kappa"] = m.kappa.item()
-            out[f"{name}.beta"] = m.beta.item()
         return out
 
     @torch.no_grad()
     def extended_cdl_get_param_groups(
         self,
         learning_rate: float,
-        train_beta: bool,
         train_kappa: bool,
     ) -> tuple[list[dict], set[nn.Parameter]]:
         customized_param_set: set[nn.Parameter] = set()
@@ -240,11 +242,6 @@ class ExtendedCdlQuantMixin(BatchNormBatchStatsMixin):
                 continue
 
             customized_param_set.update(m.parameters())
-
-            if train_beta:
-                params.append(m.log_beta)
-            else:
-                m.log_beta.requires_grad_(False)
 
             if train_kappa:
                 params.append(m.log_kappa)

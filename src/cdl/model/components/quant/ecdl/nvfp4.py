@@ -4,7 +4,6 @@ import torch
 
 from cdl.core.format.fp4 import E2M1
 from cdl.core.format.fp8 import UE4M3ExcludeZero
-from cdl.core.kernel import nvfp4_ecdl_quant
 from cdl.model.components.quant.ecdl.ecdl import (
     ExtendedCdlQuantForActivation,
     ExtendedCdlQuantForWeight,
@@ -41,6 +40,7 @@ class Nvfp4ExtendedCdlQuantForActivation(ExtendedCdlQuantForActivation):
             16,
             kappa_forward,
             kappa_backward,
+            scale_mode="nvidia",
         )
         self.kernel = kernel
         if kernel == "triton":
@@ -53,13 +53,8 @@ class Nvfp4ExtendedCdlQuantForActivation(ExtendedCdlQuantForActivation):
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         if self.kernel == "torch":
             return super().training_forward(theta)
-        return nvfp4_ecdl_quant(
-            theta,
-            self.kappa,
-            self.kappa_backward,
-            self.beta,
-            self.kernel_seed,
-            self.theta_topk,
+        raise NotImplementedError(
+            "triton ECDL awaits the kernel scale-mode rework; use kernel='torch'"
         )
 
 
@@ -79,6 +74,7 @@ class Nvfp4ExtendedCdlQuantForWeight(ExtendedCdlQuantForWeight):
             UE4M3ExcludeZero(dtype),
             16,
             kappa_forward=kappa_forward,
+            scale_mode="nvidia",
         )
         self.kernel = kernel
         if kernel == "triton":
@@ -91,11 +87,6 @@ class Nvfp4ExtendedCdlQuantForWeight(ExtendedCdlQuantForWeight):
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         if self.kernel == "torch":
             return super().training_forward(theta)
-        return nvfp4_ecdl_quant(
-            theta,
-            self.kappa,
-            self.kappa_backward,
-            self.beta,
-            self.kernel_seed,
-            self.theta_topk,
+        raise NotImplementedError(
+            "triton ECDL awaits the kernel scale-mode rework; use kernel='torch'"
         )

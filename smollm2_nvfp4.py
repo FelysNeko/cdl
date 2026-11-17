@@ -31,7 +31,7 @@ from transformers import (
 
 from cdl.checkpoint import load_checkpoint, save_checkpoint
 from cdl.core.format.fp4 import E2M1
-from cdl.core.format.fp8 import UE4M3ExcludeZero
+from cdl.core.format.fp8 import E4M3, UE4M3ExcludeZero
 from cdl.dataset.token_cache import CacheSpec, TokenCache
 from cdl.model.components.linear import QLinear, QLinearMixin
 from cdl.model.components.quant.ccdl.ccdl import CascadedCdlQuantMixin
@@ -41,19 +41,41 @@ from cdl.model.components.quant.ccdl.nvfp4 import (
 )
 from cdl.model.components.quant.cdl import CdlQuantMixin
 from cdl.model.components.quant.ecdl.ecdl import ExtendedCdlQuantMixin
-from cdl.model.components.quant.identity import IdentityQuant
 from cdl.model.components.quant.ecdl.nvfp4 import (
     Nvfp4ExtendedCdlQuantForActivation,
     Nvfp4ExtendedCdlQuantForWeight,
 )
+from cdl.model.components.quant.ecdl.mxfp4 import (
+    Mxfp4ExtendedCdlQuantForActivation,
+    Mxfp4ExtendedCdlQuantForWeight,
+)
+from cdl.model.components.quant.ecdl.mxfp8 import (
+    Mxfp8ExtendedCdlQuantForActivation,
+    Mxfp8ExtendedCdlQuantForWeight,
+)
+from cdl.model.components.quant.identity import IdentityQuant
 from cdl.model.components.quant.ste import SteQuant
 
 logger = logging.getLogger(__name__)
 
 MODEL_DTYPE = torch.bfloat16
 
-ACTIVATION_VARIANTS = ("ste", "nvfp4_ccdl", "nvfp4_ecdl", "none")
-WEIGHT_VARIANTS = ("ste", "nvfp4_ccdl", "nvfp4_ecdl", "none")
+ACTIVATION_VARIANTS = (
+    "ste",
+    "nvfp4_ccdl",
+    "nvfp4_ecdl",
+    "mxfp4_ecdl",
+    "mxfp8_ecdl",
+    "none",
+)
+WEIGHT_VARIANTS = (
+    "ste",
+    "nvfp4_ccdl",
+    "nvfp4_ecdl",
+    "mxfp4_ecdl",
+    "mxfp8_ecdl",
+    "none",
+)
 KERNEL_VARIANTS = ("torch", "triton")
 BACKEND_VARIANTS = ("native", "nvfp4", "mxfp4", "mxfp8")
 
@@ -82,16 +104,16 @@ class ModelConfig:
             "down_proj",
         ]
     )
-    activation: str = "ste"  # "ste", "nvfp4_ccdl", or "nvfp4_ecdl"
-    weight: str = "nvfp4_ccdl"  # "ste", "nvfp4_ccdl", or "nvfp4_ecdl"
+    activation: str = "ste"  # "ste", "*_ccdl", or "*_ecdl"
+    weight: str = "nvfp4_ccdl"  # "ste", "*_ccdl", or "*_ecdl"
     weight_kappa: float = 2.0  # CDL inverse temperature for weight quant
     activation_kappa: float = 2.0  # CDL inverse temperature for activation quant
     # Decoupled backward temperature for activation ECDL; None reuses the
     # forward kappa.
     activation_kappa_bwd: float | None = None
-    theta_topk: int = 5  # CDL window over E2M1 levels (activation quant)
+    theta_topk: int = 5  # CDL window over theta levels (activation quant)
     q_topk: int = 5  # CDL window over UE4M3 levels (activation quant)
-    block_size: int = 16  # nvfp4 requires 16
+    block_size: int = 16  # nvfp4 uses 16, mxfp4/mxfp8 use 32
     kernel: str = "triton"  # "torch" or "triton"
     backend: str = "nvfp4"
     use_lora: bool = True
@@ -103,8 +125,6 @@ class ModelConfig:
     lora_alpha: int = 16
 
     def validate(self, dtype: torch.dtype = MODEL_DTYPE) -> None:
-        if self.block_size != 16:
-            raise ValueError("nvfp4 requires block_size=16")
         if self.kernel not in KERNEL_VARIANTS:
             raise ValueError(f"unknown kernel {self.kernel!r}")
         if self.backend not in BACKEND_VARIANTS:
@@ -113,14 +133,25 @@ class ModelConfig:
             raise ValueError(f"unknown activation variant {self.activation!r}")
         if self.weight not in WEIGHT_VARIANTS:
             raise ValueError(f"unknown weight variant {self.weight!r}")
-        if self.activation == "nvfp4_ccdl":
-            if not 1 <= self.theta_topk <= E2M1(dtype).n:
+
+        variants = tuple(v for v in (self.activation, self.weight) if v != "none")
+        mx = any(v.startswith("mxfp") for v in variants) or self.backend.startswith(
+            "mxfp"
+        )
+        required_block = 32 if mx else 16
+        if self.block_size != required_block:
+            raise ValueError(
+                f"block_size must be {required_block} for this variant/backend combo"
+            )
+
+        if self.activation.endswith(("_ccdl", "_ecdl")):
+            theta_n = E4M3(dtype).n if self.activation.startswith("mxfp8") else E2M1(dtype).n
+            if not 1 <= self.theta_topk <= theta_n:
                 raise ValueError(f"theta_topk {self.theta_topk} out of range")
-            if not 1 <= self.q_topk <= UE4M3ExcludeZero(dtype).n:
+            if self.activation.endswith("_ccdl") and not 1 <= self.q_topk <= (
+                UE4M3ExcludeZero(dtype).n
+            ):
                 raise ValueError(f"q_topk {self.q_topk} out of range")
-        elif self.activation == "nvfp4_ecdl":
-            if not 1 <= self.theta_topk <= E2M1(dtype).n:
-                raise ValueError(f"theta_topk {self.theta_topk} out of range")
 
 
 @dataclass
@@ -146,10 +177,8 @@ class TrainingConfig:
     weight_decay: float = 0.0
     betas: list[float] = field(default_factory=lambda: [0.9, 0.95])
     grad_clip: float = 1.0
-    # Learned quant scales: alpha = CCDL weight global scale (log_alpha),
-    # beta = ECDL global scale (log_beta).
+    # Learned quant scales: alpha = CCDL weight global scale (log_alpha).
     train_alpha: bool = True
-    train_beta: bool = True
     train_kappa: bool = False
     quant_adamw_lr: float = 3e-4  # uniform lr for all quant params (AdamW)
     # Liger fused CE keeps the LM-head logits out of the graph, so bs16 fits
@@ -191,8 +220,13 @@ def load_config(yaml_path: Path) -> Config:
     train = raw.get("train")
     if train is not None:
         # legacy keys no longer in the schema (old run dirs still carry them)
-        for key in ("quant_optimizer", "quant_learning_rate",
-                    "activation_train_alpha", "weight_train_alpha"):
+        for key in (
+            "quant_optimizer",
+            "quant_learning_rate",
+            "activation_train_alpha",
+            "weight_train_alpha",
+            "train_beta",
+        ):
             train.pop(key, None)
     schema = OmegaConf.structured(Config)
     return OmegaConf.to_object(OmegaConf.merge(schema, raw))
@@ -304,11 +338,17 @@ class ModelController(
             setattr(parent, leaf, qlinear)
 
 
+def _ste_simulation(cfg: ModelConfig) -> str:
+    if cfg.backend.startswith("mxfp"):
+        return cfg.backend
+    return "nvfp4"
+
+
 def _build_activation_quant(cfg: ModelConfig, in_features: int, dtype: torch.dtype):
     if cfg.activation == "none":
         return IdentityQuant()
     if cfg.activation == "ste":
-        return SteQuant("nvfp4")
+        return SteQuant(_ste_simulation(cfg))
     if cfg.activation == "nvfp4_ccdl":
         return Nvfp4CascadedCdlQuantForActivation(
             (1, in_features),
@@ -332,6 +372,25 @@ def _build_activation_quant(cfg: ModelConfig, in_features: int, dtype: torch.dty
             kappa_backward=kappa_backward,
             kernel=cfg.kernel,
         )
+    if cfg.activation in ("mxfp4_ecdl", "mxfp8_ecdl"):
+        kappa_backward = (
+            cfg.activation_kappa
+            if cfg.activation_kappa_bwd is None
+            else cfg.activation_kappa_bwd
+        )
+        cls = (
+            Mxfp4ExtendedCdlQuantForActivation
+            if cfg.activation == "mxfp4_ecdl"
+            else Mxfp8ExtendedCdlQuantForActivation
+        )
+        return cls(
+            (1, in_features),
+            cfg.theta_topk,
+            dtype,
+            kappa_forward=cfg.activation_kappa,
+            kappa_backward=kappa_backward,
+            kernel=cfg.kernel,
+        )
     raise ValueError(f"unknown activation variant {cfg.activation!r}")
 
 
@@ -339,7 +398,7 @@ def _build_weight_quant(cfg: ModelConfig, weight: torch.Tensor, dtype: torch.dty
     if cfg.weight == "none":
         return IdentityQuant()
     if cfg.weight == "ste":
-        return SteQuant("nvfp4")
+        return SteQuant(_ste_simulation(cfg))
     if cfg.weight == "nvfp4_ccdl":
         return Nvfp4CascadedCdlQuantForWeight(
             weight,
@@ -349,6 +408,18 @@ def _build_weight_quant(cfg: ModelConfig, weight: torch.Tensor, dtype: torch.dty
         )
     if cfg.weight == "nvfp4_ecdl":
         return Nvfp4ExtendedCdlQuantForWeight(
+            weight,
+            dtype=dtype,
+            kappa_forward=cfg.weight_kappa,
+            kernel=cfg.kernel,
+        )
+    if cfg.weight in ("mxfp4_ecdl", "mxfp8_ecdl"):
+        cls = (
+            Mxfp4ExtendedCdlQuantForWeight
+            if cfg.weight == "mxfp4_ecdl"
+            else Mxfp8ExtendedCdlQuantForWeight
+        )
+        return cls(
             weight,
             dtype=dtype,
             kappa_forward=cfg.weight_kappa,
@@ -494,7 +565,6 @@ def _quant_param_groups(
     )
     extended_groups, extended_params = controller.extended_cdl_get_param_groups(
         cfg.quant_adamw_lr,
-        cfg.train_beta,
         cfg.train_kappa,
     )
     groups = cdl_groups + cascaded_groups + extended_groups
