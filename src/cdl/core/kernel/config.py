@@ -6,14 +6,14 @@ from dataclasses import dataclass
 class KernelConfig:
     """Launch configuration shared by all quantizer kernels."""
 
-    block_chunk: int = 32
-    num_warps: int = 1
+    block_chunk: int = 8
+    num_warps: int = 4
 
 
 def from_env() -> KernelConfig:
     return KernelConfig(
-        block_chunk=int(os.environ.get("CDL_BB", "32")),
-        num_warps=int(os.environ.get("CDL_NUM_WARPS", "1")),
+        block_chunk=int(os.environ.get("CDL_BB", "8")),
+        num_warps=int(os.environ.get("CDL_NUM_WARPS", "4")),
     )
 
 

@@ -6,6 +6,8 @@ from cdl.core.kernel.ecdl.kernel import _ecdl_absmax, _ecdl_bwd, _ecdl_fwd
 from cdl.core.kernel.formats.spec import FormatSpec
 from cdl.core.kernel.layout import flatten_theta
 
+ABSMAX_CONFIG = KernelConfig(block_chunk=32, num_warps=1)
+
 
 def launch_ecdl_fwd(
     theta: torch.Tensor,
@@ -23,14 +25,14 @@ def launch_ecdl_fwd(
     if scale_mode == "nvidia":
         mode = 0
         bamax = torch.empty((m, nb), dtype=torch.float32, device=theta.device)
-        _ecdl_absmax[(m, ngb)](
+        _ecdl_absmax[(m, triton.cdiv(nb, ABSMAX_CONFIG.block_chunk))](
             flat,
             bamax,
             k,
             nb,
             TPB=tpb,
-            BB=config.block_chunk,
-            num_warps=config.num_warps,
+            BB=ABSMAX_CONFIG.block_chunk,
+            num_warps=ABSMAX_CONFIG.num_warps,
         )
         global_absmax = bamax.max().clamp_min(torch.finfo(torch.float32).tiny)
         qmax = fmt.q_max
