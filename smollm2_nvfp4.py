@@ -174,6 +174,7 @@ class DataConfig:
 class TrainingConfig:
     epochs: int = 1
     max_steps: int = 0  # 0 = full epoch; otherwise stop after this many steps
+    grad_accum_steps: int = 1  # micro-batches accumulated per optimizer step
     learning_rate: float = 1e-4  # AdamW eta, base model (decay/no_decay groups)
     warmup_steps: int = 200
     weight_decay: float = 0.0
@@ -187,6 +188,12 @@ class TrainingConfig:
     # without activation checkpointing; leave the escape hatch for larger models.
     gradient_checkpointing: bool = False
     save_every_iters: int = 500
+
+    def validate(self) -> None:
+        if self.grad_accum_steps < 1:
+            raise ValueError(
+                f"grad_accum_steps must be >= 1, got {self.grad_accum_steps}"
+            )
 
 
 @dataclass
@@ -508,7 +515,9 @@ def build_cache(
         num_calib_blocks=cfg.data.num_calib_blocks,
     )
     target_blocks = (
-        cfg.train.max_steps * cfg.data.batch_size if cfg.train.max_steps > 0 else 0
+        cfg.train.max_steps * cfg.data.batch_size * cfg.train.grad_accum_steps
+        if cfg.train.max_steps > 0
+        else 0
     )
     return TokenCache.open(
         spec,
@@ -533,7 +542,7 @@ def build_loaders(
 
 
 # ---------------------------------------------------------------------------
-# optimizers
+# optimizer
 # ---------------------------------------------------------------------------
 
 
@@ -555,33 +564,13 @@ def _quant_param_groups(
     return groups, param_ids
 
 
-def _build_quant_optimizer(
-    groups: list[dict], cfg: TrainingConfig
-) -> torch.optim.Optimizer | None:
-    if not groups:  # STE-only variants have no CDL params at all
-        return None
-    flattened = [
-        {
-            "params": group["params"],
-            "lr": cfg.quant_adamw_lr,
-            "weight_decay": 0.0,
-        }
-        for group in groups
-    ]
-    return torch.optim.AdamW(flattened, betas=tuple(cfg.betas))
-
-
-def build_optimizers(
+def build_optimizer(
     controller: ModelController, model: nn.Module, cfg: TrainingConfig
-) -> tuple[
-    dict[str, torch.optim.Optimizer],
-    dict[str, torch.optim.lr_scheduler.LambdaLR],
-]:
-    """Quantizer scales (q/alpha/kappa) take SGD with momentum at their
-    per-bucket scaled lrs; all remaining parameters stay on AdamW. Both get
-    the same linear warmup, stepped once per training step."""
+) -> tuple[torch.optim.Optimizer, torch.optim.lr_scheduler.LambdaLR]:
+    """Single AdamW optimizer across base/LoRA and quantizer parameters, paired
+    with one linear-warmup LambdaLR scheduler stepped once per optimizer step."""
     quant_groups, quant_param_ids = _quant_param_groups(controller, cfg)
-    quant_optimizer = _build_quant_optimizer(quant_groups, cfg)
+    quant_params = [p for group in quant_groups for p in group["params"]]
 
     decay, no_decay = [], []
     for p in model.parameters():
@@ -589,44 +578,20 @@ def build_optimizers(
             continue
         (no_decay if p.ndim <= 1 else decay).append(p)
 
-    adamw_groups = [
-        {
-            "params": decay,
-            "lr": cfg.learning_rate,
-            "weight_decay": cfg.weight_decay,
-        },
+    param_groups = [
+        {"params": decay, "lr": cfg.learning_rate, "weight_decay": cfg.weight_decay},
         {"params": no_decay, "lr": cfg.learning_rate, "weight_decay": 0.0},
+        {"params": quant_params, "lr": cfg.quant_adamw_lr, "weight_decay": 0.0},
     ]
-    adamw_groups = [g for g in adamw_groups if g["params"]]
-    adamw_optimizer = (
-        torch.optim.AdamW(adamw_groups, betas=tuple(cfg.betas))
-        if adamw_groups
-        else None
+    param_groups = [g for g in param_groups if g["params"]]
+    if not param_groups:
+        raise ValueError("no trainable parameters")
+
+    optimizer = torch.optim.AdamW(param_groups, betas=tuple(cfg.betas))
+    lr_scheduler = torch.optim.lr_scheduler.LambdaLR(
+        optimizer, lambda step: min(1.0, (step + 1) / cfg.warmup_steps)
     )
-
-    def warmup(step: int) -> float:
-        return min(1.0, (step + 1) / cfg.warmup_steps)
-
-    optimizers: dict[str, torch.optim.Optimizer] = {}
-    if quant_optimizer is not None:
-        optimizers["quant"] = quant_optimizer
-    if adamw_optimizer is not None:
-        optimizers["adamw"] = adamw_optimizer
-    lr_schedulers = {
-        name: torch.optim.lr_scheduler.LambdaLR(opt, warmup)
-        for name, opt in optimizers.items()
-    }
-    return optimizers, lr_schedulers
-
-
-def optimizer_params(optimizer: torch.optim.Optimizer | None) -> list[nn.Parameter]:
-    if optimizer is None:
-        return []
-    return [p for group in optimizer.param_groups for p in group["params"]]
-
-
-def current_lr(optimizer: torch.optim.Optimizer) -> float:
-    return max(group["lr"] for group in optimizer.param_groups)
+    return optimizer, lr_scheduler
 
 
 # ---------------------------------------------------------------------------
@@ -813,20 +778,16 @@ def compile_model(model: nn.Module) -> nn.Module:
 def log_train_step(
     writer: SummaryWriter,
     controller: ModelController,
-    optimizers: dict[str, torch.optim.Optimizer],
+    optimizer: torch.optim.Optimizer,
     device: torch.device,
     *,
     step: int,
     loss: torch.Tensor,
-    base_gnorm: torch.Tensor,
-    quant_gnorm: torch.Tensor | None,
+    grad_norm: torch.Tensor,
 ) -> None:
     writer.add_scalar("train/loss", loss.item(), step)
-    if "adamw" in optimizers:
-        writer.add_scalar("train/lr", current_lr(optimizers["adamw"]), step)
-    writer.add_scalar("train/grad_norm", base_gnorm.item(), step)
-    if quant_gnorm is not None:
-        writer.add_scalar("train/quant_grad_norm", quant_gnorm.item(), step)
+    writer.add_scalar("train/lr", optimizer.param_groups[0]["lr"], step)
+    writer.add_scalar("train/grad_norm", grad_norm.item(), step)
     for key, value in collect_quant_stats(controller).items():
         writer.add_scalar(f"quant/{key}", value, step)
     if device.type == "cuda":
@@ -840,31 +801,37 @@ def log_train_step(
 
 def run_training(
     controller: ModelController,
-    model: nn.Module,
     run_model: nn.Module,
     train_loader: DataLoader,
     test_loader: DataLoader,
-    optimizers: dict[str, torch.optim.Optimizer],
-    lr_schedulers: dict[str, torch.optim.lr_scheduler.LambdaLR],
+    optimizer: torch.optim.Optimizer,
+    lr_scheduler: torch.optim.lr_scheduler.LambdaLR,
     writer: SummaryWriter,
     device: torch.device,
     cfg: Config,
     output_dir: Path,
     start_step: int,
 ) -> int:
-    quant_trainable = optimizer_params(optimizers.get("quant"))
-    quant_param_ids = {id(p) for p in quant_trainable}
-    base_trainable = [
-        p
-        for p in model.parameters()
-        if p.requires_grad and id(p) not in quant_param_ids
+    trainable = [
+        p for group in optimizer.param_groups for p in group["params"]
     ]
 
     global_step = start_step
-    steps_per_epoch = len(train_loader)
+    grad_accum = cfg.train.grad_accum_steps
+    if grad_accum > 1:
+        # Keep persistent .grad buffers so AccumulateGrad never aliases a
+        # cudagraph_trees pool tensor across micro-batches.
+        for p in trainable:
+            if p.grad is None:
+                p.grad = torch.zeros_like(p)
+    batches_per_epoch = len(train_loader)
+    steps_per_epoch = math.ceil(batches_per_epoch / grad_accum)
     start_epoch = min(global_step // steps_per_epoch, cfg.train.epochs - 1)
-    resume_skip = max(global_step - start_epoch * steps_per_epoch, 0)
-    logger.info(f"training started from epoch {start_epoch}")
+    resume_skip = max(global_step - start_epoch * steps_per_epoch, 0) * grad_accum
+    logger.info(
+        f"training started from epoch {start_epoch} "
+        f"(batch_size={cfg.data.batch_size}, grad_accum_steps={grad_accum})"
+    )
 
     last_saved = -1
     epoch = start_epoch
@@ -875,36 +842,41 @@ def run_training(
         batches = (
             islice(train_loader, resume_skip, None) if resume_skip else train_loader
         )
-        for input_ids in tqdm.tqdm(
-            batches,
-            desc=f"epoch {epoch}",
-            initial=resume_skip,
-            total=steps_per_epoch,
+        accum_count = 0
+        window_steps = grad_accum
+        accum_loss: torch.Tensor | None = None
+        for batch_idx, input_ids in enumerate(
+            tqdm.tqdm(
+                batches,
+                desc=f"epoch {epoch}",
+                initial=resume_skip,
+                total=batches_per_epoch,
+            ),
+            start=resume_skip,
         ):
+            if accum_count == 0:
+                optimizer.zero_grad(set_to_none=grad_accum == 1)
+                window_steps = min(grad_accum, batches_per_epoch - batch_idx)
+                accum_loss = None
+
             input_ids = input_ids.to(device)
             torch.compiler.cudagraph_mark_step_begin()
             loss = lm_loss(run_model, input_ids)
-
-            for opt in optimizers.values():
-                opt.zero_grad(set_to_none=True)
-            loss.backward()
-
-            base_gnorm = (
-                torch.nn.utils.clip_grad_norm_(base_trainable, cfg.train.grad_clip)
-                if base_trainable
-                else torch.zeros((), device=device)
+            step_loss = (
+                loss.detach() / window_steps if window_steps > 1 else loss.detach()
             )
-            quant_gnorm = (
-                torch.nn.utils.clip_grad_norm_(quant_trainable, cfg.train.grad_clip)
-                if quant_trainable
-                else None
-            )
+            accum_loss = step_loss if accum_loss is None else accum_loss + step_loss
+            (loss / window_steps if window_steps > 1 else loss).backward()
 
-            for opt in optimizers.values():
-                opt.step()
+            accum_count += 1
+            if accum_count < window_steps:
+                continue
+            accum_count = 0
+
+            grad_norm = torch.nn.utils.clip_grad_norm_(trainable, cfg.train.grad_clip)
+            optimizer.step()
             global_step += 1
-            for scheduler in lr_schedulers.values():
-                scheduler.step()
+            lr_scheduler.step()
 
             if (
                 cfg.logging.log_every_steps > 0
@@ -913,12 +885,11 @@ def run_training(
                 log_train_step(
                     writer,
                     controller,
-                    optimizers,
+                    optimizer,
                     device,
                     step=global_step,
-                    loss=loss,
-                    base_gnorm=base_gnorm,
-                    quant_gnorm=quant_gnorm,
+                    loss=accum_loss,
+                    grad_norm=grad_norm,
                 )
 
             if (
@@ -928,8 +899,8 @@ def run_training(
                 save_checkpoint(
                     output_dir / "last.ckpt",
                     controller,
-                    optimizers,
-                    lr_schedulers,
+                    optimizer,
+                    lr_scheduler,
                     epoch,
                     global_step,
                 )
@@ -962,8 +933,8 @@ def run_training(
         save_checkpoint(
             output_dir / "last.ckpt",
             controller,
-            optimizers,
-            lr_schedulers,
+            optimizer,
+            lr_scheduler,
             min(epoch, cfg.train.epochs - 1),
             global_step,
         )
@@ -994,6 +965,7 @@ def training_pipeline() -> None:
     device = resolve_device(args.device)
     output_dir, cfg = resolve_settings(args)
     cfg.model.validate()
+    cfg.train.validate()
     seed_all(args.seed)
 
     model = AutoModelForCausalLM.from_pretrained(cfg.model.model_id, dtype=MODEL_DTYPE)
@@ -1020,7 +992,7 @@ def training_pipeline() -> None:
         model.enable_input_require_grads()
 
     init_activation_q(controller, calib_blocks, device, cfg.model.backend)
-    optimizers, lr_schedulers = build_optimizers(controller, model, cfg.train)
+    optimizer, lr_scheduler = build_optimizer(controller, model, cfg.train)
     log_trainable_census(controller, model)
 
     start_step = 0
@@ -1028,19 +1000,18 @@ def training_pipeline() -> None:
         # The epoch is derived from global_step below; the stored epoch field
         # has epoch-boundary semantics (+1 on load) that mid-epoch saves break.
         _, start_step = load_checkpoint(
-            args.resume, controller, optimizers, lr_schedulers, device
+            args.resume, controller, optimizer, lr_scheduler, device
         )
 
     writer = SummaryWriter(log_dir=str(output_dir / "tensorboard"))
     run_model = compile_model(controller.model) if args.compile else controller.model
     run_training(
         controller,
-        model,
         run_model,
         train_loader,
         test_loader,
-        optimizers,
-        lr_schedulers,
+        optimizer,
+        lr_scheduler,
         writer,
         device,
         cfg,
