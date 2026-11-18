@@ -1,10 +1,13 @@
+from dataclasses import dataclass
 from typing import Literal
 
 import torch
 
+from cdl.api.quant import QTensor
 from cdl.core.format.fp4 import E2M1
 from cdl.core.format.fp8 import UE4M3ExcludeZero
 from cdl.core.kernel import nvfp4_ecdl_quant
+from cdl.core.kernel.dequant import nvfp4_dequant
 from cdl.model.components.quant.ecdl.ecdl import (
     ExtendedCdlQuantForActivation,
     ExtendedCdlQuantForWeight,
@@ -19,6 +22,39 @@ class Nvfp4ExtendedCdlTensor(ExtendedCdlTensor):
         scale = self.q_format.pack(self.q_indices).flatten(-2)
         alpha = self.alpha.float().reshape(1)
         return packed, scale, alpha
+
+
+@dataclass
+class PackedNvfp4ExtendedCdlTensor(QTensor):
+    packed_theta: torch.Tensor
+    packed_scale: torch.Tensor
+    alpha: torch.Tensor
+    grad_proxy: torch.Tensor | None
+    k_dim: int
+    dtype: torch.dtype
+
+    def dequantize(self) -> torch.Tensor:
+        packed, scale, alpha = self.nvfp4()
+        lead = packed.shape[:-1]
+        out = nvfp4_dequant(
+            packed.reshape(-1, packed.shape[-1]),
+            scale.reshape(-1, scale.shape[-1]),
+            alpha,
+        )
+        return out.reshape(*lead, -1)[..., : self.k_dim].to(self.dtype)
+
+    def nvfp4(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        assert self.packed_theta.shape[-1] == 8
+        return (
+            self.packed_theta.flatten(-2),
+            self.packed_scale.flatten(-2),
+            self.alpha.float().reshape(1),
+        )
+
+    def proxy(self) -> torch.Tensor | None:
+        if self.grad_proxy is None:
+            return None
+        return self.grad_proxy.flatten(-2)[..., : self.k_dim]
 
 
 class Nvfp4ExtendedCdlQuantForActivation(ExtendedCdlQuantForActivation):
@@ -49,17 +85,25 @@ class Nvfp4ExtendedCdlQuantForActivation(ExtendedCdlQuantForActivation):
                 "kernel_seed", torch.zeros((), dtype=torch.int64), persistent=False
             )
 
-    def training_forward(
-        self, theta: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    def training_forward(self, theta: torch.Tensor) -> QTensor:
         if self.kernel == "torch":
             return super().training_forward(theta)
-        return nvfp4_ecdl_quant(
+
+        packed_theta, packed_scale, grad_proxy, global_scale = nvfp4_ecdl_quant(
             theta,
             self.kappa,
             self.kappa_backward,
             self.kernel_seed,
             self.theta_topk,
+        )
+
+        return PackedNvfp4ExtendedCdlTensor(
+            packed_theta=packed_theta,
+            packed_scale=packed_scale,
+            alpha=global_scale.detach(),
+            grad_proxy=grad_proxy,
+            k_dim=self.k_dim,
+            dtype=self.theta_format.level.dtype,
         )
 
 
@@ -87,15 +131,23 @@ class Nvfp4ExtendedCdlQuantForWeight(ExtendedCdlQuantForWeight):
                 "kernel_seed", torch.zeros((), dtype=torch.int64), persistent=False
             )
 
-    def training_forward(
-        self, theta: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    def training_forward(self, theta: torch.Tensor) -> QTensor:
         if self.kernel == "torch":
             return super().training_forward(theta)
-        return nvfp4_ecdl_quant(
+
+        packed_theta, packed_scale, grad_proxy, global_scale = nvfp4_ecdl_quant(
             theta,
             self.kappa,
             self.kappa_backward,
             self.kernel_seed,
             self.theta_topk,
+        )
+
+        return PackedNvfp4ExtendedCdlTensor(
+            packed_theta=packed_theta,
+            packed_scale=packed_scale,
+            alpha=global_scale.detach(),
+            grad_proxy=grad_proxy,
+            k_dim=self.k_dim,
+            dtype=self.theta_format.level.dtype,
         )

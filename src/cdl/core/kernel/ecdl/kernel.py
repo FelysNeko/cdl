@@ -41,9 +41,8 @@ def _ecdl_fwd(
     kt_ptr,
     al_ptr,
     seed_ptr,
-    ti_ptr,
-    qi_ptr,
-    s_ptr,
+    pt_ptr,
+    ps_ptr,
     K,
     NB,
     q_ordinal,
@@ -98,21 +97,35 @@ def _ecdl_fwd(
         q_hat = tl.load(ql_ptr + q_indices, mask=bmask, other=0.0).to(tl.float32)
         s = q_hat * al
 
-    tl.store(s_ptr + r * NB + offs_b, s, mask=bmask)
-    tl.store(qi_ptr + r * NB + offs_b, q_indices.to(tl.uint8), mask=bmask)
+    if MODE == 0:
+        tl.store(ps_ptr + r * NB + offs_b, (q_indices + 1).to(tl.uint8), mask=bmask)
+    else:
+        tl.store(ps_ptr + r * NB + offs_b, q_indices.to(tl.uint8), mask=bmask)
 
     v = raw.to(tl.float32) / s[:, None]
     seed = tl.load(seed_ptr).to(tl.int32)
     u_t = tl.rand(seed, r * K + idx)
     theta_indices = cdl_sample(v, thl_ptr, thg_ptr, kt, u_t, TN, TOPK, t_ordinal)
-    tl.store(ti_ptr + r * K + idx, theta_indices.to(tl.int16), mask=lmask)
+    if TN == 16:
+        code = tl.where(theta_indices < 8, 15 - theta_indices, theta_indices - 8)
+        lo, hi = tl.split(tl.reshape(code, (BB, TPB // 2, 2)))
+        packed = (lo | (hi << 4)).to(tl.uint8)
+        pidx = (offs_b[:, None] * (TPB // 2) + tl.arange(0, TPB // 2)[None, :]).to(
+            tl.int32
+        )
+        tl.store(pt_ptr + r * (K // 2) + pidx, packed, mask=lmask)
+    else:
+        packed = tl.where(
+            theta_indices < 127, 254 - theta_indices, theta_indices - 127
+        ).to(tl.uint8)
+        tl.store(pt_ptr + r * K + idx, packed, mask=lmask)
 
 
 @triton.jit
 def _ecdl_bwd(
     g_ptr,
     th_ptr,
-    qi_ptr,
+    ps_ptr,
     ql_ptr,
     thl_ptr,
     thg_ptr,
@@ -128,6 +141,8 @@ def _ecdl_bwd(
     TPB: tl.constexpr,
     TN: tl.constexpr,
     BB: tl.constexpr,
+    MODE: tl.constexpr,
+    COMPUTE_SCALARS: tl.constexpr,
 ):
     r = tl.program_id(0)
     gb = tl.program_id(1)
@@ -138,7 +153,9 @@ def _ecdl_bwd(
     offs_b = b0 + tl.arange(0, BB)
     bmask = offs_b < NB
 
-    qi = tl.load(qi_ptr + r * NB + offs_b, mask=bmask, other=0).to(tl.int32)
+    qi = tl.load(ps_ptr + r * NB + offs_b, mask=bmask, other=0).to(tl.int32)
+    if MODE == 0:
+        qi = tl.maximum(qi - 1, 0)
     q_hat = tl.load(ql_ptr + qi, mask=bmask, other=0.0).to(tl.float32)
     # Masked lanes use s = 1 so v stays finite; their q_hat is 0 so the
     # zero gradient cannot poison the d(alpha) partial with 0 * inf NaNs.
@@ -156,12 +173,13 @@ def _ecdl_bwd(
         v, thl_ptr, thg_ptr, kt, TN, TOPK, t_ordinal
     )
     dth = g * dth_coeff
-    ds = g * ds_coeff
     tl.store(dth_ptr + r * K + idx, dth.to(dth_ptr.dtype.element_ty), mask=lmask)
 
-    dkt = tl.sum(tl.sum(g * s[:, None] * dk_term, 1), 0)
-    dal = tl.sum(tl.sum(ds * q_hat[:, None], 1), 0)
+    if COMPUTE_SCALARS:
+        ds = g * ds_coeff
+        dkt = tl.sum(tl.sum(g * s[:, None] * dk_term, 1), 0)
+        dal = tl.sum(tl.sum(ds * q_hat[:, None], 1), 0)
 
-    pbase = (r * tl.cdiv(NB, BB) + gb) * 2
-    tl.store(part_ptr + pbase + 0, dkt)
-    tl.store(part_ptr + pbase + 1, dal)
+        pbase = (r * tl.cdiv(NB, BB) + gb) * 2
+        tl.store(part_ptr + pbase + 0, dkt)
+        tl.store(part_ptr + pbase + 1, dal)

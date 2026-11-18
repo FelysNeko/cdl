@@ -103,9 +103,24 @@ class ExtendedCdlQuant(Quant):
     def kappa(self) -> torch.Tensor:
         return self.log_kappa.exp()
 
-    def training_forward(
-        self, theta: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    def eval_forward(self, theta: torch.Tensor) -> QTensor:
+        theta_indices, q_indices, global_scale = extended_nearest_round(
+            theta,
+            self.theta_format,
+            self.q_format,
+            self.scale_mode,
+        )
+        return self.tensor(
+            self.theta_format,
+            theta_indices,
+            self.q_format,
+            q_indices,
+            global_scale.detach(),
+            None,
+            self.k_dim,
+        )
+
+    def training_forward(self, theta: torch.Tensor) -> QTensor:
         theta_indices, q_indices, grad_proxy, global_scale, _ = (
             extended_cdl_topk_forward(
                 theta,
@@ -118,7 +133,15 @@ class ExtendedCdlQuant(Quant):
                 self.scale_mode,
             )
         )
-        return theta_indices, q_indices, grad_proxy, global_scale
+        return self.tensor(
+            self.theta_format,
+            theta_indices,
+            self.q_format,
+            q_indices,
+            global_scale.detach(),
+            grad_proxy,
+            self.k_dim,
+        )
 
     def forward(self, x: torch.Tensor) -> QTensor:
         if self.bypassing:
@@ -137,27 +160,9 @@ class ExtendedCdlQuant(Quant):
         theta, _ = group_tensor_into_blocks(x, self.block_size)
 
         if not self.training:
-            theta_indices, q_indices, global_scale = extended_nearest_round(
-                theta,
-                self.theta_format,
-                self.q_format,
-                self.scale_mode,
-            )
-            grad_proxy = None
-        else:
-            theta_indices, q_indices, grad_proxy, global_scale = self.training_forward(
-                theta
-            )
+            return self.eval_forward(theta)
 
-        return self.tensor(
-            self.theta_format,
-            theta_indices,
-            self.q_format,
-            q_indices,
-            global_scale.detach(),
-            grad_proxy,
-            self.k_dim,
-        )
+        return self.training_forward(theta)
 
 
 class ExtendedCdlQuantForActivation(ExtendedCdlQuant):
