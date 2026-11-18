@@ -60,13 +60,12 @@ class SteTensor(QTensor):
         return packed, scale, ones
 
     @torch.no_grad()
-    def mxfp8(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def mxfp8(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
         flat = self.get_padded_theta(32).flatten(0, -2)
         packed, scale = mxfp8_quantize(flat)
         packed = packed.view(torch.float8_e4m3fn).reshape(*self.leading_shape, -1)
         scale = scale.reshape(*self.leading_shape, -1)
-        ones = torch.ones(1, device=flat.device, dtype=torch.float32)
-        return packed, scale, ones
+        return packed, scale, None
 
     def dequantize(self) -> torch.Tensor:
         if self.simulation is None:

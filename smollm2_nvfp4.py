@@ -145,7 +145,9 @@ class ModelConfig:
             )
 
         if self.activation.endswith(("_ccdl", "_ecdl")):
-            theta_n = E4M3(dtype).n if self.activation.startswith("mxfp8") else E2M1(dtype).n
+            theta_n = (
+                E4M3(dtype).n if self.activation.startswith("mxfp8") else E2M1(dtype).n
+            )
             if not 1 <= self.theta_topk <= theta_n:
                 raise ValueError(f"theta_topk {self.theta_topk} out of range")
             if self.activation.endswith("_ccdl") and not 1 <= self.q_topk <= (

@@ -12,7 +12,7 @@ class QTensor(abc.ABC):
     def mxfp4(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         raise NotImplementedError()
 
-    def mxfp8(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def mxfp8(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
         raise NotImplementedError()
 
     @abc.abstractmethod

@@ -38,9 +38,17 @@ class MatMul(torch.autograd.Function):
             w_theta.T,
             swizzle_scale_factors(x_q).flatten(),
             swizzle_scale_factors(w_q).flatten(),
-        )
-        out = out[:, :n]
-        return (out.float() * (x_alpha * w_alpha)).to(torch.bfloat16)
+        )[:, :n]
+
+        if x_alpha is None and w_alpha is None:
+            return out
+        if x_alpha is None:
+            scale = w_alpha
+        elif w_alpha is None:
+            scale = x_alpha
+        else:
+            scale = x_alpha * w_alpha
+        return (out.float() * scale).to(torch.bfloat16)
 
     @staticmethod
     def backward(

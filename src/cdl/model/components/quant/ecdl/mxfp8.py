@@ -12,12 +12,11 @@ from cdl.model.components.quant.ecdl.ecdl import (
 
 
 class Mxfp8ExtendedCdlTensor(ExtendedCdlTensor):
-    def mxfp8(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def mxfp8(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
         assert self.theta_indices.shape[-1] == 32
         packed = self.theta_format.pack(self.theta_indices).flatten(-2)
         scale = self.q_format.pack(self.q_indices).flatten(-2)
-        alpha = self.alpha.float().reshape(1)
-        return packed, scale, alpha
+        return packed, scale, None
 
 
 class Mxfp8ExtendedCdlQuantForActivation(ExtendedCdlQuantForActivation):

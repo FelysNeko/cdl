@@ -65,6 +65,7 @@ def _mxfp8_dequant_kernel(
     NB,
     val_ptr,
     sc_ptr,
+    HAS_ALPHA: tl.constexpr,
     BLOCK_K: tl.constexpr,
 ):
     row = tl.program_id(0)
@@ -75,8 +76,10 @@ def _mxfp8_dequant_kernel(
     val = tl.load(val_ptr + b)
     sb = tl.load(scale_ptr + row * NB + offs // 32, mask=kmask, other=0)
     sc = tl.load(sc_ptr + sb)
-    alpha = tl.load(alpha_ptr)
-    tl.store(out_ptr + row * K + offs, (val * sc * alpha).to(tl.bfloat16), mask=kmask)
+    out = val * sc
+    if HAS_ALPHA:
+        out = out * tl.load(alpha_ptr)
+    tl.store(out_ptr + row * K + offs, out.to(tl.bfloat16), mask=kmask)
 
 
 def _fp4_dequant(
@@ -129,22 +132,24 @@ def mxfp4_dequant(
 def mxfp8_dequant(
     packed: torch.Tensor,
     scale: torch.Tensor,
-    alpha: torch.Tensor,
+    alpha: torch.Tensor | None = None,
     block_k: int = 1024,
 ) -> torch.Tensor:
     rows, k = packed.shape
     out = torch.empty((rows, k), dtype=torch.bfloat16, device=packed.device)
     if rows == 0 or k == 0:
         return out
+    has_alpha = alpha is not None
     _mxfp8_dequant_kernel[(rows, triton.cdiv(k, block_k))](
         packed.view(torch.uint8),
         scale,
-        alpha,
+        alpha if has_alpha else scale,
         out,
         k,
         k // 32,
         _e4m3_lut(packed.device),
         _e8m0_lut(packed.device),
+        HAS_ALPHA=has_alpha,
         BLOCK_K=block_k,
         num_warps=4,
     )
