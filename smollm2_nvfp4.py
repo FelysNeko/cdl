@@ -742,12 +742,13 @@ def evaluate(model: nn.Module, loader: DataLoader, device: torch.device) -> floa
     was_training = model.training
     model.eval()
     total_loss, total_tokens = 0.0, 0
-    for input_ids in loader:
-        input_ids = input_ids.to(device)
-        loss = lm_loss(model, input_ids)
-        tokens = input_ids.numel() - input_ids.shape[0]
-        total_loss += loss.item() * tokens
-        total_tokens += tokens
+    with torch.compiler.set_stance("force_eager"):
+        for input_ids in loader:
+            input_ids = input_ids.to(device)
+            loss = lm_loss(model, input_ids)
+            tokens = input_ids.numel() - input_ids.shape[0]
+            total_loss += loss.item() * tokens
+            total_tokens += tokens
     model.train(was_training)
     return math.exp(total_loss / total_tokens)
 
@@ -779,10 +780,34 @@ def run_eval(
 
 
 def compile_model(model: nn.Module) -> nn.Module:
-    logger.info("torch.compile enabled")
     torch._dynamo.config.cache_size_limit = 128
-    torch._inductor.config.triton.cudagraph_trees = False
-    return torch.compile(model, dynamic=False, mode="reduce-overhead")
+
+    # Small eager warmup (fwd+bwd) populates third-party workspaces and format
+    # caches before cudagraph capture, without matching training batch/seqlen.
+    device = next(model.parameters()).device
+    if device.type == "cuda":
+        was_training = model.training
+        model.train()
+        dummy_ids = torch.zeros((1, 128), dtype=torch.long, device=device)
+        loss = lm_loss(model, dummy_ids)
+        if loss.requires_grad:
+            loss.backward()
+        model.zero_grad(set_to_none=True)
+        for name, buf in model.named_buffers():
+            if name.endswith("kernel_seed"):
+                buf.zero_()
+        model.train(was_training)
+        torch.cuda.synchronize(device)
+
+    layers = model.model.layers
+    use_ckpt = getattr(model, "is_gradient_checkpointing", False)
+    mode = "default" if use_ckpt else "reduce-overhead"
+    for layer in layers:
+        layer.compile(dynamic=False, mode=mode)
+    logger.info(
+        f"torch.compile enabled on {len(layers)} decoder layers (mode={mode})"
+    )
+    return model
 
 
 def log_train_step(
@@ -857,6 +882,7 @@ def run_training(
             total=steps_per_epoch,
         ):
             input_ids = input_ids.to(device)
+            torch.compiler.cudagraph_mark_step_begin()
             loss = lm_loss(run_model, input_ids)
 
             for opt in optimizers.values():

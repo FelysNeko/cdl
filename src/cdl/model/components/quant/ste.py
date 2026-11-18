@@ -36,36 +36,36 @@ class SteTensor(QTensor):
             return F.pad(self.theta, (0, pad))
         return self.theta
 
-    @torch.no_grad()
     def nvfp4(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        flat = self.get_padded_theta(16).flatten(0, -2)
-        amax = flat.float().abs().amax()
-        global_scale = torch.where(
-            amax > 0,
-            amax.new_full((), 448.0 * 6.0) / amax,
-            amax.new_full((), torch.finfo(torch.float32).max),
-        ).reshape(1)
-        packed, scale = nvfp4_quantize(flat, global_scale)
-        packed = packed.reshape(*self.leading_shape, -1)
-        scale = scale.reshape(*self.leading_shape, -1)
-        return packed, scale, (1.0 / global_scale).float()
+        with torch.no_grad():
+            flat = self.get_padded_theta(16).flatten(0, -2)
+            amax = flat.float().abs().amax()
+            global_scale = torch.where(
+                amax > 0,
+                amax.new_full((), 448.0 * 6.0) / amax,
+                amax.new_full((), torch.finfo(torch.float32).max),
+            ).reshape(1)
+            packed, scale = nvfp4_quantize(flat, global_scale)
+            packed = packed.reshape(*self.leading_shape, -1)
+            scale = scale.reshape(*self.leading_shape, -1)
+            return packed, scale, (1.0 / global_scale).float()
 
-    @torch.no_grad()
     def mxfp4(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        flat = self.get_padded_theta(32).flatten(0, -2)
-        packed, scale = mxfp4_quantize(flat)
-        packed = packed.reshape(*self.leading_shape, -1)
-        scale = scale.reshape(*self.leading_shape, -1)
-        ones = torch.ones(1, device=flat.device, dtype=torch.float32)
-        return packed, scale, ones
+        with torch.no_grad():
+            flat = self.get_padded_theta(32).flatten(0, -2)
+            packed, scale = mxfp4_quantize(flat)
+            packed = packed.reshape(*self.leading_shape, -1)
+            scale = scale.reshape(*self.leading_shape, -1)
+            ones = torch.ones(1, device=flat.device, dtype=torch.float32)
+            return packed, scale, ones
 
-    @torch.no_grad()
     def mxfp8(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
-        flat = self.get_padded_theta(32).flatten(0, -2)
-        packed, scale = mxfp8_quantize(flat)
-        packed = packed.view(torch.float8_e4m3fn).reshape(*self.leading_shape, -1)
-        scale = scale.reshape(*self.leading_shape, -1)
-        return packed, scale, None
+        with torch.no_grad():
+            flat = self.get_padded_theta(32).flatten(0, -2)
+            packed, scale = mxfp8_quantize(flat)
+            packed = packed.view(torch.float8_e4m3fn).reshape(*self.leading_shape, -1)
+            scale = scale.reshape(*self.leading_shape, -1)
+            return packed, scale, None
 
     def dequantize(self) -> torch.Tensor:
         if self.simulation is None:
