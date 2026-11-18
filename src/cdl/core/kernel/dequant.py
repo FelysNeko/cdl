@@ -29,7 +29,7 @@ def _e4m3_lut(device: torch.device) -> torch.Tensor:
 
 
 @triton.jit
-def _mxfp4_dequant_kernel(
+def _fp4_dequant_kernel(
     packed_ptr,
     scale_ptr,
     alpha_ptr,
@@ -38,6 +38,7 @@ def _mxfp4_dequant_kernel(
     NB,
     mag_ptr,
     sc_ptr,
+    GROUP_SIZE: tl.constexpr,
     BLOCK_K: tl.constexpr,
 ):
     row = tl.program_id(0)
@@ -48,7 +49,7 @@ def _mxfp4_dequant_kernel(
     nib = (nbytes >> ((offs % 2) * 4)) & 0xF
     mag = tl.load(mag_ptr + (nib & 7))
     val = mag * tl.where(nib >= 8, -1.0, 1.0)
-    sb = tl.load(scale_ptr + row * NB + offs // 32, mask=kmask, other=0)
+    sb = tl.load(scale_ptr + row * NB + offs // GROUP_SIZE, mask=kmask, other=0)
     sc = tl.load(sc_ptr + sb)
     alpha = tl.load(alpha_ptr)
     tl.store(out_ptr + row * K + offs, (val * sc * alpha).to(tl.bfloat16), mask=kmask)
@@ -78,10 +79,12 @@ def _mxfp8_dequant_kernel(
     tl.store(out_ptr + row * K + offs, (val * sc * alpha).to(tl.bfloat16), mask=kmask)
 
 
-def mxfp4_dequant(
+def _fp4_dequant(
     packed: torch.Tensor,
     scale: torch.Tensor,
     alpha: torch.Tensor,
+    group_size: int,
+    sc_lut: torch.Tensor,
     block_k: int = 1024,
 ) -> torch.Tensor:
     rows, half_k = packed.shape
@@ -89,19 +92,38 @@ def mxfp4_dequant(
     out = torch.empty((rows, k), dtype=torch.bfloat16, device=packed.device)
     if rows == 0 or k == 0:
         return out
-    _mxfp4_dequant_kernel[(rows, triton.cdiv(k, block_k))](
+    _fp4_dequant_kernel[(rows, triton.cdiv(k, block_k))](
         packed,
         scale,
         alpha,
         out,
         k,
-        k // 32,
+        k // group_size,
         _e2m1_mag_lut(packed.device),
-        _e8m0_lut(packed.device),
+        sc_lut,
+        GROUP_SIZE=group_size,
         BLOCK_K=block_k,
         num_warps=4,
     )
     return out
+
+
+def nvfp4_dequant(
+    packed: torch.Tensor,
+    scale: torch.Tensor,
+    alpha: torch.Tensor,
+    block_k: int = 1024,
+) -> torch.Tensor:
+    return _fp4_dequant(packed, scale, alpha, 16, _e4m3_lut(packed.device), block_k)
+
+
+def mxfp4_dequant(
+    packed: torch.Tensor,
+    scale: torch.Tensor,
+    alpha: torch.Tensor,
+    block_k: int = 1024,
+) -> torch.Tensor:
+    return _fp4_dequant(packed, scale, alpha, 32, _e8m0_lut(packed.device), block_k)
 
 
 def mxfp8_dequant(

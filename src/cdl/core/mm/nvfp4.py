@@ -1,8 +1,9 @@
 import torch
 
 from cdl.api.quant import QTensor
+from cdl.core.kernel.dequant import nvfp4_dequant
 from cdl.core.mm.swizzle import expand_rows, pad_k, pad_n, swizzle_scale_factors
-from cdl.model.wrapper.flashinfer import mm_fp4, nvfp4_dequantize
+from cdl.model.wrapper.flashinfer import mm_fp4
 
 
 def matmul(x: QTensor, w: QTensor) -> torch.Tensor:
@@ -52,11 +53,11 @@ class MatMul(torch.autograd.Function):
         dx = dw = None
 
         if ctx.x_k is not None:
-            w = nvfp4_dequantize(w_theta, w_q, w_alpha)
+            w = nvfp4_dequant(w_theta, w_q, w_alpha)
             dx = grad_output @ w[:, : ctx.x_k]
 
         if ctx.w_k is not None:
-            x = nvfp4_dequantize(x_theta, x_q, x_alpha)
+            x = nvfp4_dequant(x_theta, x_q, x_alpha)
             dw = grad_output.T @ x[:, : ctx.w_k]
 
         return None, dx, None, dw

@@ -12,7 +12,7 @@ def cdl_topk_forward(
     f: Format,
     q: torch.Tensor,
     kappa_forward: torch.Tensor,
-    kappa_backward: torch.Tensor,
+    kappa_backward: torch.Tensor | None,
     topk: int,
     companded: bool,
     num_quantized_params: int | None = None,
@@ -30,7 +30,7 @@ def cdl_topk_forward(
             num_quantized_params,
         )
 
-    if kappa_backward == kappa_forward:
+    if kappa_backward is None:
         proxy_pmf, proxy_indices = topk_pmf, topk_indices
     else:
         proxy_pmf, proxy_indices = formulae.topk_cpmf(
@@ -79,7 +79,7 @@ def extended_cdl_topk_forward(
     theta_topk: int,
     q_format: Format,
     kappa_forward: torch.Tensor,
-    kappa_backward: torch.Tensor,
+    kappa_backward: torch.Tensor | None,
     companded: bool,
     mode: Literal["ocp", "nvidia"],
     num_quantized_params: int | None = None,

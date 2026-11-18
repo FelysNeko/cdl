@@ -79,7 +79,7 @@ def mxfp8_ccdl_quant(
 def nvfp4_ecdl_quant(
     theta: torch.Tensor,
     kappa_forward: torch.Tensor,
-    kappa_backward: torch.Tensor,
+    kappa_backward: torch.Tensor | None,
     seed: torch.Tensor,
     theta_topk: int,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -97,7 +97,7 @@ def nvfp4_ecdl_quant(
 def mxfp4_ecdl_quant(
     theta: torch.Tensor,
     kappa_forward: torch.Tensor,
-    kappa_backward: torch.Tensor,
+    kappa_backward: torch.Tensor | None,
     seed: torch.Tensor,
     theta_topk: int,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -115,7 +115,7 @@ def mxfp4_ecdl_quant(
 def mxfp8_ecdl_quant(
     theta: torch.Tensor,
     kappa_forward: torch.Tensor,
-    kappa_backward: torch.Tensor,
+    kappa_backward: torch.Tensor | None,
     seed: torch.Tensor,
     theta_topk: int,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:

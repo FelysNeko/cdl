@@ -30,7 +30,7 @@ class Mxfp4ExtendedCdlQuantForActivation(ExtendedCdlQuantForActivation):
         theta_topk: int,
         dtype: torch.dtype,
         kappa_forward: float,
-        kappa_backward: float,
+        kappa_backward: float | None = None,
         kernel: Literal["torch", "triton"] = "torch",
     ) -> None:
         super().__init__(

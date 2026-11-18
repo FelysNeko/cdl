@@ -358,37 +358,18 @@ def _build_activation_quant(cfg: ModelConfig, in_features: int, dtype: torch.dty
             kappa=cfg.activation_kappa,
             kernel=cfg.kernel,
         )
-    if cfg.activation == "nvfp4_ecdl":
-        kappa_backward = (
-            cfg.activation_kappa
-            if cfg.activation_kappa_bwd is None
-            else cfg.activation_kappa_bwd
-        )
-        return Nvfp4ExtendedCdlQuantForActivation(
-            (1, in_features),
-            cfg.theta_topk,
-            dtype,
-            kappa_forward=cfg.activation_kappa,
-            kappa_backward=kappa_backward,
-            kernel=cfg.kernel,
-        )
-    if cfg.activation in ("mxfp4_ecdl", "mxfp8_ecdl"):
-        kappa_backward = (
-            cfg.activation_kappa
-            if cfg.activation_kappa_bwd is None
-            else cfg.activation_kappa_bwd
-        )
-        cls = (
-            Mxfp4ExtendedCdlQuantForActivation
-            if cfg.activation == "mxfp4_ecdl"
-            else Mxfp8ExtendedCdlQuantForActivation
-        )
+    if cfg.activation in ("nvfp4_ecdl", "mxfp4_ecdl", "mxfp8_ecdl"):
+        cls = {
+            "nvfp4_ecdl": Nvfp4ExtendedCdlQuantForActivation,
+            "mxfp4_ecdl": Mxfp4ExtendedCdlQuantForActivation,
+            "mxfp8_ecdl": Mxfp8ExtendedCdlQuantForActivation,
+        }[cfg.activation]
         return cls(
             (1, in_features),
             cfg.theta_topk,
             dtype,
             kappa_forward=cfg.activation_kappa,
-            kappa_backward=kappa_backward,
+            kappa_backward=cfg.activation_kappa_bwd,
             kernel=cfg.kernel,
         )
     raise ValueError(f"unknown activation variant {cfg.activation!r}")

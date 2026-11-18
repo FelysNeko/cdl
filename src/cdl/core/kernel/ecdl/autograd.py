@@ -78,7 +78,7 @@ class EcdlQuantFn(torch.autograd.Function):
         ctx,
         theta: torch.Tensor,
         kappa_forward: torch.Tensor,
-        kappa_backward: torch.Tensor,
+        kappa_backward: torch.Tensor | None,
         seed: torch.Tensor,
         format_id: int,
         theta_topk: int,
@@ -105,26 +105,25 @@ class EcdlQuantFn(torch.autograd.Function):
     @staticmethod
     def backward(ctx, g_theta_indices, g_q_indices, g_proxy, g_alpha_eff):
         theta, q_indices, kappa_forward, kappa_backward, alpha_eff = ctx.saved_tensors
+        # None means coupled mode: reuse kappa_forward and route d(kappa) back to it.
+        coupled = kappa_backward is None
         # scalars[1] is d(alpha_eff); alpha_eff carries no learnable parameter
         # in either scale mode, so it is dropped.
         dtheta, _scalars = ecdl_quant_bwd(
             g_proxy.contiguous(),
             theta,
             q_indices,
-            kappa_backward,
+            kappa_forward if coupled else kappa_backward,
             alpha_eff,
             ctx.format_id,
             ctx.theta_topk,
         )
-        # The kernel differentiates with respect to the backward kappa.  If it
-        # equals the forward kappa, the same value is the forward gradient, so
-        # route it back to log_kappa and keep the buffer gradient empty.
-        if kappa_backward == kappa_forward:
-            dkappa_forward = _scalars[0]
+        if coupled:
+            dkappa_forward = _scalars[0] if ctx.needs_input_grad[1] else None
             dkappa_backward = None
         else:
             dkappa_forward = None
-            dkappa_backward = _scalars[0]
+            dkappa_backward = _scalars[0] if ctx.needs_input_grad[2] else None
         return (
             dtheta.reshape(theta.shape),
             dkappa_forward,
@@ -139,7 +138,7 @@ class EcdlQuantFn(torch.autograd.Function):
 def ecdl_quant(
     theta: torch.Tensor,
     kappa_forward: torch.Tensor,
-    kappa_backward: torch.Tensor,
+    kappa_backward: torch.Tensor | None,
     seed: torch.Tensor,
     format_id: int,
     theta_topk: int,

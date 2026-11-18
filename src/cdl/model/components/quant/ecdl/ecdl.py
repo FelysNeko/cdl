@@ -74,7 +74,7 @@ class ExtendedCdlQuant(Quant):
         q_format: Format,
         block_size: int,
         kappa_forward: float,
-        kappa_backward: float,
+        kappa_backward: float | None,
         scale_mode: Literal["ocp", "nvidia"],
     ):
         super().__init__()
@@ -88,11 +88,14 @@ class ExtendedCdlQuant(Quant):
         self.scale_mode = scale_mode
 
         self.log_kappa = nn.Parameter(torch.full((), math.log(kappa_forward)))
-        self.register_buffer(
-            "kappa_backward",
-            torch.tensor(kappa_backward, dtype=torch.float32),
-            persistent=False,
-        )
+        if kappa_backward is not None:
+            self.register_buffer(
+                "kappa_backward",
+                torch.tensor(kappa_backward, dtype=torch.float32),
+                persistent=False,
+            )
+        else:
+            self.register_buffer("kappa_backward", None, persistent=False)
 
         self.bypassing = False
 
@@ -166,7 +169,7 @@ class ExtendedCdlQuantForActivation(ExtendedCdlQuant):
         q_format: Format,
         block_size: int,
         kappa_forward: float,
-        kappa_backward: float,
+        kappa_backward: float | None,
         scale_mode: Literal["ocp", "nvidia"],
     ):
         super().__init__(
@@ -198,7 +201,7 @@ class ExtendedCdlQuantForWeight(ExtendedCdlQuant):
             q_format,
             block_size,
             kappa_forward,
-            kappa_forward,
+            None,
             scale_mode,
         )
 

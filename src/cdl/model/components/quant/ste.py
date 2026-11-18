@@ -7,10 +7,10 @@ import torch.nn.functional as F
 from cdl.api.quant import QTensor, Quant
 from cdl.core.mm.mxfp4 import mxfp4_dequant
 from cdl.core.mm.mxfp8 import mxfp8_dequant
+from cdl.core.mm.nvfp4 import nvfp4_dequant
 from cdl.model.wrapper.flashinfer import (
     mxfp4_quantize,
     mxfp8_quantize,
-    nvfp4_dequantize,
     nvfp4_quantize,
 )
 
@@ -74,7 +74,7 @@ class SteTensor(QTensor):
 
         if self.simulation == "nvfp4":
             packed, scale, alpha = self.nvfp4()
-            out = nvfp4_dequantize(packed.flatten(0, -2), scale.flatten(0, -2), alpha)
+            out = nvfp4_dequant(packed.flatten(0, -2), scale.flatten(0, -2), alpha)
         elif self.simulation == "mxfp4":
             packed, scale, alpha = self.mxfp4()
             out = mxfp4_dequant(packed.flatten(0, -2), scale.flatten(0, -2), alpha)
