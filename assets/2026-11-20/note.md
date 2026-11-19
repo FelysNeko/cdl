@@ -39,3 +39,17 @@ Trainable parameters: 8.68M
 | MXFP4 Extended CDL    |     15.61      | 21.42  |     48.28     |    65.66     |  67.95   |
 | MXFP8 STE             |     11.79      | 17.07  |     54.20     |    70.12     |  72.25   |
 | MXFP8 Extended CDL    |     11.86      | 17.20  |     54.17     |    70.83     |  71.55   |
+
+### Wall-time
+
+Pure training wall-time for 4000 steady-state steps on an RTX 5070 Ti with torch compile enabled.
+
+| Variants              | SmolLM2-135M | SmolLM2-360M |
+| --------------------- | :----------: | :----------: |
+| BF16 w/o Quantization |   14m 20s    |   34m 56s    |
+| NVFP4 STE             |   12m 59s    |   30m 26s    |
+| NVFP4 Extended CDL    |   19m 49s    |   43m 46s    |
+| MXFP4 STE             |   12m 56s    |   29m 50s    |
+| MXFP4 Extended CDL    |   18m 25s    |   39m 10s    |
+| MXFP8 STE             |   13m 46s    |   31m 45s    |
+| MXFP8 Extended CDL    |   23m 07s    |   60m 06s    |
