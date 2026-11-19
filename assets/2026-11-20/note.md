@@ -4,7 +4,7 @@
 
 ## Preliminary Result
 
-The same fine-tuning experiments from last week. This time, quantizers are applied to both weights and activations. WikiText-2, C4, BoolQ, ARC-Easy, and PIQA are reported, as the remaining benchmarks (WinoGrande, OpenBookQA, ARC-Challenge, SIQA) fall largely within noise.
+The same fine-tuning experiments from last week. This time, quantizers are applied to both weights and activations. WikiText-2, C4, HellaSwag, ARC-Easy, and PIQA are reported, as the remaining benchmarks (WinoGrande, OpenBookQA, ARC-Challenge, SIQA) fall largely within noise.
 
 - Only LoRA is trainable, so the quantizers add no learnable parameters
 - AdamW optimizer for everything, with $`\eta = 3 \cdot 10^{-4}`$, training for 4000 steps, i.e., 65.5M tokens
@@ -14,28 +14,28 @@ The same fine-tuning experiments from last week. This time, quantizers are appli
 
 Trainable parameters: 4.88M
 
-| Variants              | WikiText-2 (↓) | C4 (↓) | BoolQ (↑) | ARC-Easy (↑) | PIQA (↑) |
-| --------------------- | :------------: | :----: | :-------: | :----------: | :------: |
-| Original Weights      |     15.43      | 21.62  |   60.55   |    64.44     |  68.28   |
-| BF16 w/o Quantization |     15.76      | 21.67  |   59.88   |    63.22     |  68.44   |
-| NVFP4 STE             |     19.64      | 25.91  |   52.54   |    56.44     |  65.61   |
-| NVFP4 Extended CDL    |     19.09      | 25.49  |   58.72   |    59.09     |  64.64   |
-| MXFP4 STE             |     25.77      | 32.65  |   49.60   |    55.26     |  61.48   |
-| MXFP4 Extended CDL    |     23.07      | 29.90  |   58.56   |    56.86     |  62.73   |
-| MXFP8 STE             |     16.08      | 22.04  |   58.84   |    62.37     |  68.12   |
-| MXFP8 Extended CDL    |     16.21      | 22.19  |   59.08   |    62.58     |  68.12   |
+| Variants              | WikiText-2 (↓) | C4 (↓) | HellaSwag (↑) | ARC-Easy (↑) | PIQA (↑) |
+| --------------------- | :------------: | :----: | :-----------: | :----------: | :------: |
+| Original Weights      |     15.43      | 21.62  |     42.04     |    64.44     |  68.28   |
+| BF16 w/o Quantization |     15.77      | 21.68  |     41.98     |    63.05     |  68.34   |
+| NVFP4 STE             |     19.61      | 26.01  |     39.73     |    56.78     |  63.60   |
+| NVFP4 Extended CDL    |     19.08      | 25.52  |     39.89     |    59.60     |  64.64   |
+| MXFP4 STE             |     25.72      | 32.69  |     36.74     |    54.84     |  62.30   |
+| MXFP4 Extended CDL    |     23.14      | 30.00  |     37.54     |    56.27     |  62.73   |
+| MXFP8 STE             |     16.11      | 22.08  |     41.67     |    62.12     |  67.79   |
+| MXFP8 Extended CDL    |     16.19      | 22.24  |     41.66     |    63.43     |  67.79   |
 
 ### SmolLM2-360M
 
 Trainable parameters: 8.68M
 
-| Variants              | WikiText-2 (↓) | C4 (↓) | BoolQ (↑) | ARC-Easy (↑) | PIQA (↑) |
-| --------------------- | :------------: | :----: | :-------: | :----------: | :------: |
-| Original Weights      |     11.47      | 16.98  |   62.20   |    70.33     |  71.87   |
-| BF16 w/o Quantization |     11.61      | 16.85  |   62.05   |    70.66     |  71.65   |
-| NVFP4 STE             |     13.57      | 19.16  |   60.92   |    67.93     |  69.91   |
-| NVFP4 Extended CDL    |     13.29      | 18.87  |   60.40   |    67.55     |  69.31   |
-| MXFP4 STE             |     17.17      | 23.09  |   53.39   |    63.51     |  66.38   |
-| MXFP4 Extended CDL    |     15.61      | 21.42  |   51.41   |    65.66     |  67.95   |
-| MXFP8 STE             |     11.79      | 17.07  |   62.05   |    70.12     |  72.25   |
-| MXFP8 Extended CDL    |     11.86      | 17.20  |   61.28   |    70.83     |  71.55   |
+| Variants              | WikiText-2 (↓) | C4 (↓) | HellaSwag (↑) | ARC-Easy (↑) | PIQA (↑) |
+| --------------------- | :------------: | :----: | :-----------: | :----------: | :------: |
+| Original Weights      |     11.47      | 16.98  |     54.47     |    70.33     |  71.87   |
+| BF16 w/o Quantization |     11.61      | 16.85  |     54.76     |    70.66     |  71.65   |
+| NVFP4 STE             |     13.57      | 19.16  |     51.63     |    67.93     |  69.91   |
+| NVFP4 Extended CDL    |     13.29      | 18.87  |     51.99     |    67.55     |  69.31   |
+| MXFP4 STE             |     17.17      | 23.09  |     46.69     |    63.51     |  66.38   |
+| MXFP4 Extended CDL    |     15.61      | 21.42  |     48.28     |    65.66     |  67.95   |
+| MXFP8 STE             |     11.79      | 17.07  |     54.20     |    70.12     |  72.25   |
+| MXFP8 Extended CDL    |     11.86      | 17.20  |     54.17     |    70.83     |  71.55   |
