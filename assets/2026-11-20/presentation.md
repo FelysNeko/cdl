@@ -58,10 +58,10 @@ Trainable parameters: 18.09M
 | --------------------- | :-----------------: | :-------------: | :------------------: | :-----------------: | :-------------: |
 | Original Weights      |        8.12         |      12.60      |        69.39         |        77.82        |      76.82      |
 | BF16 w/o Quantization |        8.18         |      12.65      |        69.22         |        77.53        |      76.88      |
-| NVFP4 STE             |        9.17         |      13.85      |        66.81         |        75.29        |      75.46      |
+| NVFP4 STE             |        9.15         |      13.85      |        66.81         |        75.46        |      76.12      |
 | NVFP4 Extended CDL    |        9.14         |      13.76      |        67.24         |        75.55        |      75.68      |
-| MXFP4 STE             |          -          |        -        |          -           |          -          |        -        |
-| MXFP4 Extended CDL    |          -          |        -        |          -           |          -          |        -        |
+| MXFP4 STE             |        10.62        |      15.49      |        63.75         |        73.19        |      73.12      |
+| MXFP4 Extended CDL    |        10.44        |      15.12      |        63.80         |        72.85        |      73.88      |
 
 ---
 
@@ -72,10 +72,10 @@ Pure training wall-time for 4000 steps on an RTX 5070 Ti with `torch.compile` en
 | Variants              | SmolLM2-135M | SmolLM2-360M | SmolLM2-1.7B |
 | --------------------- | :----------: | :----------: | :----------: |
 | BF16 w/o Quantization |   14m 20s    |   34m 56s    |  2h 30m 02s  |
-| NVFP4 STE             |   14m 04s    |   31m 09s    |  2h 05m 24s  |
+| NVFP4 STE             |   14m 04s    |   31m 09s    |  2h 06m 03s  |
 | NVFP4 Extended CDL    |   19m 49s    |   43m 46s    |  3h 04m 23s  |
-| MXFP4 STE             |   14m 40s    |   32m 20s    |      -       |
-| MXFP4 Extended CDL    |   18m 25s    |   39m 10s    |      -       |
+| MXFP4 STE             |   14m 40s    |   32m 20s    |  2h 12m 10s  |
+| MXFP4 Extended CDL    |   18m 25s    |   39m 10s    |  2h 51m 46s  |
 
 Memory only fits the 135M model with the full 16 batches; 360M and 1.7B need batch sizes of 8 and 2, with gradient accumulation to keep tokens per update equivalent. The GEMM size grows less, and the speedup is limited.
 
