@@ -101,9 +101,8 @@ Memory only fits the 135M model with the full 16 batches; 360M and 1.7B need bat
 Some minor but interesting questions:
 
 - Cascaded CDL for weights and Extended CDL for activations?
-- Low-precision backward on Transformers?
 - NVFP4 attention (surprisingly, this kernel is available)?
-- Performance when Shannon entropy term is enabled?
+- Performance when entropy loss term is enabled?
 
 A bigger question: how can we take advantage of a low-entropy model?
 
