@@ -769,9 +769,7 @@ def compile_model(model: nn.Module) -> nn.Module:
     mode = "default" if use_ckpt else "reduce-overhead"
     for layer in layers:
         layer.compile(dynamic=False, mode=mode)
-    logger.info(
-        f"torch.compile enabled on {len(layers)} decoder layers (mode={mode})"
-    )
+    logger.info(f"torch.compile enabled on {len(layers)} decoder layers (mode={mode})")
     return model
 
 
@@ -812,9 +810,7 @@ def run_training(
     output_dir: Path,
     start_step: int,
 ) -> int:
-    trainable = [
-        p for group in optimizer.param_groups for p in group["params"]
-    ]
+    trainable = [p for group in optimizer.param_groups for p in group["params"]]
 
     global_step = start_step
     grad_accum = cfg.train.grad_accum_steps

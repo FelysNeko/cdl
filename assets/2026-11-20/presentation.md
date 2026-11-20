@@ -59,7 +59,7 @@ Trainable parameters: 18.09M
 | Original Weights      |        8.12         |      12.60      |        69.39         |        77.82        |      76.82      |
 | BF16 w/o Quantization |        8.18         |      12.65      |        69.22         |        77.53        |      76.88      |
 | NVFP4 STE             |        9.17         |      13.85      |        66.81         |        75.29        |      75.46      |
-| NVFP4 Extended CDL    |          -          |        -        |          -           |          -          |        -        |
+| NVFP4 Extended CDL    |        9.14         |      13.76      |        67.24         |        75.55        |      75.68      |
 | MXFP4 STE             |          -          |        -        |          -           |          -          |        -        |
 | MXFP4 Extended CDL    |          -          |        -        |          -           |          -          |        -        |
 
@@ -73,7 +73,7 @@ Pure training wall-time for 4000 steps on an RTX 5070 Ti with `torch.compile` en
 | --------------------- | :----------: | :----------: | :----------: |
 | BF16 w/o Quantization |   14m 20s    |   34m 56s    |  2h 30m 02s  |
 | NVFP4 STE             |   12m 59s    |   30m 26s    |  2h 05m 24s  |
-| NVFP4 Extended CDL    |   19m 49s    |   43m 46s    |      -       |
+| NVFP4 Extended CDL    |   19m 49s    |   43m 46s    |  3h 04m 23s  |
 | MXFP4 STE             |   12m 56s    |   29m 50s    |      -       |
 | MXFP4 Extended CDL    |   18m 25s    |   39m 10s    |      -       |
 

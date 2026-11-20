@@ -1,6 +1,5 @@
 import flashinfer
 import torch
-from flashinfer.tllm_enums import SfLayout
 
 
 @torch.library.custom_op("cdl::mm_fp4", mutates_args=())
@@ -61,84 +60,3 @@ def _(
     b_scale: torch.Tensor,
 ) -> torch.Tensor:
     return torch.empty(a.shape[0], b.shape[1], dtype=torch.bfloat16, device=a.device)
-
-
-@torch.library.custom_op("cdl::mxfp4_quantize", mutates_args=())
-def mxfp4_quantize(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    # x: [rows, k] with k % 32 == 0, bfloat16, row-major. Returns (packed fp4
-    # [rows, k / 2] uint8, linear E8M0 scales [rows, k / 32] uint8).
-    packed, scale = flashinfer.mxfp4_quantize(x, sfLayout=SfLayout.layout_linear)
-    return packed, scale.reshape(x.shape[0], x.shape[-1] // 32)
-
-
-@mxfp4_quantize.register_fake
-def _(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    rows, k = x.shape
-    return (
-        torch.empty(rows, k // 2, dtype=torch.uint8, device=x.device),
-        torch.empty(rows, k // 32, dtype=torch.uint8, device=x.device),
-    )
-
-
-@torch.library.custom_op("cdl::mxfp8_quantize", mutates_args=())
-def mxfp8_quantize(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    # x: [rows, k] with k % 32 == 0, bfloat16, row-major. Returns (e4m3 bytes
-    # [rows, k] as uint8, linear E8M0 scales [rows, k / 32] uint8).
-    rows, k = x.shape
-    packed, scale = flashinfer.mxfp8_quantize(x, is_sf_swizzled_layout=False)
-    return packed.view(torch.uint8), scale.reshape(rows, k // 32)
-
-
-@mxfp8_quantize.register_fake
-def _(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    rows, k = x.shape
-    return (
-        torch.empty(rows, k, dtype=torch.uint8, device=x.device),
-        torch.empty(rows, k // 32, dtype=torch.uint8, device=x.device),
-    )
-
-
-@torch.library.custom_op("cdl::nvfp4_quantize", mutates_args=())
-def nvfp4_quantize(
-    x: torch.Tensor, global_scale: torch.Tensor
-) -> tuple[torch.Tensor, torch.Tensor]:
-    # x: [rows, k] with k % 32 == 0 (mm_fp4 TMA alignment), bfloat16, row-major.
-    # Returns (packed fp4 [rows, k / 2] uint8, block scales [rows, k / 16] uint8)
-    # in the linear (non-swizzled) scale layout.
-    packed, scale = flashinfer.fp4_quantize(
-        x, global_scale, is_sf_swizzled_layout=False
-    )
-    return packed, scale
-
-
-@nvfp4_quantize.register_fake
-def _(x: torch.Tensor, global_scale: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    rows, k = x.shape
-    return (
-        torch.empty(rows, k // 2, dtype=torch.uint8, device=x.device),
-        torch.empty(rows, k // 16, dtype=torch.uint8, device=x.device),
-    )
-
-
-@torch.library.custom_op("cdl::nvfp4_dequantize", mutates_args=())
-def nvfp4_dequantize(
-    packed: torch.Tensor,
-    scale: torch.Tensor,
-    global_scale_inv: torch.Tensor,
-) -> torch.Tensor:
-    # packed: [rows, k / 2] uint8, scale: [rows, k / 16] uint8 (linear layout).
-    # Returns the dequantized bfloat16 tensor of shape [rows, k].
-    return flashinfer.nvfp4_kv_dequantize(
-        packed, scale, global_scale_inv, output_dtype=torch.bfloat16
-    )
-
-
-@nvfp4_dequantize.register_fake
-def _(
-    packed: torch.Tensor,
-    scale: torch.Tensor,
-    global_scale_inv: torch.Tensor,
-) -> torch.Tensor:
-    rows = packed.shape[0]
-    k = packed.shape[-1] * 2
-    return torch.empty(rows, k, dtype=torch.bfloat16, device=packed.device)

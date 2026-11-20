@@ -7,6 +7,7 @@ from cdl.api.quant import QTensor
 from cdl.core.format.fp8 import E4M3, E8M0
 from cdl.core.kernel import mxfp8_ecdl_quant
 from cdl.core.kernel.dequant import mxfp8_dequant
+from cdl.core.kernel.quant import mxfp8_quant
 from cdl.model.components.quant.ecdl.ecdl import (
     ExtendedCdlQuantForActivation,
     ExtendedCdlQuantForWeight,
@@ -78,6 +79,21 @@ class Mxfp8ExtendedCdlQuantForActivation(ExtendedCdlQuantForActivation):
                 "kernel_seed", torch.zeros((), dtype=torch.int64), persistent=False
             )
 
+    def eval_forward(self, theta: torch.Tensor) -> QTensor:
+        if self.kernel == "torch":
+            return super().eval_forward(theta)
+
+        lead = theta.shape[:-2]
+        nb, tpb = theta.shape[-2:]
+        packed, scale, _ = mxfp8_quant(theta.reshape(-1, nb * tpb))
+        return PackedMxfp8ExtendedCdlTensor(
+            packed_theta=packed.reshape(*lead, nb, 32),
+            packed_scale=scale.reshape(*lead, nb, 1),
+            grad_proxy=None,
+            k_dim=self.k_dim,
+            dtype=self.theta_format.level.dtype,
+        )
+
     def training_forward(self, theta: torch.Tensor) -> QTensor:
         if self.kernel == "torch":
             return super().training_forward(theta)
@@ -122,6 +138,21 @@ class Mxfp8ExtendedCdlQuantForWeight(ExtendedCdlQuantForWeight):
             self.register_buffer(
                 "kernel_seed", torch.zeros((), dtype=torch.int64), persistent=False
             )
+
+    def eval_forward(self, theta: torch.Tensor) -> QTensor:
+        if self.kernel == "torch":
+            return super().eval_forward(theta)
+
+        lead = theta.shape[:-2]
+        nb, tpb = theta.shape[-2:]
+        packed, scale, _ = mxfp8_quant(theta.reshape(-1, nb * tpb))
+        return PackedMxfp8ExtendedCdlTensor(
+            packed_theta=packed.reshape(*lead, nb, 32),
+            packed_scale=scale.reshape(*lead, nb, 1),
+            grad_proxy=None,
+            k_dim=self.k_dim,
+            dtype=self.theta_format.level.dtype,
+        )
 
     def training_forward(self, theta: torch.Tensor) -> QTensor:
         if self.kernel == "torch":

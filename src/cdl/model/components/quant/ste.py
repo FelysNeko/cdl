@@ -2,17 +2,10 @@ from dataclasses import dataclass
 from typing import Literal
 
 import torch
-import torch.nn.functional as F
 
 from cdl.api.quant import QTensor, Quant
-from cdl.core.mm.mxfp4 import mxfp4_dequant
-from cdl.core.mm.mxfp8 import mxfp8_dequant
-from cdl.core.mm.nvfp4 import nvfp4_dequant
-from cdl.model.wrapper.flashinfer import (
-    mxfp4_quantize,
-    mxfp8_quantize,
-    nvfp4_quantize,
-)
+from cdl.core.kernel.dequant import mxfp4_dequant, mxfp8_dequant, nvfp4_dequant
+from cdl.core.kernel.quant import mxfp4_quant, mxfp8_quant, nvfp4_quant
 
 type Simulation = Literal["nvfp4", "mxfp4", "mxfp8"]
 
@@ -30,42 +23,26 @@ class SteTensor(QTensor):
     def k(self) -> int:
         return self.theta.shape[-1]
 
-    def get_padded_theta(self, multiple: int) -> torch.Tensor:
-        pad = -self.theta.shape[-1] % multiple
-        if pad:
-            return F.pad(self.theta, (0, pad))
-        return self.theta
-
     def nvfp4(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         with torch.no_grad():
-            flat = self.get_padded_theta(16).flatten(0, -2)
-            amax = flat.float().abs().amax()
-            global_scale = torch.where(
-                amax > 0,
-                amax.new_full((), 448.0 * 6.0) / amax,
-                amax.new_full((), torch.finfo(torch.float32).max),
-            ).reshape(1)
-            packed, scale = nvfp4_quantize(flat, global_scale)
-            packed = packed.reshape(*self.leading_shape, -1)
-            scale = scale.reshape(*self.leading_shape, -1)
-            return packed, scale, (1.0 / global_scale).float()
+            packed, scale, alpha = nvfp4_quant(self.theta.reshape(-1, self.k))
+            packed = packed.reshape(*self.leading_shape, packed.shape[-1])
+            scale = scale.reshape(*self.leading_shape, scale.shape[-1])
+            return packed, scale, alpha
 
     def mxfp4(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         with torch.no_grad():
-            flat = self.get_padded_theta(32).flatten(0, -2)
-            packed, scale = mxfp4_quantize(flat)
-            packed = packed.reshape(*self.leading_shape, -1)
-            scale = scale.reshape(*self.leading_shape, -1)
-            ones = torch.ones(1, device=flat.device, dtype=torch.float32)
-            return packed, scale, ones
+            packed, scale, alpha = mxfp4_quant(self.theta.reshape(-1, self.k))
+            packed = packed.reshape(*self.leading_shape, packed.shape[-1])
+            scale = scale.reshape(*self.leading_shape, scale.shape[-1])
+            return packed, scale, alpha
 
     def mxfp8(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
         with torch.no_grad():
-            flat = self.get_padded_theta(32).flatten(0, -2)
-            packed, scale = mxfp8_quantize(flat)
-            packed = packed.view(torch.float8_e4m3fn).reshape(*self.leading_shape, -1)
-            scale = scale.reshape(*self.leading_shape, -1)
-            return packed, scale, None
+            packed, scale, alpha = mxfp8_quant(self.theta.reshape(-1, self.k))
+            packed = packed.reshape(*self.leading_shape, packed.shape[-1])
+            scale = scale.reshape(*self.leading_shape, scale.shape[-1])
+            return packed, scale, alpha
 
     def dequantize(self) -> torch.Tensor:
         if self.simulation is None:
@@ -73,17 +50,31 @@ class SteTensor(QTensor):
 
         if self.simulation == "nvfp4":
             packed, scale, alpha = self.nvfp4()
-            out = nvfp4_dequant(packed.flatten(0, -2), scale.flatten(0, -2), alpha)
+            out = nvfp4_dequant(
+                packed.reshape(-1, packed.shape[-1]),
+                scale.reshape(-1, scale.shape[-1]),
+                alpha,
+            )
         elif self.simulation == "mxfp4":
             packed, scale, alpha = self.mxfp4()
-            out = mxfp4_dequant(packed.flatten(0, -2), scale.flatten(0, -2), alpha)
+            out = mxfp4_dequant(
+                packed.reshape(-1, packed.shape[-1]),
+                scale.reshape(-1, scale.shape[-1]),
+                alpha,
+            )
         elif self.simulation == "mxfp8":
             packed, scale, alpha = self.mxfp8()
-            out = mxfp8_dequant(packed.flatten(0, -2), scale.flatten(0, -2), alpha)
+            out = mxfp8_dequant(
+                packed.reshape(-1, packed.shape[-1]),
+                scale.reshape(-1, scale.shape[-1]),
+                alpha,
+            )
         else:
             raise ValueError(f"{self.simulation} is not supported")
 
-        return out.reshape(*self.leading_shape, -1)[..., : self.k].to(self.theta.dtype)
+        return out.reshape(*self.leading_shape, out.shape[-1])[..., : self.k].to(
+            self.theta.dtype
+        )
 
     def proxy(self) -> torch.Tensor | None:
         return self.theta
