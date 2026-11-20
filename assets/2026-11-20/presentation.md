@@ -28,9 +28,9 @@ Trainable parameters: 4.88M
 | --------------------- | :-----------------: | :-------------: | :------------------: | :-----------------: | :-------------: |
 | Original Weights      |        15.43        |      21.62      |        42.04         |        64.44        |      68.28      |
 | BF16 w/o Quantization |        15.77        |      21.68      |        41.98         |        63.05        |      68.34      |
-| NVFP4 STE             |        19.61        |      26.01      |        39.73         |        56.78        |      63.60      |
+| NVFP4 STE             |        19.82        |      26.02      |        39.77         |        56.99        |      64.91      |
 | NVFP4 Extended CDL    |        19.08        |      25.52      |        39.89         |        59.60        |      64.64      |
-| MXFP4 STE             |        25.72        |      32.69      |        36.74         |        54.84        |      62.30      |
+| MXFP4 STE             |        24.37        |      31.12      |        37.48         |        55.72        |      62.89      |
 | MXFP4 Extended CDL    |        23.14        |      30.00      |        37.54         |        56.27        |      62.73      |
 
 ---
@@ -43,9 +43,9 @@ Trainable parameters: 8.68M
 | --------------------- | :-----------------: | :-------------: | :------------------: | :-----------------: | :-------------: |
 | Original Weights      |        11.47        |      16.98      |        54.47         |        70.33        |      71.87      |
 | BF16 w/o Quantization |        11.61        |      16.85      |        54.76         |        70.66        |      71.65      |
-| NVFP4 STE             |        13.57        |      19.16      |        51.63         |        67.93        |      69.91      |
+| NVFP4 STE             |          -          |        -        |          -           |          -          |        -        |
 | NVFP4 Extended CDL    |        13.29        |      18.87      |        51.99         |        67.55        |      69.31      |
-| MXFP4 STE             |        17.17        |      23.09      |        46.69         |        63.51        |      66.38      |
+| MXFP4 STE             |          -          |        -        |          -           |          -          |        -        |
 | MXFP4 Extended CDL    |        15.61        |      21.42      |        48.28         |        65.66        |      67.95      |
 
 ---
@@ -72,9 +72,9 @@ Pure training wall-time for 4000 steps on an RTX 5070 Ti with `torch.compile` en
 | Variants              | SmolLM2-135M | SmolLM2-360M | SmolLM2-1.7B |
 | --------------------- | :----------: | :----------: | :----------: |
 | BF16 w/o Quantization |   14m 20s    |   34m 56s    |  2h 30m 02s  |
-| NVFP4 STE             |   12m 59s    |   30m 26s    |  2h 05m 24s  |
+| NVFP4 STE             |   14m 04s    |      -       |  2h 05m 24s  |
 | NVFP4 Extended CDL    |   19m 49s    |   43m 46s    |  3h 04m 23s  |
-| MXFP4 STE             |   12m 56s    |   29m 50s    |      -       |
+| MXFP4 STE             |   14m 40s    |      -       |      -       |
 | MXFP4 Extended CDL    |   18m 25s    |   39m 10s    |      -       |
 
 Memory only fits the 135M model with the full 16 batches; 360M and 1.7B need batch sizes of 8 and 2, with gradient accumulation to keep tokens per update equivalent. The GEMM size grows less, and the speedup is limited.
