@@ -65,6 +65,21 @@ Trainable parameters: 18.09M
 
 ---
 
+### Application to a SOTA Method
+
+State-of-the-art PTQ method: Randomized Hadamard Transform (block size 32) with Kullback-Leibler divergence distillation
+
+| Variants         | $\downarrow$ Wiki-2 | $\downarrow$ C4 | $\uparrow$ HellaSwag | $\uparrow$ ARC-Easy | $\uparrow$ PIQA |
+| ---------------- | :-----------------: | :-------------: | :------------------: | :-----------------: | :-------------: |
+| Original Weights |        15.43        |      21.62      |        42.04         |        64.44        |      68.28      |
+| MXFP4 ECDL (SFT) |        23.14        |      30.00      |        37.54         |        56.27        |      62.73      |
+| MXFP4 STE (KL)   |        20.77        |      27.70      |        38.74         |        58.38        |      64.53      |
+| MXFP4 ECDL (KL)  |        19.95        |      26.86      |        38.80         |        58.88        |      63.71      |
+
+This uses the exact same setup as supervised fine-tuning, except that it adopts cosine learning rate decay ($\eta: 3 \cdot 10^{-4} \to 3 \cdot 10^{-5}$). This experiment was implemented by an LLM. For now, CDL achieves slightly better accuracy and lower perplexity; however, I believe that I have not yet unlocked the full potential of CDL.
+
+---
+
 ### Wall-time
 
 Pure training wall-time for 4000 steps on an RTX 5070 Ti with `torch.compile` enabled.
