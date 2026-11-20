@@ -43,9 +43,9 @@ Trainable parameters: 8.68M
 | --------------------- | :-----------------: | :-------------: | :------------------: | :-----------------: | :-------------: |
 | Original Weights      |        11.47        |      16.98      |        54.47         |        70.33        |      71.87      |
 | BF16 w/o Quantization |        11.61        |      16.85      |        54.76         |        70.66        |      71.65      |
-| NVFP4 STE             |          -          |        -        |          -           |          -          |        -        |
+| NVFP4 STE             |        13.65        |      19.26      |        51.35         |        67.30        |      68.93      |
 | NVFP4 Extended CDL    |        13.29        |      18.87      |        51.99         |        67.55        |      69.31      |
-| MXFP4 STE             |          -          |        -        |          -           |          -          |        -        |
+| MXFP4 STE             |        16.63        |      22.45      |        47.73         |        62.84        |      67.36      |
 | MXFP4 Extended CDL    |        15.61        |      21.42      |        48.28         |        65.66        |      67.95      |
 
 ---
@@ -72,9 +72,9 @@ Pure training wall-time for 4000 steps on an RTX 5070 Ti with `torch.compile` en
 | Variants              | SmolLM2-135M | SmolLM2-360M | SmolLM2-1.7B |
 | --------------------- | :----------: | :----------: | :----------: |
 | BF16 w/o Quantization |   14m 20s    |   34m 56s    |  2h 30m 02s  |
-| NVFP4 STE             |   14m 04s    |      -       |  2h 05m 24s  |
+| NVFP4 STE             |   14m 04s    |   31m 09s    |  2h 05m 24s  |
 | NVFP4 Extended CDL    |   19m 49s    |   43m 46s    |  3h 04m 23s  |
-| MXFP4 STE             |   14m 40s    |      -       |      -       |
+| MXFP4 STE             |   14m 40s    |   32m 20s    |      -       |
 | MXFP4 Extended CDL    |   18m 25s    |   39m 10s    |      -       |
 
 Memory only fits the 135M model with the full 16 batches; 360M and 1.7B need batch sizes of 8 and 2, with gradient accumulation to keep tokens per update equivalent. The GEMM size grows less, and the speedup is limited.
