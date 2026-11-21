@@ -54,6 +54,7 @@ def _ecdl_fwd(
     BB: tl.constexpr,
     MODE: tl.constexpr,
     EMAX: tl.constexpr,
+    SCALE_BIAS: tl.constexpr,
 ):
     r = tl.program_id(0)
     gb = tl.program_id(1)
@@ -97,10 +98,9 @@ def _ecdl_fwd(
         q_hat = tl.load(ql_ptr + q_indices, mask=bmask, other=0.0).to(tl.float32)
         s = q_hat * al
 
-    if MODE == 0:
-        tl.store(ps_ptr + r * NB + offs_b, (q_indices + 1).to(tl.uint8), mask=bmask)
-    else:
-        tl.store(ps_ptr + r * NB + offs_b, q_indices.to(tl.uint8), mask=bmask)
+    tl.store(
+        ps_ptr + r * NB + offs_b, (q_indices + SCALE_BIAS).to(tl.uint8), mask=bmask
+    )
 
     v = raw.to(tl.float32) / s[:, None]
     seed = tl.load(seed_ptr).to(tl.int32)
@@ -141,7 +141,7 @@ def _ecdl_bwd(
     TPB: tl.constexpr,
     TN: tl.constexpr,
     BB: tl.constexpr,
-    MODE: tl.constexpr,
+    SCALE_BIAS: tl.constexpr,
     COMPUTE_SCALARS: tl.constexpr,
 ):
     r = tl.program_id(0)
@@ -154,8 +154,8 @@ def _ecdl_bwd(
     bmask = offs_b < NB
 
     qi = tl.load(ps_ptr + r * NB + offs_b, mask=bmask, other=0).to(tl.int32)
-    if MODE == 0:
-        qi = tl.maximum(qi - 1, 0)
+    if SCALE_BIAS != 0:
+        qi = tl.maximum(qi - SCALE_BIAS, 0)
     q_hat = tl.load(ql_ptr + qi, mask=bmask, other=0.0).to(tl.float32)
     # Masked lanes use s = 1 so v stays finite; their q_hat is 0 so the
     # zero gradient cannot poison the d(alpha) partial with 0 * inf NaNs.

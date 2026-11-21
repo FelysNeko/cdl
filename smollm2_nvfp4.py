@@ -187,6 +187,9 @@ class TrainingConfig:
     # Liger fused CE keeps the LM-head logits out of the graph, so bs16 fits
     # without activation checkpointing; leave the escape hatch for larger models.
     gradient_checkpointing: bool = False
+    fp32_master_weights: bool = False
+    lr_decay: str = "constant"  # "constant" or "cosine"
+    min_lr_ratio: float = 0.1
     save_every_iters: int = 500
 
     def validate(self) -> None:
@@ -435,6 +438,8 @@ def untie_and_freeze(
 
     if not freeze_all:
         embed.weight.requires_grad_(False)
+        if not train_head:
+            head.weight.requires_grad_(False)
         return
 
     for p in model.parameters():
@@ -566,32 +571,62 @@ def _quant_param_groups(
 
 def build_optimizer(
     controller: ModelController, model: nn.Module, cfg: TrainingConfig
-) -> tuple[torch.optim.Optimizer, torch.optim.lr_scheduler.LambdaLR]:
+) -> tuple[
+    torch.optim.Optimizer,
+    torch.optim.lr_scheduler.LambdaLR,
+    list[tuple[nn.Parameter, nn.Parameter]],
+]:
     """Single AdamW optimizer across base/LoRA and quantizer parameters, paired
     with one linear-warmup LambdaLR scheduler stepped once per optimizer step."""
     quant_groups, quant_param_ids = _quant_param_groups(controller, cfg)
     quant_params = [p for group in quant_groups for p in group["params"]]
 
+    master_pairs: list[tuple[nn.Parameter, nn.Parameter]] = []
+
+    def _opt_param(p: nn.Parameter) -> nn.Parameter:
+        if cfg.fp32_master_weights and p.dtype != torch.float32:
+            master = nn.Parameter(p.detach().float().clone())
+            master_pairs.append((p, master))
+            return master
+        return p
+
     decay, no_decay = [], []
     for p in model.parameters():
         if not p.requires_grad or id(p) in quant_param_ids:
             continue
-        (no_decay if p.ndim <= 1 else decay).append(p)
+        target = no_decay if p.ndim <= 1 else decay
+        target.append(_opt_param(p))
 
     param_groups = [
         {"params": decay, "lr": cfg.learning_rate, "weight_decay": cfg.weight_decay},
         {"params": no_decay, "lr": cfg.learning_rate, "weight_decay": 0.0},
-        {"params": quant_params, "lr": cfg.quant_adamw_lr, "weight_decay": 0.0},
+        {
+            "params": [_opt_param(p) for p in quant_params],
+            "lr": cfg.quant_adamw_lr,
+            "weight_decay": 0.0,
+        },
     ]
     param_groups = [g for g in param_groups if g["params"]]
     if not param_groups:
         raise ValueError("no trainable parameters")
 
     optimizer = torch.optim.AdamW(param_groups, betas=tuple(cfg.betas))
-    lr_scheduler = torch.optim.lr_scheduler.LambdaLR(
-        optimizer, lambda step: min(1.0, (step + 1) / cfg.warmup_steps)
-    )
-    return optimizer, lr_scheduler
+
+    def _lr_lambda(step: int) -> float:
+        if step < cfg.warmup_steps:
+            return (step + 1) / cfg.warmup_steps
+        if cfg.lr_decay == "cosine" and cfg.max_steps > cfg.warmup_steps:
+            progress = min(
+                1.0,
+                (step - cfg.warmup_steps) / (cfg.max_steps - cfg.warmup_steps),
+            )
+            return cfg.min_lr_ratio + 0.5 * (1.0 - cfg.min_lr_ratio) * (
+                1.0 + math.cos(math.pi * progress)
+            )
+        return 1.0
+
+    lr_scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, _lr_lambda)
+    return optimizer, lr_scheduler, master_pairs
 
 
 # ---------------------------------------------------------------------------
@@ -809,8 +844,9 @@ def run_training(
     cfg: Config,
     output_dir: Path,
     start_step: int,
+    master_pairs: list[tuple[nn.Parameter, nn.Parameter]] | None = None,
 ) -> int:
-    trainable = [p for group in optimizer.param_groups for p in group["params"]]
+    trainable = [p for p in controller.model.parameters() if p.requires_grad]
 
     global_step = start_step
     grad_accum = cfg.train.grad_accum_steps
@@ -851,7 +887,14 @@ def run_training(
             start=resume_skip,
         ):
             if accum_count == 0:
-                optimizer.zero_grad(set_to_none=grad_accum == 1)
+                if master_pairs:
+                    for p in trainable:
+                        if grad_accum == 1:
+                            p.grad = None
+                        elif p.grad is not None:
+                            p.grad.zero_()
+                else:
+                    optimizer.zero_grad(set_to_none=grad_accum == 1)
                 window_steps = min(grad_accum, batches_per_epoch - batch_idx)
                 accum_loss = None
 
@@ -870,7 +913,18 @@ def run_training(
             accum_count = 0
 
             grad_norm = torch.nn.utils.clip_grad_norm_(trainable, cfg.train.grad_clip)
-            optimizer.step()
+            if master_pairs:
+                with torch.no_grad():
+                    for model_p, master_p in master_pairs:
+                        if model_p.grad is not None:
+                            if master_p.grad is None:
+                                master_p.grad = torch.empty_like(master_p)
+                            master_p.grad.copy_(model_p.grad)
+                    optimizer.step()
+                    for model_p, master_p in master_pairs:
+                        model_p.data.copy_(master_p.data)
+            else:
+                optimizer.step()
             global_step += 1
             lr_scheduler.step()
 
@@ -988,7 +1042,9 @@ def training_pipeline() -> None:
         model.enable_input_require_grads()
 
     init_activation_q(controller, calib_blocks, device, cfg.model.backend)
-    optimizer, lr_scheduler = build_optimizer(controller, model, cfg.train)
+    optimizer, lr_scheduler, master_pairs = build_optimizer(
+        controller, model, cfg.train
+    )
     log_trainable_census(controller, model)
 
     start_step = 0
@@ -998,6 +1054,10 @@ def training_pipeline() -> None:
         _, start_step = load_checkpoint(
             args.resume, controller, optimizer, lr_scheduler, device
         )
+        if master_pairs:
+            with torch.no_grad():
+                for model_p, master_p in master_pairs:
+                    master_p.data.copy_(model_p.data)
 
     writer = SummaryWriter(log_dir=str(output_dir / "tensorboard"))
     run_model = compile_model(controller.model) if args.compile else controller.model
@@ -1013,6 +1073,7 @@ def training_pipeline() -> None:
         cfg,
         output_dir,
         start_step,
+        master_pairs=master_pairs,
     )
 
     logger.info("training finished")

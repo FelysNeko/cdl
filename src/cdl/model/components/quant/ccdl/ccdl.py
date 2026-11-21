@@ -143,9 +143,25 @@ class CascadedCdlQuant(Quant):
         log_q_tensor = q_tensor.clamp_min(torch.finfo(torch.float32).tiny).log()
         self.copy_log_q(log_q_tensor)
 
-    def training_forward(
-        self, theta: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def eval_forward(self, theta: torch.Tensor) -> QTensor:
+        theta_indices, q_indices = cascaded_nearest_round(
+            theta,
+            self.theta_format,
+            self.q,
+            self.q_format,
+            self.alpha,
+        )
+        return self.tensor(
+            self.theta_format,
+            theta_indices,
+            self.q_format,
+            q_indices,
+            self.alpha.detach(),
+            None,
+            self.k_dim,
+        )
+
+    def training_forward(self, theta: torch.Tensor) -> QTensor:
         theta_indices, q_indices, grad_proxy, _, _ = cascaded_cdl_topk_forward(
             theta,
             self.theta_format,
@@ -158,7 +174,15 @@ class CascadedCdlQuant(Quant):
             self.alpha,
             True,
         )
-        return theta_indices, q_indices, grad_proxy
+        return self.tensor(
+            self.theta_format,
+            theta_indices,
+            self.q_format,
+            q_indices,
+            self.alpha.detach(),
+            grad_proxy,
+            self.k_dim,
+        )
 
     def forward(self, x: torch.Tensor) -> QTensor:
         if self.bypassing:
@@ -178,26 +202,9 @@ class CascadedCdlQuant(Quant):
         theta, _ = group_tensor_into_blocks(x, self.block_size)
 
         if not self.training:
-            theta_indices, q_indices = cascaded_nearest_round(
-                theta,
-                self.theta_format,
-                self.q,
-                self.q_format,
-                self.alpha,
-            )
-            grad_proxy = None
-        else:
-            theta_indices, q_indices, grad_proxy = self.training_forward(theta)
+            return self.eval_forward(theta)
 
-        return self.tensor(
-            self.theta_format,
-            theta_indices,
-            self.q_format,
-            q_indices,
-            self.alpha.detach(),
-            grad_proxy,
-            self.k_dim,
-        )
+        return self.training_forward(theta)
 
 
 class CascadedCdlQuantForActivation(CascadedCdlQuant):

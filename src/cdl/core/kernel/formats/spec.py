@@ -46,6 +46,9 @@ class FormatSpec:
     theta_ordinal: Callable
     q_ordinal: Callable
     theta_emax: int
+    # Added to the scale-level index to obtain the stored scale byte
+    # (UE4M3 excludes zero, so its byte is index + 1; E8M0 byte == index).
+    scale_bias: int
 
 
 def _theta_emax(theta_level: torch.Tensor) -> int:
@@ -69,6 +72,7 @@ def _build(fmt_id: FormatId, device: torch.device) -> FormatSpec:
             e2m1_triton_ordinal,
             ue4m3_triton_ordinal,
             _theta_emax(theta_level),
+            1,
         )
     if fmt_id is FormatId.MXFP4:
         theta_level, theta_gap = e2m1_tables(torch.float32, device)
@@ -86,6 +90,7 @@ def _build(fmt_id: FormatId, device: torch.device) -> FormatSpec:
             e2m1_triton_ordinal,
             e8m0_triton_ordinal,
             _theta_emax(theta_level),
+            0,
         )
     if fmt_id is FormatId.MXFP8:
         theta_level, theta_gap = e4m3_tables(torch.float32, device)
@@ -103,6 +108,7 @@ def _build(fmt_id: FormatId, device: torch.device) -> FormatSpec:
             e4m3_triton_ordinal,
             e8m0_triton_ordinal,
             _theta_emax(theta_level),
+            0,
         )
     raise ValueError(f"unknown format id {fmt_id!r}")
 

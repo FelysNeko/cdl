@@ -82,6 +82,7 @@ def launch_ecdl_fwd(
         BB=config.block_chunk,
         MODE=mode,
         EMAX=fmt.theta_emax,
+        SCALE_BIAS=fmt.scale_bias,
         num_warps=config.num_warps,
     )
 
@@ -135,7 +136,7 @@ def launch_ecdl_bwd(
         TPB=tpb,
         TN=fmt.tn,
         BB=config.block_chunk,
-        MODE=_scale_mode_id(scale_mode),
+        SCALE_BIAS=fmt.scale_bias,
         COMPUTE_SCALARS=need_dkappa,
         num_warps=config.num_warps,
     )
