@@ -197,6 +197,7 @@ class ExtendedCdlQuantForWeight(ExtendedCdlQuant):
         q_format: Format,
         block_size: int,
         kappa_forward: float,
+        kappa_backward: float | None,
         scale_mode: Literal["ocp", "nvidia"],
     ):
         super().__init__(
@@ -206,7 +207,7 @@ class ExtendedCdlQuantForWeight(ExtendedCdlQuant):
             q_format,
             block_size,
             kappa_forward,
-            None,
+            kappa_backward,
             scale_mode,
         )
 

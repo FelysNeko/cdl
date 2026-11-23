@@ -65,11 +65,21 @@ class Mxfp8CascadedCdlQuantForActivation(CascadedCdlQuantForActivation):
         theta_topk: int,
         q_topk: int,
         dtype: torch.dtype,
-        kappa: float,
+        kappa_forward: float,
+        theta_kappa_backward: float | None = None,
+        q_kappa_backward: float | None = None,
         kernel: Literal["torch", "triton"] = "torch",
     ) -> None:
         super().__init__(
-            input_shape, E4M3(dtype), theta_topk, E8M0(dtype), q_topk, 32, kappa
+            input_shape,
+            E4M3(dtype),
+            theta_topk,
+            E8M0(dtype),
+            q_topk,
+            32,
+            kappa_forward,
+            theta_kappa_backward,
+            q_kappa_backward,
         )
         self.kernel = kernel
         if kernel == "triton":
@@ -81,15 +91,18 @@ class Mxfp8CascadedCdlQuantForActivation(CascadedCdlQuantForActivation):
         if self.kernel == "torch":
             return super().training_forward(theta)
 
+        self.kernel_seed.add_(1)
         packed_theta, packed_scale, grad_proxy = mxfp8_ccdl_quant(
             theta,
-            self.q,
             self.theta_kappa,
+            self.theta_kappa_backward,
+            self.theta_topk,
+            self.q,
             self.q_kappa,
+            self.q_kappa_backward,
+            self.q_topk,
             self.alpha,
             self.kernel_seed,
-            self.theta_topk,
-            self.q_topk,
         )
         return PackedMxfp8CascadedCdlTensor(
             packed_theta=packed_theta,
@@ -108,10 +121,20 @@ class Mxfp8CascadedCdlQuantForWeight(CascadedCdlQuantForWeight):
         self,
         weight: torch.Tensor,
         dtype: torch.dtype,
-        kappa: float,
+        kappa_forward: float,
+        theta_kappa_backward: float | None = None,
+        q_kappa_backward: float | None = None,
         kernel: Literal["torch", "triton"] = "torch",
     ):
-        super().__init__(weight, E4M3(dtype), E8M0(dtype), 32, kappa)
+        super().__init__(
+            weight,
+            E4M3(dtype),
+            E8M0(dtype),
+            32,
+            kappa_forward,
+            theta_kappa_backward,
+            q_kappa_backward,
+        )
         self.kernel = kernel
         if kernel == "triton":
             self.register_buffer(
@@ -122,15 +145,18 @@ class Mxfp8CascadedCdlQuantForWeight(CascadedCdlQuantForWeight):
         if self.kernel == "torch":
             return super().training_forward(theta)
 
+        self.kernel_seed.add_(1)
         packed_theta, packed_scale, grad_proxy = mxfp8_ccdl_quant(
             theta,
-            self.q,
             self.theta_kappa,
+            self.theta_kappa_backward,
+            self.theta_topk,
+            self.q,
             self.q_kappa,
+            self.q_kappa_backward,
+            self.q_topk,
             self.alpha,
             self.kernel_seed,
-            self.theta_topk,
-            self.q_topk,
         )
         return PackedMxfp8CascadedCdlTensor(
             packed_theta=packed_theta,

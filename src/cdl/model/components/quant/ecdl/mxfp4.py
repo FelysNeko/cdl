@@ -92,7 +92,7 @@ class Mxfp4ExtendedCdlQuantForActivation(ExtendedCdlQuantForActivation):
 
         lead = theta.shape[:-2]
         nb, tpb = theta.shape[-2:]
-        packed, scale, alpha = mxfp4_quant(theta.reshape(-1, nb * tpb))
+        packed, scale, alpha = mxfp4_quant(theta.reshape(-1, nb * tpb), None)
         return PackedMxfp4ExtendedCdlTensor(
             packed_theta=packed.reshape(*lead, nb, 16),
             packed_scale=scale.reshape(*lead, nb, 1),
@@ -106,6 +106,7 @@ class Mxfp4ExtendedCdlQuantForActivation(ExtendedCdlQuantForActivation):
         if self.kernel == "torch":
             return super().training_forward(theta)
 
+        self.kernel_seed.add_(1)
         packed_theta, packed_scale, grad_proxy, global_scale = mxfp4_ecdl_quant(
             theta,
             self.kappa,
@@ -132,6 +133,7 @@ class Mxfp4ExtendedCdlQuantForWeight(ExtendedCdlQuantForWeight):
         weight: torch.Tensor,
         dtype: torch.dtype,
         kappa_forward: float,
+        kappa_backward: float | None = None,
         kernel: Literal["torch", "triton"] = "torch",
     ) -> None:
         super().__init__(
@@ -139,7 +141,8 @@ class Mxfp4ExtendedCdlQuantForWeight(ExtendedCdlQuantForWeight):
             E2M1(dtype),
             E8M0(dtype),
             32,
-            kappa_forward=kappa_forward,
+            kappa_forward,
+            kappa_backward,
             scale_mode="ocp",
         )
         self.kernel = kernel
@@ -154,7 +157,7 @@ class Mxfp4ExtendedCdlQuantForWeight(ExtendedCdlQuantForWeight):
 
         lead = theta.shape[:-2]
         nb, tpb = theta.shape[-2:]
-        packed, scale, alpha = mxfp4_quant(theta.reshape(-1, nb * tpb))
+        packed, scale, alpha = mxfp4_quant(theta.reshape(-1, nb * tpb), None)
         return PackedMxfp4ExtendedCdlTensor(
             packed_theta=packed.reshape(*lead, nb, 16),
             packed_scale=scale.reshape(*lead, nb, 1),
@@ -168,6 +171,7 @@ class Mxfp4ExtendedCdlQuantForWeight(ExtendedCdlQuantForWeight):
         if self.kernel == "torch":
             return super().training_forward(theta)
 
+        self.kernel_seed.add_(1)
         packed_theta, packed_scale, grad_proxy, global_scale = mxfp4_ecdl_quant(
             theta,
             self.kappa,

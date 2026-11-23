@@ -10,32 +10,32 @@ from cdl.core.kernel.layout import q_indices_shape, reduce_q_grad
 @torch.library.custom_op("cdl::ccdl_quant_fwd", mutates_args=())
 def ccdl_quant_fwd(
     theta: torch.Tensor,
-    q: torch.Tensor,
     theta_kappa: torch.Tensor,
+    theta_topk: int,
+    q: torch.Tensor,
     q_kappa: torch.Tensor,
+    q_topk: int,
     alpha: torch.Tensor,
     seed: torch.Tensor,
     format_id: int,
-    theta_topk: int,
-    q_topk: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     fmt = get_format(format_id, theta.device)
     return launch_ccdl_fwd(
         theta,
-        q,
         theta_kappa,
+        theta_topk,
+        q,
         q_kappa,
+        q_topk,
         alpha,
         seed,
         fmt,
-        theta_topk,
-        q_topk,
     )
 
 
 @ccdl_quant_fwd.register_fake
 def _ccdl_quant_fwd_fake(
-    theta, q, theta_kappa, q_kappa, alpha, seed, format_id, theta_topk, q_topk
+    theta, theta_kappa, theta_topk, q, q_kappa, q_topk, alpha, seed, format_id
 ):
     lead = theta.shape[:-2]
     nb, tpb = theta.shape[-2:]
@@ -52,14 +52,14 @@ def _ccdl_quant_fwd_fake(
 def ccdl_quant_bwd(
     grad_proxy: torch.Tensor,
     theta: torch.Tensor,
-    q: torch.Tensor,
-    packed_scale: torch.Tensor,
     theta_kappa: torch.Tensor,
+    theta_topk: int,
+    q: torch.Tensor,
     q_kappa: torch.Tensor,
+    q_topk: int,
+    packed_scale: torch.Tensor,
     alpha: torch.Tensor,
     format_id: int,
-    theta_topk: int,
-    q_topk: int,
     need_dq: bool,
     need_dkt: bool,
     need_dkq: bool,
@@ -69,14 +69,14 @@ def ccdl_quant_bwd(
     return launch_ccdl_bwd(
         grad_proxy,
         theta,
-        q,
-        packed_scale,
         theta_kappa,
+        theta_topk,
+        q,
         q_kappa,
+        q_topk,
+        packed_scale,
         alpha,
         fmt,
-        theta_topk,
-        q_topk,
         need_dq,
         need_dkt,
         need_dkq,
@@ -88,14 +88,14 @@ def ccdl_quant_bwd(
 def _ccdl_quant_bwd_fake(
     grad_proxy,
     theta,
-    q,
-    packed_scale,
     theta_kappa,
+    theta_topk,
+    q,
     q_kappa,
+    q_topk,
+    packed_scale,
     alpha,
     format_id,
-    theta_topk,
-    q_topk,
     need_dq,
     need_dkt,
     need_dkq,
@@ -117,30 +117,40 @@ class CcdlQuantFn(torch.autograd.Function):
     def forward(
         ctx,
         theta: torch.Tensor,
+        theta_kappa_forward: torch.Tensor,
+        theta_kappa_backward: torch.Tensor | None,
+        theta_topk: int,
         q: torch.Tensor,
-        theta_kappa: torch.Tensor,
-        q_kappa: torch.Tensor,
+        q_kappa_forward: torch.Tensor,
+        q_kappa_backward: torch.Tensor | None,
+        q_topk: int,
         alpha: torch.Tensor,
         seed: torch.Tensor,
         format_id: int,
-        theta_topk: int,
-        q_topk: int,
     ):
-        seed.add_(1)
         packed_theta, packed_scale = ccdl_quant_fwd(
             theta,
+            theta_kappa_forward,
+            theta_topk,
             q,
-            theta_kappa,
-            q_kappa,
+            q_kappa_forward,
+            q_topk,
             alpha,
             seed,
             format_id,
-            theta_topk,
-            q_topk,
         )
         # Only the u8 scale byte is kept for backward; the kernel rebuilds the
         # block scale from it (no fp32 ``s`` tensor).
-        ctx.save_for_backward(theta, q, packed_scale, theta_kappa, q_kappa, alpha)
+        ctx.save_for_backward(
+            theta,
+            theta_kappa_forward,
+            theta_kappa_backward,
+            q,
+            q_kappa_forward,
+            q_kappa_backward,
+            packed_scale,
+            alpha,
+        )
         ctx.format_id = format_id
         ctx.topk = (theta_topk, q_topk)
         carrier = theta.new_zeros(()).expand(theta.shape)
@@ -148,33 +158,56 @@ class CcdlQuantFn(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, g_packed_theta, g_packed_scale, g_proxy):
-        theta, q, packed_scale, theta_kappa, q_kappa, alpha = ctx.saved_tensors
+        (
+            theta,
+            theta_kappa_forward,
+            theta_kappa_backward,
+            q,
+            q_kappa_forward,
+            q_kappa_backward,
+            packed_scale,
+            alpha,
+        ) = ctx.saved_tensors
         theta_topk, q_topk = ctx.topk
-        need_q, need_kt, need_kq, need_al = ctx.needs_input_grad[1:5]
+        # None means coupled mode: reuse forward kappa and route its gradient back.
+        coupled_kt = theta_kappa_backward is None
+        coupled_kq = q_kappa_backward is None
+        kt_bwd = theta_kappa_forward if coupled_kt else theta_kappa_backward
+        kq_bwd = q_kappa_forward if coupled_kq else q_kappa_backward
+        need_q = ctx.needs_input_grad[4]
+        need_dkt = ctx.needs_input_grad[1] if coupled_kt else ctx.needs_input_grad[2]
+        need_dkq = ctx.needs_input_grad[5] if coupled_kq else ctx.needs_input_grad[6]
+        need_dal = ctx.needs_input_grad[8]
         dtheta, dq, scalars = ccdl_quant_bwd(
             g_proxy.contiguous(),
             theta,
+            kt_bwd,
+            theta_topk,
             q,
+            kq_bwd,
+            q_topk,
             packed_scale,
-            theta_kappa,
-            q_kappa,
             alpha,
             ctx.format_id,
-            theta_topk,
-            q_topk,
             need_q,
-            need_kt,
-            need_kq,
-            need_al,
+            need_dkt,
+            need_dkq,
+            need_dal,
         )
+        dkt_fwd = scalars[0] if (coupled_kt and need_dkt) else None
+        dkt_bwd = scalars[0] if ((not coupled_kt) and need_dkt) else None
+        dkq_fwd = scalars[1] if (coupled_kq and need_dkq) else None
+        dkq_bwd = scalars[1] if ((not coupled_kq) and need_dkq) else None
         return (
             dtheta.reshape(theta.shape),
+            dkt_fwd,
+            dkt_bwd,
+            None,
             reduce_q_grad(dq, theta, q) if need_q else None,
-            scalars[0] if need_kt else None,
-            scalars[1] if need_kq else None,
-            scalars[2] if need_al else None,
+            dkq_fwd,
+            dkq_bwd,
             None,
-            None,
+            scalars[2] if need_dal else None,
             None,
             None,
         )
@@ -182,23 +215,27 @@ class CcdlQuantFn(torch.autograd.Function):
 
 def ccdl_quant(
     theta: torch.Tensor,
+    theta_kappa_forward: torch.Tensor,
+    theta_kappa_backward: torch.Tensor | None,
+    theta_topk: int,
     q: torch.Tensor,
-    theta_kappa: torch.Tensor,
-    q_kappa: torch.Tensor,
+    q_kappa_forward: torch.Tensor,
+    q_kappa_backward: torch.Tensor | None,
+    q_topk: int,
     alpha: torch.Tensor,
     seed: torch.Tensor,
     format_id: int,
-    theta_topk: int,
-    q_topk: int,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     return CcdlQuantFn.apply(
         theta,
+        theta_kappa_forward,
+        theta_kappa_backward,
+        theta_topk,
         q,
-        theta_kappa,
-        q_kappa,
+        q_kappa_forward,
+        q_kappa_backward,
+        q_topk,
         alpha,
         seed,
         int(format_id),
-        theta_topk,
-        q_topk,
     )

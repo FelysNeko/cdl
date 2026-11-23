@@ -92,7 +92,7 @@ class Nvfp4ExtendedCdlQuantForActivation(ExtendedCdlQuantForActivation):
 
         lead = theta.shape[:-2]
         nb, tpb = theta.shape[-2:]
-        packed, scale, alpha = nvfp4_quant(theta.reshape(-1, nb * tpb))
+        packed, scale, alpha = nvfp4_quant(theta.reshape(-1, nb * tpb), None)
         return PackedNvfp4ExtendedCdlTensor(
             packed_theta=packed.reshape(*lead, nb, 8),
             packed_scale=scale.reshape(*lead, nb, 1),
@@ -106,6 +106,7 @@ class Nvfp4ExtendedCdlQuantForActivation(ExtendedCdlQuantForActivation):
         if self.kernel == "torch":
             return super().training_forward(theta)
 
+        self.kernel_seed.add_(1)
         packed_theta, packed_scale, grad_proxy, global_scale = nvfp4_ecdl_quant(
             theta,
             self.kappa,
@@ -132,6 +133,7 @@ class Nvfp4ExtendedCdlQuantForWeight(ExtendedCdlQuantForWeight):
         weight: torch.Tensor,
         dtype: torch.dtype,
         kappa_forward: float,
+        kappa_backward: float | None = None,
         kernel: Literal["torch", "triton"] = "torch",
     ) -> None:
         super().__init__(
@@ -139,7 +141,8 @@ class Nvfp4ExtendedCdlQuantForWeight(ExtendedCdlQuantForWeight):
             E2M1(dtype),
             UE4M3ExcludeZero(dtype),
             16,
-            kappa_forward=kappa_forward,
+            kappa_forward,
+            kappa_backward,
             scale_mode="nvidia",
         )
         self.kernel = kernel
@@ -154,7 +157,7 @@ class Nvfp4ExtendedCdlQuantForWeight(ExtendedCdlQuantForWeight):
 
         lead = theta.shape[:-2]
         nb, tpb = theta.shape[-2:]
-        packed, scale, alpha = nvfp4_quant(theta.reshape(-1, nb * tpb))
+        packed, scale, alpha = nvfp4_quant(theta.reshape(-1, nb * tpb), None)
         return PackedNvfp4ExtendedCdlTensor(
             packed_theta=packed.reshape(*lead, nb, 8),
             packed_scale=scale.reshape(*lead, nb, 1),
@@ -168,6 +171,7 @@ class Nvfp4ExtendedCdlQuantForWeight(ExtendedCdlQuantForWeight):
         if self.kernel == "torch":
             return super().training_forward(theta)
 
+        self.kernel_seed.add_(1)
         packed_theta, packed_scale, grad_proxy, global_scale = nvfp4_ecdl_quant(
             theta,
             self.kappa,

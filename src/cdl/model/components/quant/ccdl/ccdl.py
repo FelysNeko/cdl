@@ -75,7 +75,9 @@ class CascadedCdlQuant(Quant):
         q_format: Format,
         q_topk: int,
         block_size: int,
-        kappa: float,
+        kappa_forward: float,
+        theta_kappa_backward: float | None,
+        q_kappa_backward: float | None,
     ):
         super().__init__()
         self.input_shape = input_shape
@@ -93,8 +95,22 @@ class CascadedCdlQuant(Quant):
 
         q_shape = input_shape[:-1] + (num_blocks, 1)
 
-        self.log_theta_kappa = nn.Parameter(torch.full((), math.log(kappa)))
-        self.log_q_kappa = nn.Parameter(torch.full((), math.log(kappa)))
+        self.log_theta_kappa = nn.Parameter(torch.full((), math.log(kappa_forward)))
+        self.log_q_kappa = nn.Parameter(torch.full((), math.log(kappa_forward)))
+        self.register_buffer(
+            "theta_kappa_backward",
+            torch.tensor(theta_kappa_backward, dtype=torch.float32)
+            if theta_kappa_backward is not None
+            else None,
+            persistent=False,
+        )
+        self.register_buffer(
+            "q_kappa_backward",
+            torch.tensor(q_kappa_backward, dtype=torch.float32)
+            if q_kappa_backward is not None
+            else None,
+            persistent=False,
+        )
         self.log_q = nn.Parameter(torch.full(q_shape, math.log(1)))
         self.log_alpha = nn.Parameter(torch.full((), math.log(1)))
         self.register_buffer(
@@ -166,11 +182,15 @@ class CascadedCdlQuant(Quant):
             theta,
             self.theta_format,
             self.theta_kappa,
+            self.theta_kappa_backward,
             self.theta_topk,
+            None,
             self.q,
             self.q_format,
             self.q_kappa,
+            self.q_kappa_backward,
             self.q_topk,
+            None,
             self.alpha,
             True,
         )
@@ -216,7 +236,9 @@ class CascadedCdlQuantForActivation(CascadedCdlQuant):
         q_format: Format,
         q_topk: int,
         block_size: int,
-        kappa: float,
+        kappa_forward: float,
+        theta_kappa_backward: float | None = None,
+        q_kappa_backward: float | None = None,
     ):
         super().__init__(
             input_shape,
@@ -225,7 +247,9 @@ class CascadedCdlQuantForActivation(CascadedCdlQuant):
             q_format,
             q_topk,
             block_size,
-            kappa,
+            kappa_forward,
+            theta_kappa_backward,
+            q_kappa_backward,
         )
 
     def get_q_lr(self, eta: float) -> float:
@@ -246,7 +270,9 @@ class CascadedCdlQuantForWeight(CascadedCdlQuant):
         theta_format: Format,
         q_format: Format,
         block_size: int,
-        kappa: float,
+        kappa_forward: float,
+        theta_kappa_backward: float | None = None,
+        q_kappa_backward: float | None = None,
     ):
         out_dim, k_dim = weight.shape
         super().__init__(
@@ -256,7 +282,9 @@ class CascadedCdlQuantForWeight(CascadedCdlQuant):
             q_format,
             q_format.n,
             block_size,
-            kappa,
+            kappa_forward,
+            theta_kappa_backward,
+            q_kappa_backward,
         )
         self.init_q_from_weight(weight)
         self.initialized = True

@@ -8,12 +8,15 @@ def cdl_topk_forward(
     theta: torch.Tensor,
     f: Format,
     q: torch.Tensor,
-    kappa: torch.Tensor,
+    kappa_forward: torch.Tensor,
+    kappa_backward: torch.Tensor | None,
     topk: int,
     companded: bool,
-    num_quantized_params: int | None = None,
+    num_quantized_params: int | None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
-    topk_pmf, topk_indices = formulae.topk_cpmf(theta, f, q, kappa, topk, companded)
+    topk_pmf, topk_indices = formulae.topk_cpmf(
+        theta, f, q, kappa_forward, topk, companded
+    )
 
     entropies = None
     if num_quantized_params is not None:
@@ -24,7 +27,14 @@ def cdl_topk_forward(
             num_quantized_params,
         )
 
-    proxy = formulae.topk_q_d(f.level, q, topk_pmf, topk_indices)
+    if kappa_backward is None:
+        proxy_pmf, proxy_indices = topk_pmf, topk_indices
+    else:
+        proxy_pmf, proxy_indices = formulae.topk_cpmf(
+            theta, f, q, kappa_backward, topk, companded
+        )
+
+    proxy = formulae.topk_q_d(f.level, q, proxy_pmf, proxy_indices)
     chosen = formulae.topk_q_p_indices(topk_pmf, topk_indices)
 
     return chosen, proxy.to(theta.dtype), entropies
@@ -33,16 +43,18 @@ def cdl_topk_forward(
 def cascaded_cdl_topk_forward(
     theta: torch.Tensor,
     theta_format: Format,
-    theta_kappa: torch.Tensor,
+    theta_kappa_forward: torch.Tensor,
+    theta_kappa_backward: torch.Tensor | None,
     theta_topk: int,
+    theta_num_quantized_params: int | None,
     q: torch.Tensor,
     q_format: Format,
-    q_kappa: torch.Tensor,
+    q_kappa_forward: torch.Tensor,
+    q_kappa_backward: torch.Tensor | None,
     q_topk: int,
+    q_num_quantized_params: int | None,
     alpha: torch.Tensor,
     companded: bool,
-    theta_num_quantized_params: int | None = None,
-    q_num_quantized_params: int | None = None,
 ) -> tuple[
     torch.Tensor,
     torch.Tensor,
@@ -54,7 +66,8 @@ def cascaded_cdl_topk_forward(
         q,
         q_format,
         torch.ones(()),
-        q_kappa,
+        q_kappa_forward,
+        q_kappa_backward,
         q_topk,
         companded,
         q_num_quantized_params,
@@ -65,7 +78,8 @@ def cascaded_cdl_topk_forward(
         theta,
         theta_format,
         proxied_q_hat * alpha,
-        theta_kappa,
+        theta_kappa_forward,
+        theta_kappa_backward,
         theta_topk,
         companded,
         theta_num_quantized_params,

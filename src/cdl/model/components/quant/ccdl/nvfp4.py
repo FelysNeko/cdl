@@ -66,7 +66,9 @@ class Nvfp4CascadedCdlQuantForActivation(CascadedCdlQuantForActivation):
         theta_topk: int,
         q_topk: int,
         dtype: torch.dtype,
-        kappa: float,
+        kappa_forward: float,
+        theta_kappa_backward: float | None = None,
+        q_kappa_backward: float | None = None,
         kernel: Literal["torch", "triton"] = "torch",
     ) -> None:
         super().__init__(
@@ -76,7 +78,9 @@ class Nvfp4CascadedCdlQuantForActivation(CascadedCdlQuantForActivation):
             UE4M3ExcludeZero(dtype),
             q_topk,
             16,
-            kappa,
+            kappa_forward,
+            theta_kappa_backward,
+            q_kappa_backward,
         )
         self.kernel = kernel
         if kernel == "triton":
@@ -88,15 +92,18 @@ class Nvfp4CascadedCdlQuantForActivation(CascadedCdlQuantForActivation):
         if self.kernel == "torch":
             return super().training_forward(theta)
 
+        self.kernel_seed.add_(1)
         packed_theta, packed_scale, grad_proxy = nvfp4_ccdl_quant(
             theta,
-            self.q,
             self.theta_kappa,
+            self.theta_kappa_backward,
+            self.theta_topk,
+            self.q,
             self.q_kappa,
+            self.q_kappa_backward,
+            self.q_topk,
             self.alpha,
             self.kernel_seed,
-            self.theta_topk,
-            self.q_topk,
         )
         return PackedNvfp4CascadedCdlTensor(
             packed_theta=packed_theta,
@@ -115,10 +122,20 @@ class Nvfp4CascadedCdlQuantForWeight(CascadedCdlQuantForWeight):
         self,
         weight: torch.Tensor,
         dtype: torch.dtype,
-        kappa: float,
+        kappa_forward: float,
+        theta_kappa_backward: float | None = None,
+        q_kappa_backward: float | None = None,
         kernel: Literal["torch", "triton"] = "torch",
     ):
-        super().__init__(weight, E2M1(dtype), UE4M3ExcludeZero(dtype), 16, kappa)
+        super().__init__(
+            weight,
+            E2M1(dtype),
+            UE4M3ExcludeZero(dtype),
+            16,
+            kappa_forward,
+            theta_kappa_backward,
+            q_kappa_backward,
+        )
         self.kernel = kernel
         if kernel == "triton":
             self.register_buffer(
@@ -129,15 +146,18 @@ class Nvfp4CascadedCdlQuantForWeight(CascadedCdlQuantForWeight):
         if self.kernel == "torch":
             return super().training_forward(theta)
 
+        self.kernel_seed.add_(1)
         packed_theta, packed_scale, grad_proxy = nvfp4_ccdl_quant(
             theta,
-            self.q,
             self.theta_kappa,
+            self.theta_kappa_backward,
+            self.theta_topk,
+            self.q,
             self.q_kappa,
+            self.q_kappa_backward,
+            self.q_topk,
             self.alpha,
             self.kernel_seed,
-            self.theta_topk,
-            self.q_topk,
         )
         return PackedNvfp4CascadedCdlTensor(
             packed_theta=packed_theta,

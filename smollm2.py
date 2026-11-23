@@ -134,7 +134,7 @@ _QUANT_VARIANTS: dict[str, _QuantVariantSpec] = {
     ),
 }
 
-QUANT_VARIANTS = ("none", "ste", *_QUANT_VARIANTS)
+QUANT_VARIANTS = ("none", "ste", "sr", *_QUANT_VARIANTS)
 ACTIVATION_VARIANTS = QUANT_VARIANTS
 WEIGHT_VARIANTS = QUANT_VARIANTS
 
@@ -160,11 +160,14 @@ class ModelConfig:
             "down_proj",
         ]
     )
-    activation: str = "ste"  # "none", "ste", "*_ccdl", or "*_ecdl"
-    weight: str = "nvfp4_ccdl"  # "none", "ste", "*_ccdl", or "*_ecdl"
+    activation: str = "ste"  # "none", "ste", "sr", "*_ccdl", or "*_ecdl"
+    weight: str = "nvfp4_ccdl"  # "none", "ste", "sr", "*_ccdl", or "*_ecdl"
     weight_kappa: float = 2.0
+    weight_kappa_bwd: float | None = None
+    weight_q_kappa_bwd: float | None = None
     activation_kappa: float = 2.0
     activation_kappa_bwd: float | None = None
+    activation_q_kappa_bwd: float | None = None
     theta_topk: int = 5
     q_topk: int = 5
     block_size: int = 16  # 16 for nvfp4, 32 for mxfp4/mxfp8
@@ -206,6 +209,20 @@ class ModelConfig:
                 and not 1 <= self.q_topk <= spec.q_format(dtype).n
             ):
                 raise ValueError(f"q_topk {self.q_topk} out of range")
+        if self.weight_kappa_bwd is not None and not (
+            self.weight.endswith("_ccdl") or self.weight.endswith("_ecdl")
+        ):
+            raise ValueError(
+                f"weight_kappa_bwd is only supported for *_ccdl or *_ecdl weight variants, got {self.weight!r}"
+            )
+        if self.weight_q_kappa_bwd is not None and not self.weight.endswith("_ccdl"):
+            raise ValueError(
+                f"weight_q_kappa_bwd is only supported for *_ccdl weight variants, got {self.weight!r}"
+            )
+        if self.activation_q_kappa_bwd is not None and not self.activation.endswith("_ccdl"):
+            raise ValueError(
+                f"activation_q_kappa_bwd is only supported for *_ccdl activation variants, got {self.activation!r}"
+            )
 
 
 @dataclass
@@ -352,8 +369,8 @@ def _ste_simulation(cfg: ModelConfig) -> str:
 def _build_activation_quant(cfg: ModelConfig, in_features: int, dtype: torch.dtype):
     if cfg.activation == "none":
         return IdentityQuant()
-    if cfg.activation == "ste":
-        return SteQuant(_ste_simulation(cfg))
+    if cfg.activation in ("ste", "sr"):
+        return SteQuant(_ste_simulation(cfg), stochastic=(cfg.activation == "sr"))
     spec = _QUANT_VARIANTS[cfg.activation]
     if spec.family == "ccdl":
         return spec.act_cls(
@@ -361,7 +378,9 @@ def _build_activation_quant(cfg: ModelConfig, in_features: int, dtype: torch.dty
             cfg.theta_topk,
             cfg.q_topk,
             dtype,
-            kappa=cfg.activation_kappa,
+            kappa_forward=cfg.activation_kappa,
+            theta_kappa_backward=cfg.activation_kappa_bwd,
+            q_kappa_backward=cfg.activation_q_kappa_bwd,
             kernel=cfg.kernel,
         )
     return spec.act_cls(
@@ -377,20 +396,23 @@ def _build_activation_quant(cfg: ModelConfig, in_features: int, dtype: torch.dty
 def _build_weight_quant(cfg: ModelConfig, weight: torch.Tensor, dtype: torch.dtype):
     if cfg.weight == "none":
         return IdentityQuant()
-    if cfg.weight == "ste":
-        return SteQuant(_ste_simulation(cfg))
+    if cfg.weight in ("ste", "sr"):
+        return SteQuant(_ste_simulation(cfg), stochastic=(cfg.weight == "sr"))
     spec = _QUANT_VARIANTS[cfg.weight]
     if spec.family == "ccdl":
         return spec.weight_cls(
             weight,
             dtype=dtype,
+            kappa_forward=cfg.weight_kappa,
+            theta_kappa_backward=cfg.weight_kappa_bwd,
+            q_kappa_backward=cfg.weight_q_kappa_bwd,
             kernel=cfg.kernel,
-            kappa=cfg.weight_kappa,
         )
     return spec.weight_cls(
         weight,
         dtype=dtype,
         kappa_forward=cfg.weight_kappa,
+        kappa_backward=cfg.weight_kappa_bwd,
         kernel=cfg.kernel,
     )
 

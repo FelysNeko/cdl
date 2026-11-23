@@ -14,6 +14,7 @@ type Simulation = Literal["nvfp4", "mxfp4", "mxfp8"]
 class SteTensor(QTensor):
     theta: torch.Tensor
     simulation: Simulation | None
+    seed: torch.Tensor | None
 
     @property
     def leading_shape(self) -> torch.Size:
@@ -23,26 +24,29 @@ class SteTensor(QTensor):
     def k(self) -> int:
         return self.theta.shape[-1]
 
-    def nvfp4(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def apply_quantize_fn(
+        self, quant_fn
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
         with torch.no_grad():
-            packed, scale, alpha = nvfp4_quant(self.theta.reshape(-1, self.k))
+            packed, scale, alpha = quant_fn(
+                self.theta.reshape(-1, self.k), self.seed
+            )
             packed = packed.reshape(*self.leading_shape, packed.shape[-1])
             scale = scale.reshape(*self.leading_shape, scale.shape[-1])
             return packed, scale, alpha
+
+    def nvfp4(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        packed, scale, alpha = self.apply_quantize_fn(nvfp4_quant)
+        assert alpha is not None
+        return packed, scale, alpha
 
     def mxfp4(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        with torch.no_grad():
-            packed, scale, alpha = mxfp4_quant(self.theta.reshape(-1, self.k))
-            packed = packed.reshape(*self.leading_shape, packed.shape[-1])
-            scale = scale.reshape(*self.leading_shape, scale.shape[-1])
-            return packed, scale, alpha
+        packed, scale, alpha = self.apply_quantize_fn(mxfp4_quant)
+        assert alpha is not None
+        return packed, scale, alpha
 
     def mxfp8(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
-        with torch.no_grad():
-            packed, scale, alpha = mxfp8_quant(self.theta.reshape(-1, self.k))
-            packed = packed.reshape(*self.leading_shape, packed.shape[-1])
-            scale = scale.reshape(*self.leading_shape, scale.shape[-1])
-            return packed, scale, alpha
+        return self.apply_quantize_fn(mxfp8_quant)
 
     def dequantize(self) -> torch.Tensor:
         if self.simulation is None:
@@ -81,9 +85,18 @@ class SteTensor(QTensor):
 
 
 class SteQuant(Quant):
-    def __init__(self, simulation: Simulation | None):
+    def __init__(self, simulation: Simulation | None, stochastic: bool):
         super().__init__()
         self.simulation = simulation
+        self.stochastic = stochastic
+        if stochastic:
+            self.register_buffer(
+                "kernel_seed", torch.zeros((), dtype=torch.int64), persistent=False
+            )
 
     def forward(self, x: torch.Tensor) -> QTensor:
-        return SteTensor(theta=x, simulation=self.simulation)
+        seed = None
+        if self.stochastic and self.training:
+            self.kernel_seed.add_(1)
+            seed = self.kernel_seed
+        return SteTensor(theta=x, simulation=self.simulation, seed=seed)

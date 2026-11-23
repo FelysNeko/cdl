@@ -42,8 +42,8 @@ class QLinear(nn.Linear):
         dtype: Any | None = None,
     ):
         super().__init__(in_features, out_features, bias, device, dtype)
-        self.activation_quant = SteQuant(None)
-        self.weight_quant = SteQuant(None)
+        self.activation_quant = SteQuant(None, False)
+        self.weight_quant = SteQuant(None, False)
         self.backend = "native"
         self.lora = nn.Identity()
 

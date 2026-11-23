@@ -98,7 +98,6 @@ class EcdlQuantFn(torch.autograd.Function):
         theta_topk: int,
         scale_mode: str,
     ):
-        seed.add_(1)
         packed_theta, packed_scale, alpha_eff = ecdl_quant_fwd(
             theta,
             kappa_forward,

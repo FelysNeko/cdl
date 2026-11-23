@@ -37,8 +37,8 @@ class QConv2d(nn.Conv2d):
             dtype=dtype,
         )
         nn.init.kaiming_normal_(self.weight, mode="fan_out", nonlinearity="relu")
-        self.activation_quant = SteQuant(None)
-        self.weight_quant = SteQuant(None)
+        self.activation_quant = SteQuant(None, False)
+        self.weight_quant = SteQuant(None, False)
         self.backend = "native"
 
     def set_activation_quant(self, quant: Quant) -> None:
