@@ -140,7 +140,7 @@ _QUANT_VARIANTS: dict[str, _QuantVariantSpec] = {
     ),
 }
 
-QUANT_VARIANTS = ("none", "ste", "sr", *_QUANT_VARIANTS)
+QUANT_VARIANTS = ("none", "ste", *_QUANT_VARIANTS)
 ACTIVATION_VARIANTS = QUANT_VARIANTS
 WEIGHT_VARIANTS = QUANT_VARIANTS
 KV_VARIANTS = QUANT_VARIANTS
@@ -167,9 +167,9 @@ class ModelConfig:
             "down_proj",
         ]
     )
-    activation: str = "ste"  # "none", "ste", "sr", "*_ccdl", or "*_ecdl"
-    weight: str = "nvfp4_ccdl"  # "none", "ste", "sr", "*_ccdl", or "*_ecdl"
-    kv: str = "none"  # "none", "ste", "sr", "*_ccdl", or "*_ecdl"
+    activation: str = "ste"  # "none", "ste", "*_ccdl", or "*_ecdl"
+    weight: str = "nvfp4_ccdl"  # "none", "ste", "*_ccdl", or "*_ecdl"
+    kv: str = "none"  # "none", "ste", "*_ccdl", or "*_ecdl"
     weight_kappa: float = 2.0
     weight_kappa_bwd: float | None = None
     weight_q_kappa_bwd: float | None = None
@@ -399,8 +399,8 @@ def _build_input_quant(
 ) -> Quant:
     if variant == "none":
         return IdentityQuant()
-    if variant in ("ste", "sr"):
-        return SteQuant(_ste_simulation(cfg), stochastic=(variant == "sr"))
+    if variant == "ste":
+        return SteQuant(_ste_simulation(cfg), False)
     spec = _QUANT_VARIANTS[variant]
     if spec.family == "ccdl":
         return spec.act_cls(
@@ -467,8 +467,8 @@ def _kv_quant_sdpa_attention_forward(
 def _build_weight_quant(cfg: ModelConfig, weight: torch.Tensor, dtype: torch.dtype):
     if cfg.weight == "none":
         return IdentityQuant()
-    if cfg.weight in ("ste", "sr"):
-        return SteQuant(_ste_simulation(cfg), stochastic=(cfg.weight == "sr"))
+    if cfg.weight == "ste":
+        return SteQuant(_ste_simulation(cfg), False)
     spec = _QUANT_VARIANTS[cfg.weight]
     if spec.family == "ccdl":
         return spec.weight_cls(

@@ -1,4 +1,4 @@
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Literal
 
@@ -9,35 +9,34 @@ from cdl.core.kernel.dequant import mxfp4_dequant, mxfp8_dequant, nvfp4_dequant
 from cdl.core.kernel.quant import mxfp4_quant, mxfp8_quant, nvfp4_quant
 
 type Simulation = Literal["nvfp4", "mxfp4", "mxfp8"]
+type QuantFn = Callable[
+    [torch.Tensor, torch.Tensor | None, bool],
+    tuple[torch.Tensor, torch.Tensor, torch.Tensor | None],
+]
 
 
 @dataclass
 class SteTensor(QTensor):
     theta: torch.Tensor
     simulation: Simulation | None
-    seed: torch.Tensor | None
+    block_2d: bool
 
     @property
     def shape(self) -> Sequence[int]:
         return self.theta.shape
 
-    @property
-    def leading_shape(self) -> torch.Size:
-        return self.theta.shape[:-1]
-
-    @property
-    def k(self) -> int:
-        return self.theta.shape[-1]
-
     def apply_quantize_fn(
-        self, quant_fn
+        self, quant_fn: QuantFn
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
         with torch.no_grad():
-            packed, scale, alpha = quant_fn(
-                self.theta.reshape(-1, self.k), self.seed, False
-            )
-            packed = packed.reshape(*self.leading_shape, packed.shape[-1])
-            scale = scale.reshape(*self.leading_shape, scale.shape[-1])
+            if self.block_2d:
+                assert self.theta.ndim == 2
+                return quant_fn(self.theta, None, True)
+            lead = self.theta.shape[:-1]
+            k = self.theta.shape[-1]
+            packed, scale, alpha = quant_fn(self.theta.reshape(-1, k), None, False)
+            packed = packed.reshape(*lead, packed.shape[-1])
+            scale = scale.reshape(*lead, scale.shape[-1])
             return packed, scale, alpha
 
     def nvfp4(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -59,49 +58,35 @@ class SteTensor(QTensor):
 
         if self.simulation == "nvfp4":
             packed, scale, alpha = self.nvfp4()
-            out = nvfp4_dequant(
-                packed.reshape(-1, packed.shape[-1]),
-                scale.reshape(-1, scale.shape[-1]),
-                alpha,
-            )
+            dequant_fn = nvfp4_dequant
         elif self.simulation == "mxfp4":
             packed, scale, alpha = self.mxfp4()
-            out = mxfp4_dequant(
-                packed.reshape(-1, packed.shape[-1]),
-                scale.reshape(-1, scale.shape[-1]),
-                alpha,
-            )
+            dequant_fn = mxfp4_dequant
         elif self.simulation == "mxfp8":
             packed, scale, alpha = self.mxfp8()
-            out = mxfp8_dequant(
-                packed.reshape(-1, packed.shape[-1]),
-                scale.reshape(-1, scale.shape[-1]),
-                alpha,
-            )
+            dequant_fn = mxfp8_dequant
         else:
             raise ValueError(f"{self.simulation} is not supported")
 
-        return out.reshape(*self.leading_shape, out.shape[-1])[..., : self.k].to(
-            self.theta.dtype
-        )
+        lead = packed.shape[:-1]
+        out = dequant_fn(
+            packed.reshape(-1, packed.shape[-1]),
+            scale.reshape(-1, scale.shape[-1]),
+            alpha,
+        ).reshape(*lead, -1)
+        if tuple(out.shape) != tuple(self.theta.shape):
+            out = out[tuple(slice(None, d) for d in self.theta.shape)]
+        return out.to(self.theta.dtype)
 
     def proxy(self) -> torch.Tensor | None:
         return self.theta
 
 
 class SteQuant(Quant):
-    def __init__(self, simulation: Simulation | None, stochastic: bool):
+    def __init__(self, simulation: Simulation | None, block_2d: bool):
         super().__init__()
         self.simulation = simulation
-        self.stochastic = stochastic
-        if stochastic:
-            self.register_buffer(
-                "kernel_seed", torch.zeros((), dtype=torch.int64), persistent=False
-            )
+        self.block_2d = block_2d
 
     def forward(self, x: torch.Tensor) -> QTensor:
-        seed = None
-        if self.stochastic and self.training:
-            self.kernel_seed.add_(1)
-            seed = self.kernel_seed
-        return SteTensor(theta=x, simulation=self.simulation, seed=seed)
+        return SteTensor(theta=x, simulation=self.simulation, block_2d=self.block_2d)
