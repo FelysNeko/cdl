@@ -12,6 +12,26 @@ def rand_seed(device: torch.device) -> torch.Tensor:
     return torch.randint(0, 2**31 - 1, (), dtype=torch.int32, device=device)
 
 
+@torch.library.custom_op(
+    "cdl::rht16_signs",
+    mutates_args=(),
+    tags=(torch.Tag.nondeterministic_seeded,),
+)
+def _rht16_signs(ref: torch.Tensor) -> torch.Tensor:
+    """Sample one shared 16-sign vector; prevents Inductor from rematerializing
+    different random signs into paired dy_t / x_t RHT kernels."""
+    return torch.where(
+        torch.randint(0, 2, (16,), device=ref.device, dtype=torch.bool),
+        1.0,
+        -1.0,
+    )
+
+
+@_rht16_signs.register_fake
+def _(ref: torch.Tensor) -> torch.Tensor:
+    return torch.empty((16,), device=ref.device, dtype=torch.float32)
+
+
 def mm_nvfp4(
     a_theta: torch.Tensor,
     a_q: torch.Tensor,
@@ -99,13 +119,7 @@ class MatMul(torch.autograd.Function):
                 : ctx.m, : ctx.w_k
             ]
             if ctx.low_precision_backward:
-                signs = torch.where(
-                    torch.randint(
-                        0, 2, (16,), device=grad_output.device, dtype=torch.bool
-                    ),
-                    1.0,
-                    -1.0,
-                )
+                signs = _rht16_signs(grad_output)
                 dy_t = rht16_transpose(grad_output, signs)
                 x_t = rht16_transpose(x, signs)
                 dy_t_theta, dy_t_q, dy_t_alpha = nvfp4_quant(
