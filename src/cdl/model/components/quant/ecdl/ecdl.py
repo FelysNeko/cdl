@@ -1,4 +1,5 @@
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Literal
 
@@ -14,19 +15,31 @@ from cdl.model.mixin.batchnorm_batch_stats import BatchNormBatchStatsMixin
 
 def group_tensor_into_blocks(
     theta: torch.Tensor,
+    block_dims: Sequence[bool],
     block_size: int,
-) -> tuple[torch.Tensor, int]:
-    k = theta.shape[-1]
+) -> tuple[torch.Tensor, tuple[bool, ...], tuple[int, ...]]:
+    orig_shape = tuple(theta.shape)
+    pads = tuple(
+        (-s % block_size) if is_block else 0
+        for s, is_block in zip(orig_shape, block_dims, strict=True)
+    )
+    if any(pads):
+        pad_args: list[int] = []
+        for p in reversed(pads):
+            pad_args.extend((0, p))
+        theta = F.pad(theta, pad_args)
 
-    extra = k % block_size
-    pad_size = 0
-    if extra:
-        pad_size = block_size - extra
-        theta = F.pad(theta, (0, pad_size))
+    blocked_shape: list[int] = []
+    block_mask: list[bool] = []
+    for s, is_block in zip(theta.shape, block_dims):
+        if is_block:
+            blocked_shape.extend((s // block_size, block_size))
+            block_mask.extend((False, True))
+        else:
+            blocked_shape.append(s)
+            block_mask.append(False)
 
-    num_blocks = (k + pad_size) // block_size
-    cdl_style_theta = theta.reshape(*theta.shape[:-1], num_blocks, block_size)
-    return cdl_style_theta, pad_size
+    return theta.reshape(blocked_shape), tuple(block_mask), orig_shape
 
 
 @dataclass
@@ -161,7 +174,8 @@ class ExtendedCdlQuant(Quant):
                     f"expected input shaped like {self.input_shape}, got {tuple(x.shape)}"
                 )
 
-        theta, _ = group_tensor_into_blocks(x, self.block_size)
+        block_dims = (False,) * (x.ndim - 1) + (True,)
+        theta, _, _ = group_tensor_into_blocks(x, block_dims, self.block_size)
 
         if not self.training:
             return self.eval_forward(theta)
