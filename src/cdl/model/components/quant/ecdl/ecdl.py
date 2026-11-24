@@ -104,8 +104,10 @@ class ExtendedCdlQuant(Quant):
         return self.log_kappa.exp()
 
     def eval_forward(self, theta: torch.Tensor) -> QTensor:
+        block_mask = (False,) * (theta.ndim - 1) + (True,)
         theta_indices, q_indices, global_scale = extended_nearest_round(
             theta,
+            block_mask,
             self.theta_format,
             self.q_format,
             self.scale_mode,
@@ -121,9 +123,11 @@ class ExtendedCdlQuant(Quant):
         )
 
     def training_forward(self, theta: torch.Tensor) -> QTensor:
+        block_mask = (False,) * (theta.ndim - 1) + (True,)
         theta_indices, q_indices, grad_proxy, global_scale, _ = (
             extended_cdl_topk_forward(
                 theta,
+                block_mask,
                 self.theta_format,
                 self.theta_topk,
                 self.q_format,

@@ -1,4 +1,5 @@
 import math
+from collections.abc import Sequence
 from typing import Literal
 
 import torch
@@ -44,14 +45,26 @@ def cdl_topk_forward(
 
 
 @torch.no_grad()
+def get_block_absmax(
+    theta: torch.Tensor,
+    block_mask: Sequence[bool],
+) -> torch.Tensor:
+    assert len(block_mask) == theta.ndim
+    dims = tuple(i for i, is_block in enumerate(block_mask) if is_block)
+    abs_theta = theta.float().abs()
+    return abs_theta.amax(dim=dims, keepdim=True) if dims else abs_theta
+
+
+@torch.no_grad()
 def compute_nvidia_scale(
     theta: torch.Tensor,
+    block_mask: Sequence[bool],
     theta_format: Format,
     q_format: Format,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     a_b = theta.detach().float().abs().amax().clamp_min(torch.finfo(torch.float32).tiny)
     f_max = float(theta_format.level.amax() * q_format.level.amax())
-    block_abs_max = theta.float().abs().amax(dim=-1, keepdim=True)
+    block_abs_max = get_block_absmax(theta, block_mask)
     q = block_abs_max * q_format.level.amax().float() / a_b
     return q_format.ordinal(q), a_b / f_max
 
@@ -59,22 +72,36 @@ def compute_nvidia_scale(
 @torch.no_grad()
 def compute_ocp_scale(
     theta: torch.Tensor,
+    block_mask: Sequence[bool],
     theta_format: Format,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     emax = math.floor(math.log2(float(theta_format.level.amax())))
-    block_abs_max = (
-        theta.float()
-        .abs()
-        .amax(dim=-1, keepdim=True)
-        .clamp_min(torch.finfo(torch.float32).tiny)
+    block_abs_max = get_block_absmax(theta, block_mask).clamp_min(
+        torch.finfo(torch.float32).tiny
     )
     byte = (block_abs_max.log2().floor() - emax + 127).clamp(0, 254)
     ones = torch.ones((), device=theta.device, dtype=torch.float32)
     return byte.to(torch.uint8), ones
 
 
+@torch.no_grad()
+def compute_scale(
+    theta: torch.Tensor,
+    block_mask: Sequence[bool],
+    theta_format: Format,
+    q_format: Format,
+    mode: Literal["ocp", "nvidia"],
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if mode == "ocp":
+        return compute_ocp_scale(theta, block_mask, theta_format)
+    if mode == "nvidia":
+        return compute_nvidia_scale(theta, block_mask, theta_format, q_format)
+    raise ValueError(f"unknown scale mode {mode!r}")
+
+
 def extended_cdl_topk_forward(
     theta: torch.Tensor,
+    block_mask: Sequence[bool],
     theta_format: Format,
     theta_topk: int,
     q_format: Format,
@@ -90,12 +117,9 @@ def extended_cdl_topk_forward(
     torch.Tensor,
     torch.Tensor | None,
 ]:
-    if mode == "ocp":
-        q_indices, global_scale = compute_ocp_scale(theta, theta_format)
-    elif mode == "nvidia":
-        q_indices, global_scale = compute_nvidia_scale(theta, theta_format, q_format)
-    else:
-        raise ValueError(f"unknown scale mode {mode!r}")
+    q_indices, global_scale = compute_scale(
+        theta, block_mask, theta_format, q_format, mode
+    )
     q_hat = q_format.level[q_indices.long()]
 
     theta_indices, grad_proxy, entropies = cdl_topk_forward(
@@ -115,16 +139,14 @@ def extended_cdl_topk_forward(
 @torch.no_grad()
 def extended_nearest_round(
     theta: torch.Tensor,
+    block_mask: Sequence[bool],
     theta_format: Format,
     q_format: Format,
     mode: Literal["ocp", "nvidia"],
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    if mode == "ocp":
-        q_indices, global_scale = compute_ocp_scale(theta, theta_format)
-    elif mode == "nvidia":
-        q_indices, global_scale = compute_nvidia_scale(theta, theta_format, q_format)
-    else:
-        raise ValueError(f"unknown scale mode {mode!r}")
+    q_indices, global_scale = compute_scale(
+        theta, block_mask, theta_format, q_format, mode
+    )
     q_hat = q_format.level[q_indices.long()]
     scale = q_hat * global_scale
     theta_indices = theta_format.ordinal(theta / scale)
