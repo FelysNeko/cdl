@@ -57,15 +57,20 @@ def _fp4_repack_transpose_kernel(
 
 def _rht16_configs() -> list[triton.Config]:
     return [
+        triton.Config({"K_TILES": 1, "BC": 32}, num_warps=2),
+        triton.Config({"K_TILES": 1, "BC": 64}, num_warps=4),
         triton.Config({"K_TILES": 2, "BC": 32}, num_warps=4),
-        triton.Config({"K_TILES": 2, "BC": 64}, num_warps=4),
+        triton.Config({"K_TILES": 2, "BC": 64}, num_warps=4, num_stages=2),
+        triton.Config({"K_TILES": 2, "BC": 64}, num_warps=4, num_stages=3),
         triton.Config({"K_TILES": 4, "BC": 32}, num_warps=4),
-        triton.Config({"K_TILES": 4, "BC": 64}, num_warps=4),
+        triton.Config({"K_TILES": 4, "BC": 64}, num_warps=4, num_stages=2),
+        triton.Config({"K_TILES": 4, "BC": 64}, num_warps=4, num_stages=3),
         triton.Config({"K_TILES": 4, "BC": 64}, num_warps=8),
         triton.Config({"K_TILES": 4, "BC": 128}, num_warps=4),
-        triton.Config({"K_TILES": 4, "BC": 128}, num_warps=8),
+        triton.Config({"K_TILES": 4, "BC": 128}, num_warps=8, num_stages=2),
         triton.Config({"K_TILES": 8, "BC": 64}, num_warps=4),
         triton.Config({"K_TILES": 8, "BC": 64}, num_warps=8),
+        triton.Config({"K_TILES": 8, "BC": 128}, num_warps=8, num_stages=2),
     ]
 
 
@@ -170,7 +175,7 @@ def rht16_transpose(
         .to(x.dtype)
         .contiguous()
     )
-    m_bucket = 0 if m_pad <= 32 else (1 if m_pad <= 512 else 2)
+    m_bucket = 0 if m_pad <= 32 else (1 if m_pad <= 512 else (2 if m_pad <= 2048 else 3))
     c_bucket = 0 if c <= 256 else (1 if c <= 1024 else 2)
     if block_c is not None:
         k_tiles = 2 if m_pad <= 32 else 4

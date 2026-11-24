@@ -22,7 +22,9 @@ def _scale_mode_id(scale_mode: str) -> int:
 
 
 def _1d_buckets(m: int, nb: int) -> tuple[int, int]:
-    return (0 if m <= 512 else 1), (0 if nb <= 1 else (1 if nb <= 4 else 2))
+    return (0 if m <= 512 else (1 if m <= 2048 else 2)), (
+        0 if nb <= 1 else (1 if nb <= 4 else 2)
+    )
 
 
 def _launch_ecdl_fwd_2d(
@@ -284,7 +286,7 @@ def launch_ecdl_bwd(
 
     dtheta = theta.new_empty((m, k), dtype=theta.dtype)
     partials = (
-        torch.zeros((64, 2), dtype=torch.float32, device=theta.device)
+        torch.zeros((256, 2), dtype=torch.float32, device=theta.device)
         if need_dkappa
         else torch.empty(1, dtype=torch.float32, device=theta.device)
     )

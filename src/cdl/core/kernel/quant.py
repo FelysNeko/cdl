@@ -83,8 +83,25 @@ def _fp8_stochastic_round(v, seed, offset):
     return tl.cast(tl.where(sgn, -mag, mag), tl.float8e4nv)
 
 
+def _absmax_configs() -> list[triton.Config]:
+    return [
+        triton.Config({"BLOCK": 1024}, num_warps=4),
+        triton.Config({"BLOCK": 2048}, num_warps=4),
+        triton.Config({"BLOCK": 4096}, num_warps=4),
+        triton.Config({"BLOCK": 4096}, num_warps=8),
+        triton.Config({"BLOCK": 8192}, num_warps=8),
+    ]
+
+
+@triton.autotune(
+    configs=_absmax_configs(),
+    key=["N_BUCKET"],
+    cache_results=True,
+)
 @triton.jit
-def _absmax_atomic_kernel(x_ptr, out_u32_ptr, N, BLOCK: tl.constexpr):
+def _absmax_atomic_kernel(
+    x_ptr, out_u32_ptr, N, N_BUCKET: tl.constexpr, BLOCK: tl.constexpr
+):
     pid = tl.program_id(0)
     offs = pid.to(tl.int64) * BLOCK + tl.arange(0, BLOCK)
     v = tl.load(x_ptr + offs, mask=offs < N, other=0.0).to(tl.float32)
@@ -94,15 +111,19 @@ def _absmax_atomic_kernel(x_ptr, out_u32_ptr, N, BLOCK: tl.constexpr):
 
 def _quant_1d_configs() -> list[triton.Config]:
     return [
+        triton.Config({"BM": 2, "BB": 1}, num_warps=2),
         triton.Config({"BM": 4, "BB": 1}, num_warps=2),
         triton.Config({"BM": 8, "BB": 1}, num_warps=2),
         triton.Config({"BM": 8, "BB": 2}, num_warps=4),
         triton.Config({"BM": 8, "BB": 4}, num_warps=4),
         triton.Config({"BM": 16, "BB": 2}, num_warps=4),
-        triton.Config({"BM": 16, "BB": 4}, num_warps=4),
-        triton.Config({"BM": 16, "BB": 8}, num_warps=4),
-        triton.Config({"BM": 16, "BB": 8}, num_warps=8),
+        triton.Config({"BM": 16, "BB": 4}, num_warps=4, num_stages=2),
+        triton.Config({"BM": 16, "BB": 4}, num_warps=4, num_stages=3),
+        triton.Config({"BM": 16, "BB": 8}, num_warps=4, num_stages=2),
+        triton.Config({"BM": 16, "BB": 8}, num_warps=8, num_stages=3),
         triton.Config({"BM": 32, "BB": 4}, num_warps=4),
+        triton.Config({"BM": 32, "BB": 8}, num_warps=4, num_stages=2),
+        triton.Config({"BM": 32, "BB": 8}, num_warps=8, num_stages=3),
     ]
 
 
@@ -309,8 +330,9 @@ def _global_absmax(x: torch.Tensor) -> torch.Tensor:
     g_u32 = torch.full((), 0x00800000, dtype=torch.uint32, device=x.device)
     n_el = x.numel()
     if n_el > 0:
-        _absmax_atomic_kernel[(triton.cdiv(n_el, 4096),)](
-            x, g_u32, n_el, BLOCK=4096, num_warps=4
+        n_bucket = 0 if n_el <= 131072 else (1 if n_el <= 2097152 else 2)
+        _absmax_atomic_kernel[lambda meta: (triton.cdiv(n_el, meta["BLOCK"]),)](
+            x, g_u32, n_el, N_BUCKET=n_bucket
         )
     return g_u32.view(torch.float32)
 
@@ -386,7 +408,7 @@ def _launch_quant_1d(
     stochastic: bool,
     block_chunk: int | None,
 ) -> None:
-    rows_bucket = 0 if rows <= 512 else 1
+    rows_bucket = 0 if rows <= 512 else (1 if rows <= 2048 else 2)
     nb_bucket = 0 if nb <= 1 else (1 if nb <= 4 else 2)
     if block_chunk is not None:
         bm = 16 if group_size == 16 else 8

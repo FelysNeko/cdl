@@ -80,16 +80,20 @@ def _ecdl_scale(
 
 def _ecdl_fwd_configs() -> list[triton.Config]:
     return [
+        triton.Config({"BM": 2, "BB": 1}, num_warps=2),
         triton.Config({"BM": 4, "BB": 1}, num_warps=2),
         triton.Config({"BM": 4, "BB": 2}, num_warps=4),
         triton.Config({"BM": 8, "BB": 1}, num_warps=2),
-        triton.Config({"BM": 8, "BB": 2}, num_warps=4),
+        triton.Config({"BM": 8, "BB": 2}, num_warps=4, num_stages=2),
+        triton.Config({"BM": 8, "BB": 2}, num_warps=4, num_stages=3),
         triton.Config({"BM": 8, "BB": 4}, num_warps=4),
         triton.Config({"BM": 16, "BB": 2}, num_warps=4),
-        triton.Config({"BM": 16, "BB": 4}, num_warps=4),
+        triton.Config({"BM": 16, "BB": 4}, num_warps=4, num_stages=2),
+        triton.Config({"BM": 16, "BB": 4}, num_warps=4, num_stages=3),
         triton.Config({"BM": 16, "BB": 4}, num_warps=8),
-        triton.Config({"BM": 16, "BB": 8}, num_warps=4),
-        triton.Config({"BM": 32, "BB": 4}, num_warps=8),
+        triton.Config({"BM": 16, "BB": 8}, num_warps=4, num_stages=2),
+        triton.Config({"BM": 32, "BB": 4}, num_warps=8, num_stages=2),
+        triton.Config({"BM": 32, "BB": 8}, num_warps=8, num_stages=2),
     ]
 
 
@@ -99,12 +103,15 @@ def _ecdl_bwd_configs() -> list[triton.Config]:
         triton.Config({"BM": 2, "BB": 2}, num_warps=2),
         triton.Config({"BM": 4, "BB": 1}, num_warps=2),
         triton.Config({"BM": 4, "BB": 2}, num_warps=2),
-        triton.Config({"BM": 4, "BB": 4}, num_warps=2),
+        triton.Config({"BM": 4, "BB": 4}, num_warps=2, num_stages=2),
+        triton.Config({"BM": 4, "BB": 4}, num_warps=2, num_stages=3),
         triton.Config({"BM": 4, "BB": 4}, num_warps=4),
         triton.Config({"BM": 8, "BB": 2}, num_warps=4),
-        triton.Config({"BM": 8, "BB": 4}, num_warps=4),
+        triton.Config({"BM": 8, "BB": 4}, num_warps=4, num_stages=2),
         triton.Config({"BM": 16, "BB": 2}, num_warps=4),
-        triton.Config({"BM": 16, "BB": 4}, num_warps=4),
+        triton.Config({"BM": 16, "BB": 4}, num_warps=4, num_stages=2),
+        triton.Config({"BM": 16, "BB": 4}, num_warps=8, num_stages=2),
+        triton.Config({"BM": 32, "BB": 4}, num_warps=8, num_stages=2),
     ]
 
 
@@ -291,7 +298,7 @@ def _ecdl_bwd(
         dkt = tl.sum(g * s[:, :, None] * dk_term)
         dal = tl.sum(ds * q_hat[:, :, None])
 
-        slot = ((pid_r * 17 + pid_b) & 63) * 2
+        slot = ((pid_r * 17 + pid_b) & 255) * 2
         tl.atomic_add(part_ptr + slot + 0, dkt)
         tl.atomic_add(part_ptr + slot + 1, dal)
 

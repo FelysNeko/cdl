@@ -11,23 +11,28 @@ from cdl.core.kernel.primitives import (
 
 def _ccdl_fwd_configs() -> list[triton.Config]:
     return [
+        triton.Config({"BB": 1}, num_warps=1),
         triton.Config({"BB": 1}, num_warps=2),
         triton.Config({"BB": 2}, num_warps=2),
         triton.Config({"BB": 2}, num_warps=4),
-        triton.Config({"BB": 4}, num_warps=4),
-        triton.Config({"BB": 8}, num_warps=4),
+        triton.Config({"BB": 4}, num_warps=4, num_stages=2),
+        triton.Config({"BB": 4}, num_warps=4, num_stages=3),
+        triton.Config({"BB": 8}, num_warps=4, num_stages=2),
         triton.Config({"BB": 8}, num_warps=8),
+        triton.Config({"BB": 16}, num_warps=8, num_stages=2),
     ]
 
 
 def _ccdl_bwd_configs() -> list[triton.Config]:
     return [
+        triton.Config({"BB": 1}, num_warps=1),
         triton.Config({"BB": 1}, num_warps=2),
         triton.Config({"BB": 2}, num_warps=2),
         triton.Config({"BB": 2}, num_warps=4),
-        triton.Config({"BB": 4}, num_warps=2),
+        triton.Config({"BB": 4}, num_warps=2, num_stages=2),
         triton.Config({"BB": 4}, num_warps=4),
-        triton.Config({"BB": 8}, num_warps=4),
+        triton.Config({"BB": 8}, num_warps=4, num_stages=2),
+        triton.Config({"BB": 16}, num_warps=8, num_stages=2),
     ]
 
 
@@ -227,7 +232,7 @@ def _ccdl_bwd(
         dkq = 0.0
 
     if NEED_DKT or NEED_DKQ or NEED_DAL:
-        slot = ((r * 17 + gb) & 63) * 3
+        slot = ((r * 17 + gb) & 255) * 3
         tl.atomic_add(part_ptr + slot + 0, dkt)
         tl.atomic_add(part_ptr + slot + 1, dkq)
         tl.atomic_add(part_ptr + slot + 2, dal)

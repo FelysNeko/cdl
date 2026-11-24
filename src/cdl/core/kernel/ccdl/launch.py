@@ -6,6 +6,12 @@ from cdl.core.kernel.formats.spec import FormatSpec
 from cdl.core.kernel.layout import flatten_q, flatten_theta
 
 
+def _ccdl_buckets(m: int, nb: int) -> tuple[int, int]:
+    return (0 if m <= 512 else (1 if m <= 2048 else 2)), (
+        0 if nb <= 1 else (1 if nb <= 4 else 2)
+    )
+
+
 def launch_ccdl_fwd(
     theta: torch.Tensor,
     theta_kappa: torch.Tensor,
@@ -28,8 +34,7 @@ def launch_ccdl_fwd(
     )
     packed_scale = torch.empty((m, nb), dtype=torch.uint8, device=theta.device)
     if m > 0 and nb > 0:
-        m_bucket = 0 if m <= 512 else 1
-        nb_bucket = 0 if nb <= 1 else (1 if nb <= 4 else 2)
+        m_bucket, nb_bucket = _ccdl_buckets(m, nb)
         _ccdl_fwd[lambda meta: (m, triton.cdiv(nb, meta["BB"]))](
             flat,
             fmt.theta_level,
@@ -99,13 +104,12 @@ def launch_ccdl_bwd(
         else torch.empty(0, dtype=torch.float32, device=theta.device)
     )
     partials = (
-        torch.zeros((64, 3), dtype=torch.float32, device=theta.device)
+        torch.zeros((256, 3), dtype=torch.float32, device=theta.device)
         if need_scalars
         else torch.empty(1, dtype=torch.float32, device=theta.device)
     )
     if m > 0 and nb > 0:
-        m_bucket = 0 if m <= 512 else 1
-        nb_bucket = 0 if nb <= 1 else (1 if nb <= 4 else 2)
+        m_bucket, nb_bucket = _ccdl_buckets(m, nb)
         _ccdl_bwd[lambda meta: (m, triton.cdiv(nb, meta["BB"]))](
             g,
             flat,
