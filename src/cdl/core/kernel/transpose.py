@@ -1,16 +1,19 @@
-import functools
-
 import torch
 import triton
 import triton.language as tl
 
+_HADAMARD16_CACHE: dict[torch.device, torch.Tensor] = {}
 
-@functools.cache
+
 def _hadamard16(device: torch.device) -> torch.Tensor:
-    idx = torch.arange(16, device=device, dtype=torch.int32)
-    bits = idx[:, None] & idx[None, :]
-    pop = (bits & 1) + ((bits >> 1) & 1) + ((bits >> 2) & 1) + ((bits >> 3) & 1)
-    return torch.where(pop % 2 == 0, 0.25, -0.25).to(torch.float32)
+    h = _HADAMARD16_CACHE.get(device)
+    if h is None:
+        idx = torch.arange(16, device=device, dtype=torch.int32)
+        bits = idx[:, None] & idx[None, :]
+        pop = (bits & 1) + ((bits >> 1) & 1) + ((bits >> 2) & 1) + ((bits >> 3) & 1)
+        h = torch.where(pop % 2 == 0, 0.25, -0.25).to(torch.float32)
+        _HADAMARD16_CACHE[device] = h
+    return h
 
 
 @triton.jit
