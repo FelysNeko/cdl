@@ -55,7 +55,10 @@ def _launch_ecdl_fwd_2d(
             global_absmax = bamax.max().clamp_min(torch.finfo(torch.float32).tiny)
         else:
             global_absmax = torch.full(
-                (), torch.finfo(torch.float32).tiny, dtype=torch.float32, device=theta.device
+                (),
+                torch.finfo(torch.float32).tiny,
+                dtype=torch.float32,
+                device=theta.device,
             )
         qmax = fmt.q_max
         alpha_eff = global_absmax / fmt.f_max

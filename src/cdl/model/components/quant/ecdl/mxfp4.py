@@ -26,9 +26,7 @@ class Mxfp4ExtendedCdlTensor(ExtendedCdlTensor):
         packed = ungroup_blocks(
             self.theta_format.pack(self.theta_indices), self.block_mask
         )
-        scale = squeeze_block_scale(
-            self.q_format.pack(self.q_indices), self.block_mask
-        )
+        scale = squeeze_block_scale(self.q_format.pack(self.q_indices), self.block_mask)
         alpha = self.alpha.float().reshape(1)
         return packed, scale, alpha
 
@@ -116,7 +114,9 @@ class Mxfp4ExtendedCdlQuantForActivation(ExtendedCdlQuantForActivation):
         if self.triton_block_2d:
             lead = theta.shape[:-4]
             nb_r, tpb, nb_c, _ = theta.shape[-4:]
-            packed, scale, alpha = mxfp4_quant(theta.reshape(-1, nb_c * tpb), None, True)
+            packed, scale, alpha = mxfp4_quant(
+                theta.reshape(-1, nb_c * tpb), None, True
+            )
             packed_theta = packed.reshape(*lead, nb_r, tpb, nb_c, 16)
             packed_scale = scale.reshape(*lead, nb_r, 1, nb_c, 1)
         else:
@@ -206,7 +206,9 @@ class Mxfp4ExtendedCdlQuantForWeight(ExtendedCdlQuantForWeight):
         if self.triton_block_2d:
             lead = theta.shape[:-4]
             nb_r, tpb, nb_c, _ = theta.shape[-4:]
-            packed, scale, alpha = mxfp4_quant(theta.reshape(-1, nb_c * tpb), None, True)
+            packed, scale, alpha = mxfp4_quant(
+                theta.reshape(-1, nb_c * tpb), None, True
+            )
             packed_theta = packed.reshape(*lead, nb_r, tpb, nb_c, 16)
             packed_scale = scale.reshape(*lead, nb_r, 1, nb_c, 1)
         else:

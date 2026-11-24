@@ -182,6 +182,7 @@ class ModelConfig:
     theta_topk: int = 5
     q_topk: int = 5
     block_size: int = 16  # 16 for nvfp4, 32 for mxfp4/mxfp8
+    weight_block_2d: bool = False
     kernel: str = "triton"
     backend: str = "nvfp4"
     use_lora: bool = True
@@ -235,9 +236,7 @@ class ModelConfig:
             ),
             ("kv", self.kv, self.kv_kappa_bwd, self.kv_q_kappa_bwd),
         ):
-            if k_bwd is not None and not (
-                variant.endswith("_ccdl") or variant.endswith("_ecdl")
-            ):
+            if k_bwd is not None and not variant.endswith(("_ccdl", "_ecdl")):
                 raise ValueError(
                     f"{role}_kappa_bwd is only supported for *_ccdl or *_ecdl {role} variants, got {variant!r}"
                 )
@@ -245,6 +244,10 @@ class ModelConfig:
                 raise ValueError(
                     f"{role}_q_kappa_bwd is only supported for *_ccdl {role} variants, got {variant!r}"
                 )
+        if self.weight_block_2d and self.weight.endswith("_ccdl"):
+            raise ValueError(
+                f"weight_block_2d is not supported for *_ccdl weight variants, got {self.weight!r}"
+            )
 
 
 @dataclass
@@ -468,7 +471,7 @@ def _build_weight_quant(cfg: ModelConfig, weight: torch.Tensor, dtype: torch.dty
     if cfg.weight == "none":
         return IdentityQuant()
     if cfg.weight == "ste":
-        return SteQuant(_ste_simulation(cfg), False)
+        return SteQuant(_ste_simulation(cfg), cfg.weight_block_2d)
     spec = _QUANT_VARIANTS[cfg.weight]
     if spec.family == "ccdl":
         return spec.weight_cls(
@@ -479,7 +482,9 @@ def _build_weight_quant(cfg: ModelConfig, weight: torch.Tensor, dtype: torch.dty
             q_kappa_backward=cfg.weight_q_kappa_bwd,
             kernel=cfg.kernel,
         )
-    block_dims = (False,) * (weight.ndim - 1) + (True,)
+    block_dims = (
+        (True, True) if cfg.weight_block_2d else (False,) * (weight.ndim - 1) + (True,)
+    )
     return spec.weight_cls(
         weight,
         block_dims,

@@ -25,7 +25,14 @@ def flatten_theta_2d(
             f"2D block scaling requires square tiles, got ({tpb_r}, {tpb_c})"
         )
     m = math.prod(lead)
-    return theta.reshape(m, nb_r * tpb_r, nb_c * tpb_c).contiguous(), lead, m, nb_r, nb_c, tpb_r
+    return (
+        theta.reshape(m, nb_r * tpb_r, nb_c * tpb_c).contiguous(),
+        lead,
+        m,
+        nb_r,
+        nb_c,
+        tpb_r,
+    )
 
 
 def flatten_q(

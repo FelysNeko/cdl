@@ -85,9 +85,9 @@ def _fp4_quant_kernel(
     offs_b = tl.program_id(1) * BB + tl.arange(0, BB)
     bmask = offs_b < NB
     cols = offs_b[:, None] * TPB + tl.arange(0, TPB)[None, :]
-    raw = tl.load(
-        x_ptr + r * K + cols, mask=bmask[:, None] & (cols < K), other=0.0
-    ).to(tl.float32)
+    raw = tl.load(x_ptr + r * K + cols, mask=bmask[:, None] & (cols < K), other=0.0).to(
+        tl.float32
+    )
 
     block_absmax = tl.max(tl.abs(raw), axis=1)
     if SCALE_IS_E8M0:
@@ -133,9 +133,9 @@ def _fp8_quant_kernel(
     offs_b = tl.program_id(1) * BB + tl.arange(0, BB)
     bmask = offs_b < NB
     cols = offs_b[:, None] * TPB + tl.arange(0, TPB)[None, :]
-    raw = tl.load(
-        x_ptr + r * K + cols, mask=bmask[:, None] & (cols < K), other=0.0
-    ).to(tl.float32)
+    raw = tl.load(x_ptr + r * K + cols, mask=bmask[:, None] & (cols < K), other=0.0).to(
+        tl.float32
+    )
 
     q_byte, s = _e8m0_scale(tl.max(tl.abs(raw), axis=1), EMAX)
     tl.store(scale_ptr + r * NB + offs_b, q_byte, mask=bmask)
@@ -364,9 +364,7 @@ def nvfp4_quant(
     block_2d: bool,
     block_chunk: int = 32,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    packed, scale, alpha = _quant(
-        x, 16, True, False, 2, seed, block_2d, block_chunk
-    )
+    packed, scale, alpha = _quant(x, 16, True, False, 2, seed, block_2d, block_chunk)
     assert alpha is not None
     return packed, scale, alpha
 
@@ -377,9 +375,7 @@ def mxfp4_quant(
     block_2d: bool,
     block_chunk: int = 32,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    packed, scale, alpha = _quant(
-        x, 32, True, True, 2, seed, block_2d, block_chunk
-    )
+    packed, scale, alpha = _quant(x, 32, True, True, 2, seed, block_2d, block_chunk)
     assert alpha is not None
     return packed, scale, alpha
 
@@ -390,7 +386,5 @@ def mxfp8_quant(
     block_2d: bool,
     block_chunk: int = 32,
 ) -> tuple[torch.Tensor, torch.Tensor, None]:
-    packed, scale, _ = _quant(
-        x, 32, False, True, 8, seed, block_2d, block_chunk
-    )
+    packed, scale, _ = _quant(x, 32, False, True, 8, seed, block_2d, block_chunk)
     return packed, scale, None

@@ -25,9 +25,7 @@ class Mxfp8ExtendedCdlTensor(ExtendedCdlTensor):
         packed = ungroup_blocks(
             self.theta_format.pack(self.theta_indices), self.block_mask
         )
-        scale = squeeze_block_scale(
-            self.q_format.pack(self.q_indices), self.block_mask
-        )
+        scale = squeeze_block_scale(self.q_format.pack(self.q_indices), self.block_mask)
         return packed, scale, None
 
 
