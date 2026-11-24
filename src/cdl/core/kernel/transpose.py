@@ -55,14 +55,30 @@ def _fp4_repack_transpose_kernel(
     )
 
 
+def _rht16_configs() -> list[triton.Config]:
+    return [
+        triton.Config({"K_TILES": 2, "BC": 32}, num_warps=4),
+        triton.Config({"K_TILES": 2, "BC": 64}, num_warps=4),
+        triton.Config({"K_TILES": 4, "BC": 32}, num_warps=4),
+        triton.Config({"K_TILES": 4, "BC": 64}, num_warps=4),
+        triton.Config({"K_TILES": 4, "BC": 64}, num_warps=8),
+        triton.Config({"K_TILES": 4, "BC": 128}, num_warps=4),
+        triton.Config({"K_TILES": 4, "BC": 128}, num_warps=8),
+        triton.Config({"K_TILES": 8, "BC": 64}, num_warps=4),
+        triton.Config({"K_TILES": 8, "BC": 64}, num_warps=8),
+    ]
+
+
 @triton.jit
-def _rht16_transpose_kernel(
+def _rht16_transpose_kernel_impl(
     x_ptr,
     q_ptr,
     out_ptr,
     M,
     C,
     M_PAD,
+    M_BUCKET: tl.constexpr,
+    C_BUCKET: tl.constexpr,
     K_TILES: tl.constexpr,
     BC: tl.constexpr,
     IS_FP32: tl.constexpr,
@@ -93,6 +109,13 @@ def _rht16_transpose_kernel(
             y_t,
             mask=cmask[:, None] & (rm[None, :] < M_PAD),
         )
+
+
+_rht16_transpose_kernel = triton.autotune(
+    configs=_rht16_configs(),
+    key=["M_BUCKET", "C_BUCKET", "IS_FP32"],
+    cache_results=True,
+)(_rht16_transpose_kernel_impl)
 
 
 def fp4_repack_transpose(
@@ -128,7 +151,7 @@ def rht16_transpose(
     x: torch.Tensor,
     signs: torch.Tensor,
     m_multiple: int = 32,
-    block_c: int = 64,
+    block_c: int | None = None,
 ) -> torch.Tensor:
     """Apply 16x16 Random Hadamard Transform along M and transpose ``(M, C) -> (C, M_pad)``."""
     assert x.ndim == 2 and signs.shape == (16,)
@@ -147,18 +170,40 @@ def rht16_transpose(
         .to(x.dtype)
         .contiguous()
     )
-    k_tiles = 2 if m_pad <= 32 else 4
-    grid = (triton.cdiv(m_pad, k_tiles * 16), triton.cdiv(c, block_c))
-    _rht16_transpose_kernel[grid](
-        x,
-        q,
-        out,
-        m,
-        c,
-        m_pad,
-        K_TILES=k_tiles,
-        BC=block_c,
-        IS_FP32=(x.dtype == torch.float32),
-        num_warps=4,
-    )
+    m_bucket = 0 if m_pad <= 32 else (1 if m_pad <= 512 else 2)
+    c_bucket = 0 if c <= 256 else (1 if c <= 1024 else 2)
+    if block_c is not None:
+        k_tiles = 2 if m_pad <= 32 else 4
+        grid = (triton.cdiv(m_pad, k_tiles * 16), triton.cdiv(c, block_c))
+        _rht16_transpose_kernel_impl[grid](
+            x,
+            q,
+            out,
+            m,
+            c,
+            m_pad,
+            M_BUCKET=m_bucket,
+            C_BUCKET=c_bucket,
+            K_TILES=k_tiles,
+            BC=block_c,
+            IS_FP32=(x.dtype == torch.float32),
+            num_warps=4,
+        )
+    else:
+        _rht16_transpose_kernel[
+            lambda meta: (
+                triton.cdiv(m_pad, meta["K_TILES"] * 16),
+                triton.cdiv(c, meta["BC"]),
+            )
+        ](
+            x,
+            q,
+            out,
+            m,
+            c,
+            m_pad,
+            M_BUCKET=m_bucket,
+            C_BUCKET=c_bucket,
+            IS_FP32=(x.dtype == torch.float32),
+        )
     return out

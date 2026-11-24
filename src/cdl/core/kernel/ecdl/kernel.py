@@ -78,8 +78,38 @@ def _ecdl_scale(
     return q_indices, q_hat * al
 
 
+def _ecdl_fwd_configs() -> list[triton.Config]:
+    return [
+        triton.Config({"BM": 4, "BB": 1}, num_warps=2),
+        triton.Config({"BM": 4, "BB": 2}, num_warps=4),
+        triton.Config({"BM": 8, "BB": 1}, num_warps=2),
+        triton.Config({"BM": 8, "BB": 2}, num_warps=4),
+        triton.Config({"BM": 8, "BB": 4}, num_warps=4),
+        triton.Config({"BM": 16, "BB": 2}, num_warps=4),
+        triton.Config({"BM": 16, "BB": 4}, num_warps=4),
+        triton.Config({"BM": 16, "BB": 4}, num_warps=8),
+        triton.Config({"BM": 16, "BB": 8}, num_warps=4),
+        triton.Config({"BM": 32, "BB": 4}, num_warps=8),
+    ]
+
+
+def _ecdl_bwd_configs() -> list[triton.Config]:
+    return [
+        triton.Config({"BM": 2, "BB": 1}, num_warps=2),
+        triton.Config({"BM": 2, "BB": 2}, num_warps=2),
+        triton.Config({"BM": 4, "BB": 1}, num_warps=2),
+        triton.Config({"BM": 4, "BB": 2}, num_warps=2),
+        triton.Config({"BM": 4, "BB": 4}, num_warps=2),
+        triton.Config({"BM": 4, "BB": 4}, num_warps=4),
+        triton.Config({"BM": 8, "BB": 2}, num_warps=4),
+        triton.Config({"BM": 8, "BB": 4}, num_warps=4),
+        triton.Config({"BM": 16, "BB": 2}, num_warps=4),
+        triton.Config({"BM": 16, "BB": 4}, num_warps=4),
+    ]
+
+
 @triton.jit
-def _ecdl_fwd(
+def _ecdl_fwd_impl(
     th_ptr,
     bamax_ptr,
     gmax_ptr,
@@ -101,6 +131,8 @@ def _ecdl_fwd(
     TPB: tl.constexpr,
     TN: tl.constexpr,
     QN: tl.constexpr,
+    ROWS_BUCKET: tl.constexpr,
+    NB_BUCKET: tl.constexpr,
     BM: tl.constexpr,
     BB: tl.constexpr,
     MODE: tl.constexpr,
@@ -160,8 +192,25 @@ def _ecdl_fwd(
         tl.store(pt_ptr + offs, packed, mask=lmask)
 
 
+_ecdl_fwd = triton.autotune(
+    configs=_ecdl_fwd_configs(),
+    key=[
+        "ROWS_BUCKET",
+        "NB_BUCKET",
+        "TOPK",
+        "TPB",
+        "TN",
+        "QN",
+        "MODE",
+        "EMAX",
+        "SCALE_BIAS",
+    ],
+    cache_results=True,
+)(_ecdl_fwd_impl)
+
+
 @triton.jit
-def _ecdl_bwd(
+def _ecdl_bwd_impl(
     g_ptr,
     th_ptr,
     ps_ptr,
@@ -180,6 +229,8 @@ def _ecdl_bwd(
     TOPK: tl.constexpr,
     TPB: tl.constexpr,
     TN: tl.constexpr,
+    ROWS_BUCKET: tl.constexpr,
+    NB_BUCKET: tl.constexpr,
     BM: tl.constexpr,
     BB: tl.constexpr,
     SCALE_BIAS: tl.constexpr,
@@ -228,9 +279,25 @@ def _ecdl_bwd(
         dkt = tl.sum(g * s[:, :, None] * dk_term)
         dal = tl.sum(ds * q_hat[:, :, None])
 
-        pbase = (pid_r * tl.cdiv(NB, BB) + pid_b).to(tl.int64) * 2
-        tl.store(part_ptr + pbase + 0, dkt)
-        tl.store(part_ptr + pbase + 1, dal)
+        slot = ((pid_r * 17 + pid_b) & 63) * 2
+        tl.atomic_add(part_ptr + slot + 0, dkt)
+        tl.atomic_add(part_ptr + slot + 1, dal)
+
+
+_ecdl_bwd = triton.autotune(
+    configs=_ecdl_bwd_configs(),
+    key=[
+        "ROWS_BUCKET",
+        "NB_BUCKET",
+        "TOPK",
+        "TPB",
+        "TN",
+        "SCALE_BIAS",
+        "COMPUTE_SCALARS",
+    ],
+    reset_to_zero=["part_ptr"],
+    cache_results=True,
+)(_ecdl_bwd_impl)
 
 
 @triton.jit

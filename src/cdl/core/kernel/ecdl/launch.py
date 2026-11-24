@@ -7,8 +7,10 @@ from cdl.core.kernel.ecdl.kernel import (
     _ecdl_absmax_2d,
     _ecdl_bwd,
     _ecdl_bwd_2d,
+    _ecdl_bwd_impl,
     _ecdl_fwd,
     _ecdl_fwd_2d,
+    _ecdl_fwd_impl,
 )
 from cdl.core.kernel.formats.spec import FormatSpec
 from cdl.core.kernel.layout import flatten_theta, flatten_theta_2d
@@ -165,36 +167,72 @@ def launch_ecdl_fwd(
         (m, nb * packed_cols), dtype=torch.uint8, device=theta.device
     )
     packed_scale = torch.empty((m, nb), dtype=torch.uint8, device=theta.device)
+    rows_bucket = 0 if m <= 512 else 1
+    nb_bucket = 0 if nb <= 1 else (1 if nb <= 4 else 2)
     if m > 0 and nb > 0:
-        _ecdl_fwd[(nm, ngb)](
-            flat,
-            bamax,
-            global_absmax,
-            qmax,
-            fmt.theta_level,
-            fmt.theta_gap,
-            fmt.q_level,
-            theta_kappa,
-            alpha_eff,
-            seed,
-            packed_theta,
-            packed_scale,
-            m,
-            k,
-            nb,
-            fmt.q_ordinal,
-            fmt.theta_ordinal,
-            TOPK=theta_topk,
-            TPB=tpb,
-            TN=fmt.tn,
-            QN=fmt.qn,
-            BM=bm,
-            BB=bb,
-            MODE=mode,
-            EMAX=fmt.theta_emax,
-            SCALE_BIAS=fmt.scale_bias,
-            num_warps=nw,
-        )
+        if config == DEFAULT_CONFIG:
+            _ecdl_fwd[
+                lambda meta: (triton.cdiv(m, meta["BM"]), triton.cdiv(nb, meta["BB"]))
+            ](
+                flat,
+                bamax,
+                global_absmax,
+                qmax,
+                fmt.theta_level,
+                fmt.theta_gap,
+                fmt.q_level,
+                theta_kappa,
+                alpha_eff,
+                seed,
+                packed_theta,
+                packed_scale,
+                m,
+                k,
+                nb,
+                fmt.q_ordinal,
+                fmt.theta_ordinal,
+                TOPK=theta_topk,
+                TPB=tpb,
+                TN=fmt.tn,
+                QN=fmt.qn,
+                ROWS_BUCKET=rows_bucket,
+                NB_BUCKET=nb_bucket,
+                MODE=mode,
+                EMAX=fmt.theta_emax,
+                SCALE_BIAS=fmt.scale_bias,
+            )
+        else:
+            _ecdl_fwd_impl[(nm, ngb)](
+                flat,
+                bamax,
+                global_absmax,
+                qmax,
+                fmt.theta_level,
+                fmt.theta_gap,
+                fmt.q_level,
+                theta_kappa,
+                alpha_eff,
+                seed,
+                packed_theta,
+                packed_scale,
+                m,
+                k,
+                nb,
+                fmt.q_ordinal,
+                fmt.theta_ordinal,
+                TOPK=theta_topk,
+                TPB=tpb,
+                TN=fmt.tn,
+                QN=fmt.qn,
+                ROWS_BUCKET=rows_bucket,
+                NB_BUCKET=nb_bucket,
+                BM=bm,
+                BB=bb,
+                MODE=mode,
+                EMAX=fmt.theta_emax,
+                SCALE_BIAS=fmt.scale_bias,
+                num_warps=nw,
+            )
 
     packed_theta = packed_theta.reshape(*lead, nb, packed_cols)
     if not is_fp4:
@@ -291,45 +329,70 @@ def launch_ecdl_bwd(
     ps_flat = packed_scale.reshape(m, nb)
 
     dtheta = theta.new_empty((m, k), dtype=theta.dtype)
-    if config == DEFAULT_CONFIG:
-        bm = 4
-        bb = 1 if nb <= 1 else (2 if nb == 2 else 4)
-        nw = 2
-    else:
-        bm, bb, nw = 1, config.block_chunk, config.num_warps
-    ngb = triton.cdiv(nb, bb)
-    nm = triton.cdiv(m, bm)
+    rows_bucket = 0 if m <= 512 else 1
+    nb_bucket = 0 if nb <= 1 else (1 if nb <= 4 else 2)
     partials = (
-        torch.empty((nm * ngb, 2), dtype=torch.float32, device=theta.device)
+        torch.zeros((64, 2), dtype=torch.float32, device=theta.device)
         if need_dkappa
-        else alpha
+        else torch.empty(1, dtype=torch.float32, device=theta.device)
     )
     if m > 0 and nb > 0:
-        _ecdl_bwd[(nm, ngb)](
-            g,
-            flat,
-            ps_flat,
-            fmt.q_level,
-            fmt.theta_level,
-            fmt.theta_gap,
-            kappa_backward,
-            alpha,
-            dtheta,
-            partials,
-            m,
-            k,
-            nb,
-            k,
-            fmt.theta_ordinal,
-            TOPK=theta_topk,
-            TPB=tpb,
-            TN=fmt.tn,
-            BM=bm,
-            BB=bb,
-            SCALE_BIAS=fmt.scale_bias,
-            COMPUTE_SCALARS=need_dkappa,
-            num_warps=nw,
-        )
+        if config == DEFAULT_CONFIG:
+            _ecdl_bwd[
+                lambda meta: (triton.cdiv(m, meta["BM"]), triton.cdiv(nb, meta["BB"]))
+            ](
+                g,
+                flat,
+                ps_flat,
+                fmt.q_level,
+                fmt.theta_level,
+                fmt.theta_gap,
+                kappa_backward,
+                alpha,
+                dtheta,
+                partials,
+                m,
+                k,
+                nb,
+                k,
+                fmt.theta_ordinal,
+                TOPK=theta_topk,
+                TPB=tpb,
+                TN=fmt.tn,
+                ROWS_BUCKET=rows_bucket,
+                NB_BUCKET=nb_bucket,
+                SCALE_BIAS=fmt.scale_bias,
+                COMPUTE_SCALARS=need_dkappa,
+            )
+        else:
+            bm, bb, nw = 1, config.block_chunk, config.num_warps
+            _ecdl_bwd_impl[(triton.cdiv(m, bm), triton.cdiv(nb, bb))](
+                g,
+                flat,
+                ps_flat,
+                fmt.q_level,
+                fmt.theta_level,
+                fmt.theta_gap,
+                kappa_backward,
+                alpha,
+                dtheta,
+                partials,
+                m,
+                k,
+                nb,
+                k,
+                fmt.theta_ordinal,
+                TOPK=theta_topk,
+                TPB=tpb,
+                TN=fmt.tn,
+                ROWS_BUCKET=rows_bucket,
+                NB_BUCKET=nb_bucket,
+                BM=bm,
+                BB=bb,
+                SCALE_BIAS=fmt.scale_bias,
+                COMPUTE_SCALARS=need_dkappa,
+                num_warps=nw,
+            )
     scalars = (
         partials.sum(0)
         if need_dkappa

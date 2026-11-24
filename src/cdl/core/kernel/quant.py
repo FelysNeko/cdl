@@ -74,8 +74,22 @@ def _absmax_atomic_kernel(x_ptr, out_u32_ptr, N, BLOCK: tl.constexpr):
     tl.atomic_max(out_u32_ptr, tl.cast(m, tl.uint32, bitcast=True))
 
 
+def _quant_1d_configs() -> list[triton.Config]:
+    return [
+        triton.Config({"BM": 4, "BB": 1}, num_warps=2),
+        triton.Config({"BM": 8, "BB": 1}, num_warps=2),
+        triton.Config({"BM": 8, "BB": 2}, num_warps=4),
+        triton.Config({"BM": 8, "BB": 4}, num_warps=4),
+        triton.Config({"BM": 16, "BB": 2}, num_warps=4),
+        triton.Config({"BM": 16, "BB": 4}, num_warps=4),
+        triton.Config({"BM": 16, "BB": 8}, num_warps=4),
+        triton.Config({"BM": 16, "BB": 8}, num_warps=8),
+        triton.Config({"BM": 32, "BB": 4}, num_warps=4),
+    ]
+
+
 @triton.jit
-def _fp4_quant_kernel(
+def _fp4_quant_kernel_impl(
     x_ptr,
     gmax_ptr,
     alpha_ptr,
@@ -87,6 +101,8 @@ def _fp4_quant_kernel(
     NB,
     PACK_STRIDE,
     TPB: tl.constexpr,
+    ROWS_BUCKET: tl.constexpr,
+    NB_BUCKET: tl.constexpr,
     BM: tl.constexpr,
     BB: tl.constexpr,
     SCALE_IS_E8M0: tl.constexpr,
@@ -135,8 +151,15 @@ def _fp4_quant_kernel(
     )
 
 
+_fp4_quant_kernel = triton.autotune(
+    configs=_quant_1d_configs(),
+    key=["ROWS_BUCKET", "NB_BUCKET", "TPB", "SCALE_IS_E8M0", "STOCHASTIC"],
+    cache_results=True,
+)(_fp4_quant_kernel_impl)
+
+
 @triton.jit
-def _fp8_quant_kernel(
+def _fp8_quant_kernel_impl(
     x_ptr,
     seed_ptr,
     packed_ptr,
@@ -146,6 +169,8 @@ def _fp8_quant_kernel(
     NB,
     PACK_STRIDE,
     TPB: tl.constexpr,
+    ROWS_BUCKET: tl.constexpr,
+    NB_BUCKET: tl.constexpr,
     BM: tl.constexpr,
     BB: tl.constexpr,
     EMAX: tl.constexpr,
@@ -179,6 +204,13 @@ def _fp8_quant_kernel(
         out,
         mask=rbmask[:, :, None],
     )
+
+
+_fp8_quant_kernel = triton.autotune(
+    configs=_quant_1d_configs(),
+    key=["ROWS_BUCKET", "NB_BUCKET", "TPB", "EMAX", "STOCHASTIC"],
+    cache_results=True,
+)(_fp8_quant_kernel_impl)
 
 
 @triton.jit
@@ -284,14 +316,6 @@ def _global_absmax(x: torch.Tensor) -> torch.Tensor:
     return g_u32.view(torch.float32)
 
 
-def _choose_1d_tile(group_size: int, nb: int, block_chunk: int | None) -> tuple[int, int]:
-    bm = 16 if group_size == 16 else 8
-    if block_chunk is not None:
-        return bm, block_chunk
-    bb = 1 if nb <= 1 else (2 if nb == 2 else 4)
-    return bm, bb
-
-
 def _quant(
     x: torch.Tensor,
     group_size: int,
@@ -369,10 +393,58 @@ def _quant(
             )
         return packed, scale, alpha
 
-    bm, bb = _choose_1d_tile(group_size, nb, block_chunk)
-    grid = (triton.cdiv(rows, bm), triton.cdiv(nb, bb))
+    rows_bucket = 0 if rows <= 512 else 1
+    nb_bucket = 0 if nb <= 1 else (1 if nb <= 4 else 2)
+    if block_chunk is not None:
+        bm = 16 if group_size == 16 else 8
+        bb = block_chunk
+        grid = (triton.cdiv(rows, bm), triton.cdiv(nb, bb))
+        if is_fp4:
+            _fp4_quant_kernel_impl[grid](
+                x,
+                global_absmax,
+                alpha_ptr,
+                seed if seed is not None else x,
+                packed,
+                scale,
+                rows,
+                k,
+                nb,
+                pack_stride,
+                TPB=group_size,
+                ROWS_BUCKET=rows_bucket,
+                NB_BUCKET=nb_bucket,
+                BM=bm,
+                BB=bb,
+                SCALE_IS_E8M0=scale_is_e8m0,
+                STOCHASTIC=seed is not None,
+                num_warps=4,
+            )
+        else:
+            _fp8_quant_kernel_impl[grid](
+                x,
+                seed if seed is not None else x,
+                packed,
+                scale,
+                rows,
+                k,
+                nb,
+                pack_stride,
+                TPB=group_size,
+                ROWS_BUCKET=rows_bucket,
+                NB_BUCKET=nb_bucket,
+                BM=bm,
+                BB=bb,
+                EMAX=emax,
+                STOCHASTIC=seed is not None,
+                num_warps=4,
+            )
+        return packed, scale, alpha
+
     if is_fp4:
-        _fp4_quant_kernel[grid](
+        _fp4_quant_kernel[
+            lambda meta: (triton.cdiv(rows, meta["BM"]), triton.cdiv(nb, meta["BB"]))
+        ](
             x,
             global_absmax,
             alpha_ptr,
@@ -384,14 +456,15 @@ def _quant(
             nb,
             pack_stride,
             TPB=group_size,
-            BM=bm,
-            BB=bb,
+            ROWS_BUCKET=rows_bucket,
+            NB_BUCKET=nb_bucket,
             SCALE_IS_E8M0=scale_is_e8m0,
             STOCHASTIC=seed is not None,
-            num_warps=4,
         )
     else:
-        _fp8_quant_kernel[grid](
+        _fp8_quant_kernel[
+            lambda meta: (triton.cdiv(rows, meta["BM"]), triton.cdiv(nb, meta["BB"]))
+        ](
             x,
             seed if seed is not None else x,
             packed,
@@ -401,11 +474,10 @@ def _quant(
             nb,
             pack_stride,
             TPB=group_size,
-            BM=bm,
-            BB=bb,
+            ROWS_BUCKET=rows_bucket,
+            NB_BUCKET=nb_bucket,
             EMAX=emax,
             STOCHASTIC=seed is not None,
-            num_warps=4,
         )
     return packed, scale, alpha
 
