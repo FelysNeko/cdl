@@ -147,6 +147,99 @@ def _fp8_quant_kernel(
     tl.store(packed_ptr + r * PACK_STRIDE + cols, out, mask=bmask[:, None])
 
 
+@triton.jit
+def _fp4_quant_kernel_2d(
+    x_ptr,
+    gmax_ptr,
+    alpha_ptr,
+    seed_ptr,
+    packed_ptr,
+    scale_ptr,
+    ROWS,
+    K,
+    NB_C,
+    PACK_STRIDE,
+    TPB: tl.constexpr,
+    SCALE_IS_E8M0: tl.constexpr,
+    STOCHASTIC: tl.constexpr = False,
+):
+    tid = tl.program_id(0)
+    br = (tid // NB_C).to(tl.int64)
+    bc = (tid % NB_C).to(tl.int64)
+    rows_offs = br * TPB + tl.arange(0, TPB)
+    cols_offs = bc * TPB + tl.arange(0, TPB)
+    mask = (rows_offs[:, None] < ROWS) & (cols_offs[None, :] < K)
+    raw = tl.load(
+        x_ptr + rows_offs[:, None] * K + cols_offs[None, :], mask=mask, other=0.0
+    ).to(tl.float32)
+
+    block_absmax = tl.max(tl.abs(raw))
+    if SCALE_IS_E8M0:
+        q_byte, s = _e8m0_scale(block_absmax, 2)
+    else:
+        qv = tl.div_rn(block_absmax * 448.0, tl.load(gmax_ptr).to(tl.float32))
+        q_byte = (ue4m3_triton_ordinal(qv, 126) + 1).to(tl.uint8)
+        q_hat = tl.cast(q_byte, tl.float8e4nv, bitcast=True).to(tl.float32)
+        s = q_hat * tl.load(alpha_ptr).to(tl.float32)
+
+    tl.store(scale_ptr + tid, q_byte)
+    v = tl.div_rn(raw, s)
+    if STOCHASTIC:
+        code = _fp4_stochastic_round(
+            v,
+            tl.load(seed_ptr).to(tl.int32),
+            (rows_offs[:, None] * K + cols_offs[None, :]).to(tl.int32),
+        )
+    else:
+        ti = e2m1_triton_ordinal(v, 16)
+        code = tl.where(ti < 8, 15 - ti, ti - 8)
+
+    lo, hi = tl.split(tl.reshape(code, (TPB, TPB // 2, 2)))
+    pcols = bc * (TPB // 2) + tl.arange(0, TPB // 2)
+    tl.store(
+        packed_ptr + rows_offs[:, None] * PACK_STRIDE + pcols[None, :],
+        (lo | (hi << 4)).to(tl.uint8),
+    )
+
+
+@triton.jit
+def _fp8_quant_kernel_2d(
+    x_ptr,
+    seed_ptr,
+    packed_ptr,
+    scale_ptr,
+    ROWS,
+    K,
+    NB_C,
+    PACK_STRIDE,
+    TPB: tl.constexpr,
+    EMAX: tl.constexpr,
+    STOCHASTIC: tl.constexpr = False,
+):
+    tid = tl.program_id(0)
+    br = (tid // NB_C).to(tl.int64)
+    bc = (tid % NB_C).to(tl.int64)
+    rows_offs = br * TPB + tl.arange(0, TPB)
+    cols_offs = bc * TPB + tl.arange(0, TPB)
+    mask = (rows_offs[:, None] < ROWS) & (cols_offs[None, :] < K)
+    raw = tl.load(
+        x_ptr + rows_offs[:, None] * K + cols_offs[None, :], mask=mask, other=0.0
+    ).to(tl.float32)
+
+    q_byte, s = _e8m0_scale(tl.max(tl.abs(raw)), EMAX)
+    tl.store(scale_ptr + tid, q_byte)
+    v = tl.div_rn(raw, s)
+    if STOCHASTIC:
+        out = _fp8_stochastic_round(
+            v,
+            tl.load(seed_ptr).to(tl.int32),
+            (rows_offs[:, None] * K + cols_offs[None, :]).to(tl.int32),
+        )
+    else:
+        out = tl.cast(tl.minimum(tl.maximum(v, -448.0), 448.0), tl.float8e4nv)
+    tl.store(packed_ptr + rows_offs[:, None] * PACK_STRIDE + cols_offs[None, :], out)
+
+
 def _quant(
     x: torch.Tensor,
     group_size: int,
@@ -154,6 +247,7 @@ def _quant(
     scale_is_e8m0: bool,
     emax: int,
     seed: torch.Tensor | None,
+    block_2d: bool,
     block_chunk: int = 32,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
     if x.ndim != 2:
@@ -164,8 +258,16 @@ def _quant(
     pack_stride = nb * (group_size // 2 if is_fp4 else group_size)
     packed_dtype = torch.uint8 if is_fp4 else torch.float8_e4m3fn
 
-    packed = torch.empty((rows, pack_stride), dtype=packed_dtype, device=x.device)
-    scale = torch.empty((rows, nb), dtype=torch.uint8, device=x.device)
+    if block_2d:
+        nb_r = triton.cdiv(rows, group_size)
+        out_rows = nb_r * group_size
+        packed = torch.empty(
+            (out_rows, pack_stride), dtype=packed_dtype, device=x.device
+        )
+        scale = torch.empty((nb_r, nb), dtype=torch.uint8, device=x.device)
+    else:
+        packed = torch.empty((rows, pack_stride), dtype=packed_dtype, device=x.device)
+        scale = torch.empty((rows, nb), dtype=torch.uint8, device=x.device)
 
     tiny = torch.finfo(torch.float32).tiny
     if scale_is_e8m0:
@@ -182,6 +284,42 @@ def _quant(
         alpha_ptr = alpha
 
     if rows == 0 or k == 0:
+        return packed, scale, alpha
+
+    if block_2d:
+        grid = (nb_r * nb,)
+        if is_fp4:
+            _fp4_quant_kernel_2d[grid](
+                x,
+                global_absmax,
+                alpha_ptr,
+                seed if seed is not None else x,
+                packed,
+                scale,
+                rows,
+                k,
+                nb,
+                pack_stride,
+                TPB=group_size,
+                SCALE_IS_E8M0=scale_is_e8m0,
+                STOCHASTIC=seed is not None,
+                num_warps=4,
+            )
+        else:
+            _fp8_quant_kernel_2d[grid](
+                x,
+                seed if seed is not None else x,
+                packed,
+                scale,
+                rows,
+                k,
+                nb,
+                pack_stride,
+                TPB=group_size,
+                EMAX=emax,
+                STOCHASTIC=seed is not None,
+                num_warps=4,
+            )
         return packed, scale, alpha
 
     grid = (rows, triton.cdiv(nb, block_chunk))
@@ -221,23 +359,38 @@ def _quant(
 
 
 def nvfp4_quant(
-    x: torch.Tensor, seed: torch.Tensor | None, block_chunk: int = 32
+    x: torch.Tensor,
+    seed: torch.Tensor | None,
+    block_2d: bool,
+    block_chunk: int = 32,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    packed, scale, alpha = _quant(x, 16, True, False, 2, seed, block_chunk)
+    packed, scale, alpha = _quant(
+        x, 16, True, False, 2, seed, block_2d, block_chunk
+    )
     assert alpha is not None
     return packed, scale, alpha
 
 
 def mxfp4_quant(
-    x: torch.Tensor, seed: torch.Tensor | None, block_chunk: int = 32
+    x: torch.Tensor,
+    seed: torch.Tensor | None,
+    block_2d: bool,
+    block_chunk: int = 32,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    packed, scale, alpha = _quant(x, 32, True, True, 2, seed, block_chunk)
+    packed, scale, alpha = _quant(
+        x, 32, True, True, 2, seed, block_2d, block_chunk
+    )
     assert alpha is not None
     return packed, scale, alpha
 
 
 def mxfp8_quant(
-    x: torch.Tensor, seed: torch.Tensor | None, block_chunk: int = 32
+    x: torch.Tensor,
+    seed: torch.Tensor | None,
+    block_2d: bool,
+    block_chunk: int = 32,
 ) -> tuple[torch.Tensor, torch.Tensor, None]:
-    packed, scale, _ = _quant(x, 32, False, True, 8, seed, block_chunk)
+    packed, scale, _ = _quant(
+        x, 32, False, True, 8, seed, block_2d, block_chunk
+    )
     return packed, scale, None

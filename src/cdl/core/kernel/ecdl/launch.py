@@ -2,9 +2,16 @@ import torch
 import triton
 
 from cdl.core.kernel.config import DEFAULT_CONFIG, KernelConfig
-from cdl.core.kernel.ecdl.kernel import _ecdl_absmax, _ecdl_bwd, _ecdl_fwd
+from cdl.core.kernel.ecdl.kernel import (
+    _ecdl_absmax,
+    _ecdl_absmax_2d,
+    _ecdl_bwd,
+    _ecdl_bwd_2d,
+    _ecdl_fwd,
+    _ecdl_fwd_2d,
+)
 from cdl.core.kernel.formats.spec import FormatSpec
-from cdl.core.kernel.layout import flatten_theta
+from cdl.core.kernel.layout import flatten_theta, flatten_theta_2d
 
 ABSMAX_CONFIG = KernelConfig(block_chunk=32, num_warps=1)
 
@@ -17,15 +24,105 @@ def _scale_mode_id(scale_mode: str) -> int:
     return 2
 
 
+def _launch_ecdl_fwd_2d(
+    theta: torch.Tensor,
+    theta_kappa: torch.Tensor,
+    seed: torch.Tensor,
+    fmt: FormatSpec,
+    theta_topk: int,
+    scale_mode: str,
+    config: KernelConfig,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    flat, lead, m, nb_r, nb_c, tpb = flatten_theta_2d(theta)
+    h = nb_r * tpb
+    k = nb_c * tpb
+    ntiles = m * nb_r * nb_c
+    mode = _scale_mode_id(scale_mode)
+
+    if mode == 0:
+        bamax = torch.empty((m, nb_r, nb_c), dtype=torch.float32, device=theta.device)
+        if ntiles > 0:
+            _ecdl_absmax_2d[(ntiles,)](
+                flat,
+                bamax,
+                h,
+                k,
+                nb_r,
+                nb_c,
+                TPB=tpb,
+                num_warps=ABSMAX_CONFIG.num_warps,
+            )
+            global_absmax = bamax.max().clamp_min(torch.finfo(torch.float32).tiny)
+        else:
+            global_absmax = torch.full(
+                (), torch.finfo(torch.float32).tiny, dtype=torch.float32, device=theta.device
+            )
+        qmax = fmt.q_max
+        alpha_eff = global_absmax / fmt.f_max
+    else:
+        bamax = flat
+        global_absmax = flat
+        qmax = 0.0
+        alpha_eff = theta.new_ones((), dtype=torch.float32)
+
+    is_fp4 = fmt.tn == 16
+    packed_cols = tpb // 2 if is_fp4 else tpb
+    packed_theta = torch.empty(
+        (m, h, nb_c * packed_cols), dtype=torch.uint8, device=theta.device
+    )
+    packed_scale = torch.empty((m, nb_r, nb_c), dtype=torch.uint8, device=theta.device)
+    if ntiles > 0:
+        _ecdl_fwd_2d[(ntiles,)](
+            flat,
+            bamax,
+            global_absmax,
+            qmax,
+            fmt.theta_level,
+            fmt.theta_gap,
+            fmt.q_level,
+            theta_kappa,
+            alpha_eff,
+            seed,
+            packed_theta,
+            packed_scale,
+            h,
+            k,
+            nb_r,
+            nb_c,
+            fmt.q_ordinal,
+            fmt.theta_ordinal,
+            TOPK=theta_topk,
+            TPB=tpb,
+            TN=fmt.tn,
+            QN=fmt.qn,
+            MODE=mode,
+            EMAX=fmt.theta_emax,
+            SCALE_BIAS=fmt.scale_bias,
+            num_warps=config.num_warps,
+        )
+
+    packed_theta = packed_theta.reshape(*lead, nb_r, tpb, nb_c, packed_cols)
+    if not is_fp4:
+        packed_theta = packed_theta.view(torch.float8_e4m3fn)
+    packed_scale = packed_scale.reshape(*lead, nb_r, 1, nb_c, 1)
+    return packed_theta, packed_scale, alpha_eff
+
+
 def launch_ecdl_fwd(
     theta: torch.Tensor,
     theta_kappa: torch.Tensor,
     seed: torch.Tensor,
     fmt: FormatSpec,
     theta_topk: int,
+    block_2d: bool,
     scale_mode: str = "nvidia",
     config: KernelConfig = DEFAULT_CONFIG,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    if block_2d:
+        return _launch_ecdl_fwd_2d(
+            theta, theta_kappa, seed, fmt, theta_topk, scale_mode, config
+        )
+
     flat, lead, m, nb, tpb = flatten_theta(theta)
     k = nb * tpb
     ngb = triton.cdiv(nb, config.block_chunk)
@@ -93,6 +190,62 @@ def launch_ecdl_fwd(
     return packed_theta, packed_scale, alpha_eff
 
 
+def _launch_ecdl_bwd_2d(
+    grad_proxy: torch.Tensor,
+    theta: torch.Tensor,
+    packed_scale: torch.Tensor,
+    kappa_backward: torch.Tensor,
+    alpha: torch.Tensor,
+    fmt: FormatSpec,
+    theta_topk: int,
+    need_dkappa: bool,
+    config: KernelConfig,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    flat, _lead, m, nb_r, nb_c, tpb = flatten_theta_2d(theta)
+    h = nb_r * tpb
+    k = nb_c * tpb
+    g = grad_proxy.reshape(m, h, k).contiguous()
+    ps_flat = packed_scale.reshape(m, nb_r, nb_c).contiguous()
+
+    dtheta = theta.new_empty((m, h, k), dtype=theta.dtype)
+    ntiles = m * nb_r * nb_c
+    partials = (
+        torch.empty((ntiles, 2), dtype=torch.float32, device=theta.device)
+        if need_dkappa
+        else alpha
+    )
+    if ntiles > 0:
+        _ecdl_bwd_2d[(ntiles,)](
+            g,
+            flat,
+            ps_flat,
+            fmt.q_level,
+            fmt.theta_level,
+            fmt.theta_gap,
+            kappa_backward,
+            alpha,
+            dtheta,
+            partials,
+            h,
+            k,
+            nb_r,
+            nb_c,
+            fmt.theta_ordinal,
+            TOPK=theta_topk,
+            TPB=tpb,
+            TN=fmt.tn,
+            SCALE_BIAS=fmt.scale_bias,
+            COMPUTE_SCALARS=need_dkappa,
+            num_warps=config.num_warps,
+        )
+    scalars = (
+        partials.sum(0)
+        if need_dkappa
+        else torch.empty(0, dtype=torch.float32, device=theta.device)
+    )
+    return dtheta, scalars
+
+
 def launch_ecdl_bwd(
     grad_proxy: torch.Tensor,
     theta: torch.Tensor,
@@ -101,10 +254,24 @@ def launch_ecdl_bwd(
     alpha: torch.Tensor,
     fmt: FormatSpec,
     theta_topk: int,
+    block_2d: bool,
     scale_mode: str = "nvidia",
     need_dkappa: bool = True,
     config: KernelConfig = DEFAULT_CONFIG,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    if block_2d:
+        return _launch_ecdl_bwd_2d(
+            grad_proxy,
+            theta,
+            packed_scale,
+            kappa_backward,
+            alpha,
+            fmt,
+            theta_topk,
+            need_dkappa,
+            config,
+        )
+
     flat, _lead, m, nb, tpb = flatten_theta(theta)
     k = nb * tpb
     g = grad_proxy.reshape(m, k)

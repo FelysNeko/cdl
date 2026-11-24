@@ -14,6 +14,20 @@ def flatten_theta(
     return theta.reshape(m, nb, tpb), lead, m, nb, tpb
 
 
+def flatten_theta_2d(
+    theta: torch.Tensor,
+) -> tuple[torch.Tensor, tuple[int, ...], int, int, int, int]:
+    """Flatten ``(*lead, nb_r, tpb, nb_c, tpb)`` to contiguous ``(m, nb_r*tpb, nb_c*tpb)``."""
+    lead = theta.shape[:-4]
+    nb_r, tpb_r, nb_c, tpb_c = theta.shape[-4:]
+    if tpb_r != tpb_c:
+        raise ValueError(
+            f"2D block scaling requires square tiles, got ({tpb_r}, {tpb_c})"
+        )
+    m = math.prod(lead)
+    return theta.reshape(m, nb_r * tpb_r, nb_c * tpb_c).contiguous(), lead, m, nb_r, nb_c, tpb_r
+
+
 def flatten_q(
     lead: tuple[int, ...], nb: int, q: torch.Tensor
 ) -> tuple[torch.Tensor, int]:

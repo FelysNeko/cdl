@@ -13,16 +13,10 @@ from cdl.model.components.quant.ecdl.ecdl import (
     ExtendedCdlQuantForActivation,
     ExtendedCdlQuantForWeight,
     ExtendedCdlTensor,
+    check_triton_block_dims,
     squeeze_block_scale,
     ungroup_blocks,
 )
-
-
-def _check_triton_block_dims(block_dims: tuple[bool, ...]) -> None:
-    if any(block_dims[:-1]) or not block_dims[-1]:
-        raise NotImplementedError(
-            f"triton kernel only supports 1D last-dim block scaling, got block_dims={block_dims}"
-        )
 
 
 class Mxfp8ExtendedCdlTensor(ExtendedCdlTensor):
@@ -57,8 +51,10 @@ class PackedMxfp8ExtendedCdlTensor(QTensor):
             packed.reshape(-1, packed.shape[-1]),
             scale.reshape(-1, scale.shape[-1]),
             alpha,
-        )
-        return out.reshape(*lead, -1)[..., : self.orig_shape[-1]].to(self.dtype)
+        ).reshape(*lead, -1)
+        if tuple(out.shape) != tuple(self.orig_shape):
+            out = out[tuple(slice(None, d) for d in self.orig_shape)]
+        return out.to(self.dtype)
 
     def mxfp8(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
         assert self.packed_theta.shape[-1] == 32
@@ -100,7 +96,7 @@ class Mxfp8ExtendedCdlQuantForActivation(ExtendedCdlQuantForActivation):
         )
         self.kernel = kernel
         if kernel == "triton":
-            _check_triton_block_dims(self.block_dims)
+            self.triton_block_2d = check_triton_block_dims(self.block_dims)
             self.register_buffer(
                 "kernel_seed", torch.zeros((), dtype=torch.int64), persistent=False
             )
@@ -114,12 +110,22 @@ class Mxfp8ExtendedCdlQuantForActivation(ExtendedCdlQuantForActivation):
         if self.kernel == "torch":
             return super().eval_forward(theta, block_mask, orig_shape)
 
-        lead = theta.shape[:-2]
-        nb, tpb = theta.shape[-2:]
-        packed, scale, _ = mxfp8_quant(theta.reshape(-1, nb * tpb), None)
+        if self.triton_block_2d:
+            lead = theta.shape[:-4]
+            nb_r, tpb, nb_c, _ = theta.shape[-4:]
+            packed, scale, _ = mxfp8_quant(theta.reshape(-1, nb_c * tpb), None, True)
+            packed_theta = packed.reshape(*lead, nb_r, tpb, nb_c, 32)
+            packed_scale = scale.reshape(*lead, nb_r, 1, nb_c, 1)
+        else:
+            lead = theta.shape[:-2]
+            nb, tpb = theta.shape[-2:]
+            packed, scale, _ = mxfp8_quant(theta.reshape(-1, nb * tpb), None, False)
+            packed_theta = packed.reshape(*lead, nb, 32)
+            packed_scale = scale.reshape(*lead, nb, 1)
+
         return PackedMxfp8ExtendedCdlTensor(
-            packed_theta=packed.reshape(*lead, nb, 32),
-            packed_scale=scale.reshape(*lead, nb, 1),
+            packed_theta=packed_theta,
+            packed_scale=packed_scale,
             grad_proxy=None,
             block_mask=block_mask,
             orig_shape=orig_shape,
@@ -142,6 +148,7 @@ class Mxfp8ExtendedCdlQuantForActivation(ExtendedCdlQuantForActivation):
             self.kappa_backward,
             self.kernel_seed,
             self.theta_topk,
+            self.triton_block_2d,
         )
 
         return PackedMxfp8ExtendedCdlTensor(
@@ -178,7 +185,7 @@ class Mxfp8ExtendedCdlQuantForWeight(ExtendedCdlQuantForWeight):
         )
         self.kernel = kernel
         if kernel == "triton":
-            _check_triton_block_dims(self.block_dims)
+            self.triton_block_2d = check_triton_block_dims(self.block_dims)
             self.register_buffer(
                 "kernel_seed", torch.zeros((), dtype=torch.int64), persistent=False
             )
@@ -192,12 +199,21 @@ class Mxfp8ExtendedCdlQuantForWeight(ExtendedCdlQuantForWeight):
         if self.kernel == "torch":
             return super().eval_forward(theta, block_mask, orig_shape)
 
-        lead = theta.shape[:-2]
-        nb, tpb = theta.shape[-2:]
-        packed, scale, _ = mxfp8_quant(theta.reshape(-1, nb * tpb), None)
+        if self.triton_block_2d:
+            lead = theta.shape[:-4]
+            nb_r, tpb, nb_c, _ = theta.shape[-4:]
+            packed, scale, _ = mxfp8_quant(theta.reshape(-1, nb_c * tpb), None, True)
+            packed_theta = packed.reshape(*lead, nb_r, tpb, nb_c, 32)
+            packed_scale = scale.reshape(*lead, nb_r, 1, nb_c, 1)
+        else:
+            lead = theta.shape[:-2]
+            nb, tpb = theta.shape[-2:]
+            packed, scale, _ = mxfp8_quant(theta.reshape(-1, nb * tpb), None, False)
+            packed_theta = packed.reshape(*lead, nb, 32)
+            packed_scale = scale.reshape(*lead, nb, 1)
         return PackedMxfp8ExtendedCdlTensor(
-            packed_theta=packed.reshape(*lead, nb, 32),
-            packed_scale=scale.reshape(*lead, nb, 1),
+            packed_theta=packed_theta,
+            packed_scale=packed_scale,
             grad_proxy=None,
             block_mask=block_mask,
             orig_shape=orig_shape,
@@ -220,6 +236,7 @@ class Mxfp8ExtendedCdlQuantForWeight(ExtendedCdlQuantForWeight):
             self.kappa_backward,
             self.kernel_seed,
             self.theta_topk,
+            self.triton_block_2d,
         )
 
         return PackedMxfp8ExtendedCdlTensor(

@@ -14,6 +14,7 @@ def ecdl_quant_fwd(
     format_id: int,
     theta_topk: int,
     scale_mode: str,
+    block_2d: bool,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     fmt = get_format(format_id, theta.device)
     return launch_ecdl_fwd(
@@ -22,17 +23,29 @@ def ecdl_quant_fwd(
         seed,
         fmt,
         theta_topk,
+        block_2d,
         scale_mode,
     )
 
 
 @ecdl_quant_fwd.register_fake
-def _ecdl_quant_fwd_fake(theta, theta_kappa, seed, format_id, theta_topk, scale_mode):
+def _ecdl_quant_fwd_fake(
+    theta, theta_kappa, seed, format_id, theta_topk, scale_mode, block_2d
+):
+    is_fp4 = format_id in (FormatId.NVFP4, FormatId.MXFP4)
+    packed_dtype = torch.uint8 if is_fp4 else torch.float8_e4m3fn
+    if block_2d:
+        lead = theta.shape[:-4]
+        nb_r, tpb, nb_c, _ = theta.shape[-4:]
+        packed_cols = tpb // 2 if is_fp4 else tpb
+        return (
+            theta.new_empty((*lead, nb_r, tpb, nb_c, packed_cols), dtype=packed_dtype),
+            theta.new_empty((*lead, nb_r, 1, nb_c, 1), dtype=torch.uint8),
+            theta.new_empty((), dtype=torch.float32),
+        )
     lead = theta.shape[:-2]
     nb, tpb = theta.shape[-2:]
-    is_fp4 = format_id in (FormatId.NVFP4, FormatId.MXFP4)
     packed_cols = tpb // 2 if is_fp4 else tpb
-    packed_dtype = torch.uint8 if is_fp4 else torch.float8_e4m3fn
     return (
         theta.new_empty((*lead, nb, packed_cols), dtype=packed_dtype),
         theta.new_empty((*lead, nb, 1), dtype=torch.uint8),
@@ -51,6 +64,7 @@ def ecdl_quant_bwd(
     theta_topk: int,
     scale_mode: str,
     need_dkappa: bool,
+    block_2d: bool,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     fmt = get_format(format_id, theta.device)
     return launch_ecdl_bwd(
@@ -61,6 +75,7 @@ def ecdl_quant_bwd(
         alpha,
         fmt,
         theta_topk,
+        block_2d,
         scale_mode,
         need_dkappa,
     )
@@ -77,11 +92,18 @@ def _ecdl_quant_bwd_fake(
     theta_topk,
     scale_mode,
     need_dkappa,
+    block_2d,
 ):
-    m = math.prod(theta.shape[:-2])
-    nb, tpb = theta.shape[-2:]
+    if block_2d:
+        m = math.prod(theta.shape[:-4])
+        nb_r, tpb, nb_c, _ = theta.shape[-4:]
+        dtheta = theta.new_empty((m, nb_r * tpb, nb_c * tpb), dtype=theta.dtype)
+    else:
+        m = math.prod(theta.shape[:-2])
+        nb, tpb = theta.shape[-2:]
+        dtheta = theta.new_empty((m, nb * tpb), dtype=theta.dtype)
     return (
-        theta.new_empty((m, nb * tpb), dtype=theta.dtype),
+        dtheta,
         theta.new_empty((2 if need_dkappa else 0,), dtype=torch.float32),
     )
 
@@ -97,6 +119,7 @@ class EcdlQuantFn(torch.autograd.Function):
         format_id: int,
         theta_topk: int,
         scale_mode: str,
+        block_2d: bool,
     ):
         packed_theta, packed_scale, alpha_eff = ecdl_quant_fwd(
             theta,
@@ -105,6 +128,7 @@ class EcdlQuantFn(torch.autograd.Function):
             format_id,
             theta_topk,
             scale_mode,
+            block_2d,
         )
         ctx.save_for_backward(
             theta, packed_scale, kappa_forward, kappa_backward, alpha_eff
@@ -112,6 +136,7 @@ class EcdlQuantFn(torch.autograd.Function):
         ctx.format_id = format_id
         ctx.theta_topk = theta_topk
         ctx.scale_mode = scale_mode
+        ctx.block_2d = block_2d
         carrier = theta.new_zeros(()).expand(theta.shape)
         ctx.mark_non_differentiable(alpha_eff)
         return packed_theta, packed_scale, carrier, alpha_eff
@@ -137,6 +162,7 @@ class EcdlQuantFn(torch.autograd.Function):
             ctx.theta_topk,
             ctx.scale_mode,
             need_dkappa,
+            ctx.block_2d,
         )
         dkappa_forward = scalars[0] if (coupled and need_dkappa) else None
         dkappa_backward = scalars[0] if ((not coupled) and need_dkappa) else None
@@ -144,6 +170,7 @@ class EcdlQuantFn(torch.autograd.Function):
             dtheta.reshape(theta.shape),
             dkappa_forward,
             dkappa_backward,
+            None,
             None,
             None,
             None,
@@ -159,6 +186,7 @@ def ecdl_quant(
     format_id: int,
     theta_topk: int,
     scale_mode: str,
+    block_2d: bool,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     return EcdlQuantFn.apply(
         theta,
@@ -168,4 +196,5 @@ def ecdl_quant(
         int(format_id),
         theta_topk,
         scale_mode,
+        block_2d,
     )

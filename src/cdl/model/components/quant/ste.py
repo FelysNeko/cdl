@@ -34,7 +34,7 @@ class SteTensor(QTensor):
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
         with torch.no_grad():
             packed, scale, alpha = quant_fn(
-                self.theta.reshape(-1, self.k), self.seed
+                self.theta.reshape(-1, self.k), self.seed, False
             )
             packed = packed.reshape(*self.leading_shape, packed.shape[-1])
             scale = scale.reshape(*self.leading_shape, scale.shape[-1])

@@ -67,6 +67,21 @@ def squeeze_block_scale(
     return scale.squeeze(dims) if dims else scale
 
 
+def check_triton_block_dims(block_dims: Sequence[bool]) -> bool:
+    if not any(block_dims[:-1]) and block_dims[-1]:
+        return False
+    if (
+        len(block_dims) >= 2
+        and not any(block_dims[:-2])
+        and block_dims[-2]
+        and block_dims[-1]
+    ):
+        return True
+    raise NotImplementedError(
+        f"triton kernel only supports 1D or 2D trailing block scaling, got block_dims={block_dims}"
+    )
+
+
 @dataclass
 class ExtendedCdlTensor(QTensor):
     theta_format: Format

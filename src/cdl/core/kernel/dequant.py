@@ -31,6 +31,7 @@ def _fp4_dequant_kernel(
     K,
     NB,
     GROUP_SIZE: tl.constexpr,
+    SCALE_ROW_DIV: tl.constexpr,
     SCALE_IS_E8M0: tl.constexpr,
     BLOCK_K: tl.constexpr,
 ):
@@ -41,7 +42,8 @@ def _fp4_dequant_kernel(
     nbytes = tl.load(packed_ptr + row * (K // 2) + offs // 2, mask=kmask, other=0)
     nib = (nbytes >> ((offs % 2) * 4)) & 0xF
     val = _e2m1_from_nib(nib)
-    sb = tl.load(scale_ptr + row * NB + offs // GROUP_SIZE, mask=kmask, other=0)
+    srow = row // SCALE_ROW_DIV
+    sb = tl.load(scale_ptr + srow * NB + offs // GROUP_SIZE, mask=kmask, other=0)
     sc = _e8m0_from_byte(sb) if SCALE_IS_E8M0 else _e4m3_from_byte(sb)
     alpha = tl.load(alpha_ptr)
     tl.store(out_ptr + row * K + offs, (val * sc * alpha).to(tl.bfloat16), mask=kmask)
@@ -55,6 +57,7 @@ def _mxfp8_dequant_kernel(
     out_ptr,
     K,
     NB,
+    SCALE_ROW_DIV: tl.constexpr,
     HAS_ALPHA: tl.constexpr,
     BLOCK_K: tl.constexpr,
 ):
@@ -64,7 +67,8 @@ def _mxfp8_dequant_kernel(
     kmask = offs < K
     b = tl.load(packed_ptr + row * K + offs, mask=kmask, other=0)
     val = _e4m3_from_byte(b)
-    sb = tl.load(scale_ptr + row * NB + offs // 32, mask=kmask, other=0)
+    srow = row // SCALE_ROW_DIV
+    sb = tl.load(scale_ptr + srow * NB + offs // 32, mask=kmask, other=0)
     sc = _e8m0_from_byte(sb)
     out = val * sc
     if HAS_ALPHA:
@@ -85,6 +89,8 @@ def _fp4_dequant(
     out = torch.empty((rows, k), dtype=torch.bfloat16, device=packed.device)
     if rows == 0 or k == 0:
         return out
+    assert rows % scale.shape[0] == 0
+    scale_row_div = rows // scale.shape[0]
     _fp4_dequant_kernel[(rows, triton.cdiv(k, block_k))](
         packed,
         scale,
@@ -93,6 +99,7 @@ def _fp4_dequant(
         k,
         k // group_size,
         GROUP_SIZE=group_size,
+        SCALE_ROW_DIV=scale_row_div,
         SCALE_IS_E8M0=scale_is_e8m0,
         BLOCK_K=block_k,
         num_warps=4,
@@ -129,6 +136,8 @@ def mxfp8_dequant(
     if rows == 0 or k == 0:
         return out
     has_alpha = alpha is not None
+    assert rows % scale.shape[0] == 0
+    scale_row_div = rows // scale.shape[0]
     _mxfp8_dequant_kernel[(rows, triton.cdiv(k, block_k))](
         packed.view(torch.uint8),
         scale,
@@ -136,6 +145,7 @@ def mxfp8_dequant(
         out,
         k,
         k // 32,
+        SCALE_ROW_DIV=scale_row_div,
         HAS_ALPHA=has_alpha,
         BLOCK_K=block_k,
         num_warps=4,
