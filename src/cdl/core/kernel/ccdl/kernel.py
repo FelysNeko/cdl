@@ -9,6 +9,33 @@ from cdl.core.kernel.primitives import (
 )
 
 
+def _ccdl_fwd_configs() -> list[triton.Config]:
+    return [
+        triton.Config({"BB": 1}, num_warps=2),
+        triton.Config({"BB": 2}, num_warps=2),
+        triton.Config({"BB": 2}, num_warps=4),
+        triton.Config({"BB": 4}, num_warps=4),
+        triton.Config({"BB": 8}, num_warps=4),
+        triton.Config({"BB": 8}, num_warps=8),
+    ]
+
+
+def _ccdl_bwd_configs() -> list[triton.Config]:
+    return [
+        triton.Config({"BB": 1}, num_warps=2),
+        triton.Config({"BB": 2}, num_warps=2),
+        triton.Config({"BB": 2}, num_warps=4),
+        triton.Config({"BB": 4}, num_warps=2),
+        triton.Config({"BB": 4}, num_warps=4),
+        triton.Config({"BB": 8}, num_warps=4),
+    ]
+
+
+@triton.autotune(
+    configs=_ccdl_fwd_configs(),
+    key=["M_BUCKET", "NB_BUCKET", "TPB", "TN", "TOPK", "QN", "QT", "SCALE_BIAS"],
+    cache_results=True,
+)
 @triton.jit
 def _ccdl_fwd(
     th_ptr,
@@ -29,6 +56,8 @@ def _ccdl_fwd(
     M,
     K,
     NB,
+    M_BUCKET: tl.constexpr,
+    NB_BUCKET: tl.constexpr,
     TPB: tl.constexpr,
     TN: tl.constexpr,
     TOPK: tl.constexpr,
@@ -80,6 +109,25 @@ def _ccdl_fwd(
         tl.store(pt_ptr + r * K + idx, packed, mask=lmask)
 
 
+@triton.autotune(
+    configs=_ccdl_bwd_configs(),
+    key=[
+        "M_BUCKET",
+        "NB_BUCKET",
+        "TPB",
+        "TN",
+        "TOPK",
+        "QN",
+        "QT",
+        "SCALE_BIAS",
+        "NEED_DQ",
+        "NEED_DKT",
+        "NEED_DKQ",
+        "NEED_DAL",
+    ],
+    reset_to_zero=["part_ptr"],
+    cache_results=True,
+)
 @triton.jit
 def _ccdl_bwd(
     g_ptr,
@@ -103,6 +151,8 @@ def _ccdl_bwd(
     K,
     NB,
     GS,
+    M_BUCKET: tl.constexpr,
+    NB_BUCKET: tl.constexpr,
     TPB: tl.constexpr,
     TN: tl.constexpr,
     TOPK: tl.constexpr,
@@ -177,7 +227,7 @@ def _ccdl_bwd(
         dkq = 0.0
 
     if NEED_DKT or NEED_DKQ or NEED_DAL:
-        pbase = (r * tl.cdiv(NB, BB) + gb) * 3
-        tl.store(part_ptr + pbase + 0, dkt)
-        tl.store(part_ptr + pbase + 1, dkq)
-        tl.store(part_ptr + pbase + 2, dal)
+        slot = ((r * 17 + gb) & 63) * 3
+        tl.atomic_add(part_ptr + slot + 0, dkt)
+        tl.atomic_add(part_ptr + slot + 1, dkq)
+        tl.atomic_add(part_ptr + slot + 2, dal)

@@ -1,21 +1,16 @@
 import torch
 import triton
 
-from cdl.core.kernel.config import DEFAULT_CONFIG, KernelConfig
 from cdl.core.kernel.ecdl.kernel import (
     _ecdl_absmax,
     _ecdl_absmax_2d,
     _ecdl_bwd,
     _ecdl_bwd_2d,
-    _ecdl_bwd_impl,
     _ecdl_fwd,
     _ecdl_fwd_2d,
-    _ecdl_fwd_impl,
 )
 from cdl.core.kernel.formats.spec import FormatSpec
 from cdl.core.kernel.layout import flatten_theta, flatten_theta_2d
-
-ABSMAX_CONFIG = KernelConfig(block_chunk=32, num_warps=1)
 
 
 def _scale_mode_id(scale_mode: str) -> int:
@@ -26,6 +21,10 @@ def _scale_mode_id(scale_mode: str) -> int:
     return 2
 
 
+def _1d_buckets(m: int, nb: int) -> tuple[int, int]:
+    return (0 if m <= 512 else 1), (0 if nb <= 1 else (1 if nb <= 4 else 2))
+
+
 def _launch_ecdl_fwd_2d(
     theta: torch.Tensor,
     theta_kappa: torch.Tensor,
@@ -33,7 +32,6 @@ def _launch_ecdl_fwd_2d(
     fmt: FormatSpec,
     theta_topk: int,
     scale_mode: str,
-    config: KernelConfig,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     flat, lead, m, nb_r, nb_c, tpb = flatten_theta_2d(theta)
     h = nb_r * tpb
@@ -54,7 +52,7 @@ def _launch_ecdl_fwd_2d(
                 nb_r,
                 nb_c,
                 TPB=tpb,
-                num_warps=ABSMAX_CONFIG.num_warps,
+                num_warps=1,
             )
         global_absmax = gmax_u32.view(torch.float32)
         qmax = fmt.q_max
@@ -98,7 +96,7 @@ def _launch_ecdl_fwd_2d(
             MODE=mode,
             EMAX=fmt.theta_emax,
             SCALE_BIAS=fmt.scale_bias,
-            num_warps=config.num_warps,
+            num_warps=4,
         )
 
     packed_theta = packed_theta.reshape(*lead, nb_r, tpb, nb_c, packed_cols)
@@ -116,30 +114,23 @@ def launch_ecdl_fwd(
     theta_topk: int,
     block_2d: bool,
     scale_mode: str = "nvidia",
-    config: KernelConfig = DEFAULT_CONFIG,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     if block_2d:
         return _launch_ecdl_fwd_2d(
-            theta, theta_kappa, seed, fmt, theta_topk, scale_mode, config
+            theta, theta_kappa, seed, fmt, theta_topk, scale_mode
         )
 
     flat, lead, m, nb, tpb = flatten_theta(theta)
     k = nb * tpb
-    if config == DEFAULT_CONFIG:
-        bm = 16 if tpb == 16 else 8
-        bb = 1 if nb <= 1 else (2 if nb == 2 else 4)
-        nw = 4
-    else:
-        bm, bb, nw = 1, config.block_chunk, config.num_warps
-    ngb = triton.cdiv(nb, bb)
-    nm = triton.cdiv(m, bm)
     mode = _scale_mode_id(scale_mode)
 
     if mode == 0:
         bamax = torch.empty((m, nb), dtype=torch.float32, device=theta.device)
         gmax_u32 = torch.full((), 0x00800000, dtype=torch.uint32, device=theta.device)
         if m > 0 and nb > 0:
-            _ecdl_absmax[(nm, ngb)](
+            bm_abs = 16 if tpb == 16 else 8
+            bb_abs = 1 if nb <= 1 else (2 if nb == 2 else 4)
+            _ecdl_absmax[(triton.cdiv(m, bm_abs), triton.cdiv(nb, bb_abs))](
                 flat,
                 bamax,
                 gmax_u32,
@@ -147,9 +138,9 @@ def launch_ecdl_fwd(
                 k,
                 nb,
                 TPB=tpb,
-                BM=bm,
-                BB=bb,
-                num_warps=nw,
+                BM=bm_abs,
+                BB=bb_abs,
+                num_warps=4,
             )
         global_absmax = gmax_u32.view(torch.float32)
         qmax = fmt.q_max
@@ -167,72 +158,38 @@ def launch_ecdl_fwd(
         (m, nb * packed_cols), dtype=torch.uint8, device=theta.device
     )
     packed_scale = torch.empty((m, nb), dtype=torch.uint8, device=theta.device)
-    rows_bucket = 0 if m <= 512 else 1
-    nb_bucket = 0 if nb <= 1 else (1 if nb <= 4 else 2)
     if m > 0 and nb > 0:
-        if config == DEFAULT_CONFIG:
-            _ecdl_fwd[
-                lambda meta: (triton.cdiv(m, meta["BM"]), triton.cdiv(nb, meta["BB"]))
-            ](
-                flat,
-                bamax,
-                global_absmax,
-                qmax,
-                fmt.theta_level,
-                fmt.theta_gap,
-                fmt.q_level,
-                theta_kappa,
-                alpha_eff,
-                seed,
-                packed_theta,
-                packed_scale,
-                m,
-                k,
-                nb,
-                fmt.q_ordinal,
-                fmt.theta_ordinal,
-                TOPK=theta_topk,
-                TPB=tpb,
-                TN=fmt.tn,
-                QN=fmt.qn,
-                ROWS_BUCKET=rows_bucket,
-                NB_BUCKET=nb_bucket,
-                MODE=mode,
-                EMAX=fmt.theta_emax,
-                SCALE_BIAS=fmt.scale_bias,
-            )
-        else:
-            _ecdl_fwd_impl[(nm, ngb)](
-                flat,
-                bamax,
-                global_absmax,
-                qmax,
-                fmt.theta_level,
-                fmt.theta_gap,
-                fmt.q_level,
-                theta_kappa,
-                alpha_eff,
-                seed,
-                packed_theta,
-                packed_scale,
-                m,
-                k,
-                nb,
-                fmt.q_ordinal,
-                fmt.theta_ordinal,
-                TOPK=theta_topk,
-                TPB=tpb,
-                TN=fmt.tn,
-                QN=fmt.qn,
-                ROWS_BUCKET=rows_bucket,
-                NB_BUCKET=nb_bucket,
-                BM=bm,
-                BB=bb,
-                MODE=mode,
-                EMAX=fmt.theta_emax,
-                SCALE_BIAS=fmt.scale_bias,
-                num_warps=nw,
-            )
+        rows_bucket, nb_bucket = _1d_buckets(m, nb)
+        _ecdl_fwd[
+            lambda meta: (triton.cdiv(m, meta["BM"]), triton.cdiv(nb, meta["BB"]))
+        ](
+            flat,
+            bamax,
+            global_absmax,
+            qmax,
+            fmt.theta_level,
+            fmt.theta_gap,
+            fmt.q_level,
+            theta_kappa,
+            alpha_eff,
+            seed,
+            packed_theta,
+            packed_scale,
+            m,
+            k,
+            nb,
+            fmt.q_ordinal,
+            fmt.theta_ordinal,
+            TOPK=theta_topk,
+            TPB=tpb,
+            TN=fmt.tn,
+            QN=fmt.qn,
+            ROWS_BUCKET=rows_bucket,
+            NB_BUCKET=nb_bucket,
+            MODE=mode,
+            EMAX=fmt.theta_emax,
+            SCALE_BIAS=fmt.scale_bias,
+        )
 
     packed_theta = packed_theta.reshape(*lead, nb, packed_cols)
     if not is_fp4:
@@ -250,7 +207,6 @@ def _launch_ecdl_bwd_2d(
     fmt: FormatSpec,
     theta_topk: int,
     need_dkappa: bool,
-    config: KernelConfig,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     flat, _lead, m, nb_r, nb_c, tpb = flatten_theta_2d(theta)
     h = nb_r * tpb
@@ -287,7 +243,7 @@ def _launch_ecdl_bwd_2d(
             TN=fmt.tn,
             SCALE_BIAS=fmt.scale_bias,
             COMPUTE_SCALARS=need_dkappa,
-            num_warps=config.num_warps,
+            num_warps=4,
         )
     scalars = (
         partials.sum(0)
@@ -308,7 +264,6 @@ def launch_ecdl_bwd(
     block_2d: bool,
     scale_mode: str = "nvidia",
     need_dkappa: bool = True,
-    config: KernelConfig = DEFAULT_CONFIG,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if block_2d:
         return _launch_ecdl_bwd_2d(
@@ -320,7 +275,6 @@ def launch_ecdl_bwd(
             fmt,
             theta_topk,
             need_dkappa,
-            config,
         )
 
     flat, _lead, m, nb, tpb = flatten_theta(theta)
@@ -329,70 +283,39 @@ def launch_ecdl_bwd(
     ps_flat = packed_scale.reshape(m, nb)
 
     dtheta = theta.new_empty((m, k), dtype=theta.dtype)
-    rows_bucket = 0 if m <= 512 else 1
-    nb_bucket = 0 if nb <= 1 else (1 if nb <= 4 else 2)
     partials = (
         torch.zeros((64, 2), dtype=torch.float32, device=theta.device)
         if need_dkappa
         else torch.empty(1, dtype=torch.float32, device=theta.device)
     )
     if m > 0 and nb > 0:
-        if config == DEFAULT_CONFIG:
-            _ecdl_bwd[
-                lambda meta: (triton.cdiv(m, meta["BM"]), triton.cdiv(nb, meta["BB"]))
-            ](
-                g,
-                flat,
-                ps_flat,
-                fmt.q_level,
-                fmt.theta_level,
-                fmt.theta_gap,
-                kappa_backward,
-                alpha,
-                dtheta,
-                partials,
-                m,
-                k,
-                nb,
-                k,
-                fmt.theta_ordinal,
-                TOPK=theta_topk,
-                TPB=tpb,
-                TN=fmt.tn,
-                ROWS_BUCKET=rows_bucket,
-                NB_BUCKET=nb_bucket,
-                SCALE_BIAS=fmt.scale_bias,
-                COMPUTE_SCALARS=need_dkappa,
-            )
-        else:
-            bm, bb, nw = 1, config.block_chunk, config.num_warps
-            _ecdl_bwd_impl[(triton.cdiv(m, bm), triton.cdiv(nb, bb))](
-                g,
-                flat,
-                ps_flat,
-                fmt.q_level,
-                fmt.theta_level,
-                fmt.theta_gap,
-                kappa_backward,
-                alpha,
-                dtheta,
-                partials,
-                m,
-                k,
-                nb,
-                k,
-                fmt.theta_ordinal,
-                TOPK=theta_topk,
-                TPB=tpb,
-                TN=fmt.tn,
-                ROWS_BUCKET=rows_bucket,
-                NB_BUCKET=nb_bucket,
-                BM=bm,
-                BB=bb,
-                SCALE_BIAS=fmt.scale_bias,
-                COMPUTE_SCALARS=need_dkappa,
-                num_warps=nw,
-            )
+        rows_bucket, nb_bucket = _1d_buckets(m, nb)
+        _ecdl_bwd[
+            lambda meta: (triton.cdiv(m, meta["BM"]), triton.cdiv(nb, meta["BB"]))
+        ](
+            g,
+            flat,
+            ps_flat,
+            fmt.q_level,
+            fmt.theta_level,
+            fmt.theta_gap,
+            kappa_backward,
+            alpha,
+            dtheta,
+            partials,
+            m,
+            k,
+            nb,
+            k,
+            fmt.theta_ordinal,
+            TOPK=theta_topk,
+            TPB=tpb,
+            TN=fmt.tn,
+            ROWS_BUCKET=rows_bucket,
+            NB_BUCKET=nb_bucket,
+            SCALE_BIAS=fmt.scale_bias,
+            COMPUTE_SCALARS=need_dkappa,
+        )
     scalars = (
         partials.sum(0)
         if need_dkappa

@@ -44,6 +44,24 @@ def _fp4_stochastic_round(v, seed, offset):
 
 
 @triton.jit
+def _fp4_scale(block_absmax, gmax_ptr, alpha_ptr, SCALE_IS_E8M0: tl.constexpr):
+    if SCALE_IS_E8M0:
+        return _e8m0_scale(block_absmax, 2)
+    qv = tl.div_rn(block_absmax * 448.0, tl.load(gmax_ptr).to(tl.float32))
+    q_byte = (ue4m3_triton_ordinal(qv, 126) + 1).to(tl.uint8)
+    q_hat = tl.cast(q_byte, tl.float8e4nv, bitcast=True).to(tl.float32)
+    return q_byte, q_hat * tl.load(alpha_ptr).to(tl.float32)
+
+
+@triton.jit
+def _fp4_quant_code(v, seed_ptr, offset, STOCHASTIC: tl.constexpr):
+    if STOCHASTIC:
+        return _fp4_stochastic_round(v, tl.load(seed_ptr).to(tl.int32), offset)
+    ti = e2m1_triton_ordinal(v, 16)
+    return tl.where(ti < 8, 15 - ti, ti - 8)
+
+
+@triton.jit
 def _fp8_stochastic_round(v, seed, offset):
     u = tl.rand(seed, offset)
     sgn = (tl.cast(v, tl.uint32, bitcast=True) >> 31) != 0
@@ -121,13 +139,7 @@ def _fp4_quant_kernel_impl(
     raw = tl.load(x_ptr + offs, mask=mask, other=0.0).to(tl.float32)
 
     block_absmax = tl.max(tl.abs(raw), axis=2)
-    if SCALE_IS_E8M0:
-        q_byte, s = _e8m0_scale(block_absmax, 2)
-    else:
-        qv = tl.div_rn(block_absmax * 448.0, tl.load(gmax_ptr).to(tl.float32))
-        q_byte = (ue4m3_triton_ordinal(qv, 126) + 1).to(tl.uint8)
-        q_hat = tl.cast(q_byte, tl.float8e4nv, bitcast=True).to(tl.float32)
-        s = q_hat * tl.load(alpha_ptr).to(tl.float32)
+    q_byte, s = _fp4_scale(block_absmax, gmax_ptr, alpha_ptr, SCALE_IS_E8M0)
 
     tl.store(
         scale_ptr + rows[:, None].to(tl.int64) * NB + bs[None, :],
@@ -135,11 +147,7 @@ def _fp4_quant_kernel_impl(
         mask=rbmask,
     )
     v = tl.div_rn(raw, s[:, :, None])
-    if STOCHASTIC:
-        code = _fp4_stochastic_round(v, tl.load(seed_ptr).to(tl.int32), offs)
-    else:
-        ti = e2m1_triton_ordinal(v, 16)
-        code = tl.where(ti < 8, 15 - ti, ti - 8)
+    code = _fp4_quant_code(v, seed_ptr, offs, STOCHASTIC)
 
     lo, hi = tl.split(tl.reshape(code, (BM, BB, TPB // 2, 2)))
     pcols = bs[:, None] * (TPB // 2) + tl.arange(0, TPB // 2)[None, :]
@@ -240,25 +248,16 @@ def _fp4_quant_kernel_2d(
     ).to(tl.float32)
 
     block_absmax = tl.max(tl.abs(raw))
-    if SCALE_IS_E8M0:
-        q_byte, s = _e8m0_scale(block_absmax, 2)
-    else:
-        qv = tl.div_rn(block_absmax * 448.0, tl.load(gmax_ptr).to(tl.float32))
-        q_byte = (ue4m3_triton_ordinal(qv, 126) + 1).to(tl.uint8)
-        q_hat = tl.cast(q_byte, tl.float8e4nv, bitcast=True).to(tl.float32)
-        s = q_hat * tl.load(alpha_ptr).to(tl.float32)
+    q_byte, s = _fp4_scale(block_absmax, gmax_ptr, alpha_ptr, SCALE_IS_E8M0)
 
     tl.store(scale_ptr + tid, q_byte)
     v = tl.div_rn(raw, s)
-    if STOCHASTIC:
-        code = _fp4_stochastic_round(
-            v,
-            tl.load(seed_ptr).to(tl.int32),
-            (rows_offs[:, None] * K + cols_offs[None, :]).to(tl.int32),
-        )
-    else:
-        ti = e2m1_triton_ordinal(v, 16)
-        code = tl.where(ti < 8, 15 - ti, ti - 8)
+    code = _fp4_quant_code(
+        v,
+        seed_ptr,
+        (rows_offs[:, None] * K + cols_offs[None, :]).to(tl.int32),
+        STOCHASTIC,
+    )
 
     lo, hi = tl.split(tl.reshape(code, (TPB, TPB // 2, 2)))
     pcols = bc * (TPB // 2) + tl.arange(0, TPB // 2)
@@ -316,6 +315,165 @@ def _global_absmax(x: torch.Tensor) -> torch.Tensor:
     return g_u32.view(torch.float32)
 
 
+def _launch_quant_2d(
+    x: torch.Tensor,
+    global_absmax: torch.Tensor,
+    alpha_ptr: torch.Tensor,
+    seed_arg: torch.Tensor,
+    packed: torch.Tensor,
+    scale: torch.Tensor,
+    rows: int,
+    k: int,
+    nb_r: int,
+    nb: int,
+    pack_stride: int,
+    group_size: int,
+    is_fp4: bool,
+    scale_is_e8m0: bool,
+    emax: int,
+    stochastic: bool,
+) -> None:
+    grid = (nb_r * nb,)
+    if is_fp4:
+        _fp4_quant_kernel_2d[grid](
+            x,
+            global_absmax,
+            alpha_ptr,
+            seed_arg,
+            packed,
+            scale,
+            rows,
+            k,
+            nb,
+            pack_stride,
+            TPB=group_size,
+            SCALE_IS_E8M0=scale_is_e8m0,
+            STOCHASTIC=stochastic,
+            num_warps=4,
+        )
+    else:
+        _fp8_quant_kernel_2d[grid](
+            x,
+            seed_arg,
+            packed,
+            scale,
+            rows,
+            k,
+            nb,
+            pack_stride,
+            TPB=group_size,
+            EMAX=emax,
+            STOCHASTIC=stochastic,
+            num_warps=4,
+        )
+
+
+def _launch_quant_1d(
+    x: torch.Tensor,
+    global_absmax: torch.Tensor,
+    alpha_ptr: torch.Tensor,
+    seed_arg: torch.Tensor,
+    packed: torch.Tensor,
+    scale: torch.Tensor,
+    rows: int,
+    k: int,
+    nb: int,
+    pack_stride: int,
+    group_size: int,
+    is_fp4: bool,
+    scale_is_e8m0: bool,
+    emax: int,
+    stochastic: bool,
+    block_chunk: int | None,
+) -> None:
+    rows_bucket = 0 if rows <= 512 else 1
+    nb_bucket = 0 if nb <= 1 else (1 if nb <= 4 else 2)
+    if block_chunk is not None:
+        bm = 16 if group_size == 16 else 8
+        bb = block_chunk
+        grid = (triton.cdiv(rows, bm), triton.cdiv(nb, bb))
+        if is_fp4:
+            _fp4_quant_kernel_impl[grid](
+                x,
+                global_absmax,
+                alpha_ptr,
+                seed_arg,
+                packed,
+                scale,
+                rows,
+                k,
+                nb,
+                pack_stride,
+                TPB=group_size,
+                ROWS_BUCKET=rows_bucket,
+                NB_BUCKET=nb_bucket,
+                BM=bm,
+                BB=bb,
+                SCALE_IS_E8M0=scale_is_e8m0,
+                STOCHASTIC=stochastic,
+                num_warps=4,
+            )
+        else:
+            _fp8_quant_kernel_impl[grid](
+                x,
+                seed_arg,
+                packed,
+                scale,
+                rows,
+                k,
+                nb,
+                pack_stride,
+                TPB=group_size,
+                ROWS_BUCKET=rows_bucket,
+                NB_BUCKET=nb_bucket,
+                BM=bm,
+                BB=bb,
+                EMAX=emax,
+                STOCHASTIC=stochastic,
+                num_warps=4,
+            )
+        return
+
+    if is_fp4:
+        _fp4_quant_kernel[
+            lambda meta: (triton.cdiv(rows, meta["BM"]), triton.cdiv(nb, meta["BB"]))
+        ](
+            x,
+            global_absmax,
+            alpha_ptr,
+            seed_arg,
+            packed,
+            scale,
+            rows,
+            k,
+            nb,
+            pack_stride,
+            TPB=group_size,
+            ROWS_BUCKET=rows_bucket,
+            NB_BUCKET=nb_bucket,
+            SCALE_IS_E8M0=scale_is_e8m0,
+            STOCHASTIC=stochastic,
+        )
+    else:
+        _fp8_quant_kernel[
+            lambda meta: (triton.cdiv(rows, meta["BM"]), triton.cdiv(nb, meta["BB"]))
+        ](
+            x,
+            seed_arg,
+            packed,
+            scale,
+            rows,
+            k,
+            nb,
+            pack_stride,
+            TPB=group_size,
+            ROWS_BUCKET=rows_bucket,
+            NB_BUCKET=nb_bucket,
+            EMAX=emax,
+            STOCHASTIC=stochastic,
+        )
+
+
 def _quant(
     x: torch.Tensor,
     group_size: int,
@@ -337,11 +495,10 @@ def _quant(
     if block_2d:
         nb_r = triton.cdiv(rows, group_size)
         out_rows = nb_r * group_size
-        packed = torch.empty(
-            (out_rows, pack_stride), dtype=packed_dtype, device=x.device
-        )
+        packed = torch.empty((out_rows, pack_stride), dtype=packed_dtype, device=x.device)
         scale = torch.empty((nb_r, nb), dtype=torch.uint8, device=x.device)
     else:
+        nb_r = 0
         packed = torch.empty((rows, pack_stride), dtype=packed_dtype, device=x.device)
         scale = torch.empty((rows, nb), dtype=torch.uint8, device=x.device)
 
@@ -357,127 +514,45 @@ def _quant(
     if rows == 0 or k == 0:
         return packed, scale, alpha
 
+    seed_arg = seed if seed is not None else x
+    stochastic = seed is not None
     if block_2d:
-        grid = (nb_r * nb,)
-        if is_fp4:
-            _fp4_quant_kernel_2d[grid](
-                x,
-                global_absmax,
-                alpha_ptr,
-                seed if seed is not None else x,
-                packed,
-                scale,
-                rows,
-                k,
-                nb,
-                pack_stride,
-                TPB=group_size,
-                SCALE_IS_E8M0=scale_is_e8m0,
-                STOCHASTIC=seed is not None,
-                num_warps=4,
-            )
-        else:
-            _fp8_quant_kernel_2d[grid](
-                x,
-                seed if seed is not None else x,
-                packed,
-                scale,
-                rows,
-                k,
-                nb,
-                pack_stride,
-                TPB=group_size,
-                EMAX=emax,
-                STOCHASTIC=seed is not None,
-                num_warps=4,
-            )
-        return packed, scale, alpha
-
-    rows_bucket = 0 if rows <= 512 else 1
-    nb_bucket = 0 if nb <= 1 else (1 if nb <= 4 else 2)
-    if block_chunk is not None:
-        bm = 16 if group_size == 16 else 8
-        bb = block_chunk
-        grid = (triton.cdiv(rows, bm), triton.cdiv(nb, bb))
-        if is_fp4:
-            _fp4_quant_kernel_impl[grid](
-                x,
-                global_absmax,
-                alpha_ptr,
-                seed if seed is not None else x,
-                packed,
-                scale,
-                rows,
-                k,
-                nb,
-                pack_stride,
-                TPB=group_size,
-                ROWS_BUCKET=rows_bucket,
-                NB_BUCKET=nb_bucket,
-                BM=bm,
-                BB=bb,
-                SCALE_IS_E8M0=scale_is_e8m0,
-                STOCHASTIC=seed is not None,
-                num_warps=4,
-            )
-        else:
-            _fp8_quant_kernel_impl[grid](
-                x,
-                seed if seed is not None else x,
-                packed,
-                scale,
-                rows,
-                k,
-                nb,
-                pack_stride,
-                TPB=group_size,
-                ROWS_BUCKET=rows_bucket,
-                NB_BUCKET=nb_bucket,
-                BM=bm,
-                BB=bb,
-                EMAX=emax,
-                STOCHASTIC=seed is not None,
-                num_warps=4,
-            )
-        return packed, scale, alpha
-
-    if is_fp4:
-        _fp4_quant_kernel[
-            lambda meta: (triton.cdiv(rows, meta["BM"]), triton.cdiv(nb, meta["BB"]))
-        ](
+        _launch_quant_2d(
             x,
             global_absmax,
             alpha_ptr,
-            seed if seed is not None else x,
+            seed_arg,
             packed,
             scale,
             rows,
             k,
+            nb_r,
             nb,
             pack_stride,
-            TPB=group_size,
-            ROWS_BUCKET=rows_bucket,
-            NB_BUCKET=nb_bucket,
-            SCALE_IS_E8M0=scale_is_e8m0,
-            STOCHASTIC=seed is not None,
+            group_size,
+            is_fp4,
+            scale_is_e8m0,
+            emax,
+            stochastic,
         )
     else:
-        _fp8_quant_kernel[
-            lambda meta: (triton.cdiv(rows, meta["BM"]), triton.cdiv(nb, meta["BB"]))
-        ](
+        _launch_quant_1d(
             x,
-            seed if seed is not None else x,
+            global_absmax,
+            alpha_ptr,
+            seed_arg,
             packed,
             scale,
             rows,
             k,
             nb,
             pack_stride,
-            TPB=group_size,
-            ROWS_BUCKET=rows_bucket,
-            NB_BUCKET=nb_bucket,
-            EMAX=emax,
-            STOCHASTIC=seed is not None,
+            group_size,
+            is_fp4,
+            scale_is_e8m0,
+            emax,
+            stochastic,
+            block_chunk,
         )
     return packed, scale, alpha
 

@@ -108,8 +108,23 @@ def _ecdl_bwd_configs() -> list[triton.Config]:
     ]
 
 
+@triton.autotune(
+    configs=_ecdl_fwd_configs(),
+    key=[
+        "ROWS_BUCKET",
+        "NB_BUCKET",
+        "TOPK",
+        "TPB",
+        "TN",
+        "QN",
+        "MODE",
+        "EMAX",
+        "SCALE_BIAS",
+    ],
+    cache_results=True,
+)
 @triton.jit
-def _ecdl_fwd_impl(
+def _ecdl_fwd(
     th_ptr,
     bamax_ptr,
     gmax_ptr,
@@ -192,25 +207,22 @@ def _ecdl_fwd_impl(
         tl.store(pt_ptr + offs, packed, mask=lmask)
 
 
-_ecdl_fwd = triton.autotune(
-    configs=_ecdl_fwd_configs(),
+@triton.autotune(
+    configs=_ecdl_bwd_configs(),
     key=[
         "ROWS_BUCKET",
         "NB_BUCKET",
         "TOPK",
         "TPB",
         "TN",
-        "QN",
-        "MODE",
-        "EMAX",
         "SCALE_BIAS",
+        "COMPUTE_SCALARS",
     ],
+    reset_to_zero=["part_ptr"],
     cache_results=True,
-)(_ecdl_fwd_impl)
-
-
+)
 @triton.jit
-def _ecdl_bwd_impl(
+def _ecdl_bwd(
     g_ptr,
     th_ptr,
     ps_ptr,
@@ -282,22 +294,6 @@ def _ecdl_bwd_impl(
         slot = ((pid_r * 17 + pid_b) & 63) * 2
         tl.atomic_add(part_ptr + slot + 0, dkt)
         tl.atomic_add(part_ptr + slot + 1, dal)
-
-
-_ecdl_bwd = triton.autotune(
-    configs=_ecdl_bwd_configs(),
-    key=[
-        "ROWS_BUCKET",
-        "NB_BUCKET",
-        "TOPK",
-        "TPB",
-        "TN",
-        "SCALE_BIAS",
-        "COMPUTE_SCALARS",
-    ],
-    reset_to_zero=["part_ptr"],
-    cache_results=True,
-)(_ecdl_bwd_impl)
 
 
 @triton.jit
