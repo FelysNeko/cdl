@@ -78,6 +78,10 @@ class ExtendedCdlTensor(QTensor):
     block_mask: Sequence[bool]
     orig_shape: Sequence[int]
 
+    @property
+    def shape(self) -> Sequence[int]:
+        return self.orig_shape
+
     def dequantize(self) -> torch.Tensor:
         theta = self.theta_format.level[self.theta_indices.long()]
         q = self.q_format.level[self.q_indices.long()]
@@ -93,6 +97,10 @@ class ExtendedCdlTensor(QTensor):
 @dataclass
 class ExtendedCdlBypassTensor(QTensor):
     theta: torch.Tensor
+
+    @property
+    def shape(self) -> Sequence[int]:
+        return self.theta.shape
 
     def dequantize(self) -> torch.Tensor:
         return self.theta

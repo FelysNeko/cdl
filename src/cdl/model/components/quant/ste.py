@@ -1,3 +1,4 @@
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Literal
 
@@ -15,6 +16,10 @@ class SteTensor(QTensor):
     theta: torch.Tensor
     simulation: Simulation | None
     seed: torch.Tensor | None
+
+    @property
+    def shape(self) -> Sequence[int]:
+        return self.theta.shape
 
     @property
     def leading_shape(self) -> torch.Size:

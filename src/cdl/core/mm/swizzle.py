@@ -15,9 +15,17 @@ def swizzle_scale_factors(sf: torch.Tensor) -> torch.Tensor:
 
 
 def expand_rows(scale: torch.Tensor, rows: int) -> torch.Tensor:
-    if scale.shape[0] != rows:
-        scale = scale.expand(rows, -1).contiguous()
-    return scale
+    if scale.shape[0] == rows:
+        return scale
+    repeat = rows // scale.shape[0]
+    if scale.shape[0] * repeat != rows:
+        raise ValueError(f"cannot expand {scale.shape[0]} scale rows to {rows}")
+    return (
+        scale[:, None, :]
+        .expand(-1, repeat, -1)
+        .reshape(rows, scale.shape[1])
+        .contiguous()
+    )
 
 
 def pad_k(

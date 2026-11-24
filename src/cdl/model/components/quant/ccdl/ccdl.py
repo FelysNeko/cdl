@@ -1,6 +1,6 @@
 import abc
 import math
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 
 import torch
@@ -40,6 +40,10 @@ class CascadedCdlTensor(QTensor):
     grad_proxy: torch.Tensor | None
     k_dim: int
 
+    @property
+    def shape(self) -> Sequence[int]:
+        return (*self.theta_indices.shape[:-2], self.k_dim)
+
     def dequantize(self) -> torch.Tensor:
         theta = self.theta_format.level[self.theta_indices.long()]
         q = self.q_format.level[self.q_indices.long()]
@@ -56,6 +60,10 @@ class CascadedCdlTensor(QTensor):
 @dataclass
 class CascadedCdlBypassTensor(QTensor):
     theta: torch.Tensor
+
+    @property
+    def shape(self) -> Sequence[int]:
+        return self.theta.shape
 
     def dequantize(self) -> torch.Tensor:
         return self.theta

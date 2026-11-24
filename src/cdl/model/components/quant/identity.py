@@ -1,3 +1,4 @@
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 import torch
@@ -8,6 +9,10 @@ from cdl.api.quant import QTensor, Quant
 @dataclass
 class IdentityTensor(QTensor):
     theta: torch.Tensor
+
+    @property
+    def shape(self) -> Sequence[int]:
+        return self.theta.shape
 
     def dequantize(self) -> torch.Tensor:
         return self.theta

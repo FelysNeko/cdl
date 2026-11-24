@@ -1,3 +1,4 @@
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Literal
 
@@ -31,6 +32,10 @@ class PackedMxfp8CascadedCdlTensor(QTensor):
     grad_proxy: torch.Tensor | None
     k_dim: int
     dtype: torch.dtype
+
+    @property
+    def shape(self) -> Sequence[int]:
+        return (*self.packed_theta.shape[:-2], self.k_dim)
 
     def dequantize(self) -> torch.Tensor:
         packed, scale, alpha = self.mxfp8()

@@ -1,11 +1,15 @@
 import abc
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 
 import torch
 from torch import nn
 
 
 class QTensor(abc.ABC):
+    @property
+    @abc.abstractmethod
+    def shape(self) -> Sequence[int]: ...
+
     def nvfp4(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         raise NotImplementedError()
 

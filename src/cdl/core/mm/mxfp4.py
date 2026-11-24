@@ -25,12 +25,17 @@ class MatMul(torch.autograd.Function):
         x_theta, x_q, x_alpha = x.mxfp4()
         w_theta, w_q, w_alpha = w.mxfp4()
 
-        x_q = expand_rows(x_q, x_theta.shape[0])
+        m = x.shape[0]
+        n = w.shape[0]
+        ctx.m = m
+        ctx.n = n
+
         x_theta, x_q = pad_k(x_theta, x_q, 2, 32, 32)
         w_theta, w_q = pad_k(w_theta, w_q, 2, 32, 32)
         ctx.save_for_backward(x_theta, x_q, x_alpha, w_theta, w_q, w_alpha)
 
-        n = w_theta.shape[0]
+        x_q = expand_rows(x_q, x_theta.shape[0])
+        w_q = expand_rows(w_q, w_theta.shape[0])
         w_theta, w_q = pad_n(w_theta, w_q, 8, 0)
 
         return mm_fp4(
@@ -41,7 +46,7 @@ class MatMul(torch.autograd.Function):
             x_alpha * w_alpha,
             32,
             False,
-        )[:, :n]
+        )[:m, :n]
 
     @staticmethod
     def backward(
@@ -53,11 +58,11 @@ class MatMul(torch.autograd.Function):
         dx = dw = None
 
         if ctx.x_k is not None:
-            w = mxfp4_dequant(w_theta, w_q, w_alpha)
-            dx = grad_output @ w[:, : ctx.x_k]
+            w = mxfp4_dequant(w_theta, expand_rows(w_q, w_theta.shape[0]), w_alpha)
+            dx = grad_output @ w[: ctx.n, : ctx.x_k]
 
         if ctx.w_k is not None:
-            x = mxfp4_dequant(x_theta, x_q, x_alpha)
-            dw = grad_output.T @ x[:, : ctx.w_k]
+            x = mxfp4_dequant(x_theta, expand_rows(x_q, x_theta.shape[0]), x_alpha)
+            dw = grad_output.T @ x[: ctx.m, : ctx.w_k]
 
         return None, dx, None, dw

@@ -49,6 +49,10 @@ class PackedNvfp4ExtendedCdlTensor(QTensor):
     orig_shape: Sequence[int]
     dtype: torch.dtype
 
+    @property
+    def shape(self) -> Sequence[int]:
+        return self.orig_shape
+
     def dequantize(self) -> torch.Tensor:
         packed, scale, alpha = self.nvfp4()
         lead = packed.shape[:-1]

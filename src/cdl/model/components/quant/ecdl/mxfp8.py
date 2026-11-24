@@ -46,6 +46,10 @@ class PackedMxfp8ExtendedCdlTensor(QTensor):
     orig_shape: Sequence[int]
     dtype: torch.dtype
 
+    @property
+    def shape(self) -> Sequence[int]:
+        return self.orig_shape
+
     def dequantize(self) -> torch.Tensor:
         packed, scale, alpha = self.mxfp8()
         lead = packed.shape[:-1]

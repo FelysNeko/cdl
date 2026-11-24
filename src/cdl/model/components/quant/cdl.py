@@ -1,6 +1,6 @@
 import abc
 import math
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 
 import torch
@@ -16,6 +16,10 @@ from cdl.model.mixin.batchnorm_batch_stats import BatchNormBatchStatsMixin
 class CdlTensor(QTensor):
     theta: torch.Tensor
     grad_proxy: torch.Tensor | None
+
+    @property
+    def shape(self) -> Sequence[int]:
+        return self.theta.shape
 
     def dequantize(self) -> torch.Tensor:
         return self.theta
