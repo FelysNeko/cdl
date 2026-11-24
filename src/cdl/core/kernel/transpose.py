@@ -63,6 +63,7 @@ def _rht16_transpose_kernel(
     M,
     C,
     M_PAD,
+    K_TILES: tl.constexpr,
     BC: tl.constexpr,
     IS_FP32: tl.constexpr,
 ):
@@ -71,28 +72,27 @@ def _rht16_transpose_kernel(
 
     ar16 = tl.arange(0, 16)
     q = tl.load(q_ptr + ar16[:, None] * 16 + ar16[None, :])
-
-    rm = pid_m * 16 + ar16
     rc = pid_c * BC + tl.arange(0, BC)
-    in_mask = (rm[:, None] < M) & (rc[None, :] < C)
-    raw = tl.load(
-        x_ptr + rm[:, None].to(tl.int64) * C + rc[None, :],
-        mask=in_mask,
-        other=0.0,
-    )
+    cmask = rc < C
 
-    if IS_FP32:
-        y = tl.dot(q, raw, input_precision="ieee")
-    else:
-        y = tl.dot(q, raw)
+    for t in tl.static_range(K_TILES):
+        rm = (pid_m * K_TILES + t) * 16 + ar16
+        raw = tl.load(
+            x_ptr + rm[:, None].to(tl.int64) * C + rc[None, :],
+            mask=(rm[:, None] < M) & cmask[None, :],
+            other=0.0,
+        )
+        if IS_FP32:
+            y = tl.dot(q, raw, input_precision="ieee")
+        else:
+            y = tl.dot(q, raw)
 
-    y_t = tl.trans(y).to(out_ptr.dtype.element_ty)
-    out_mask = (rc[:, None] < C) & (rm[None, :] < M_PAD)
-    tl.store(
-        out_ptr + rc[:, None].to(tl.int64) * M_PAD + rm[None, :],
-        y_t,
-        mask=out_mask,
-    )
+        y_t = tl.trans(y).to(out_ptr.dtype.element_ty)
+        tl.store(
+            out_ptr + rc[:, None].to(tl.int64) * M_PAD + rm[None, :],
+            y_t,
+            mask=cmask[:, None] & (rm[None, :] < M_PAD),
+        )
 
 
 def fp4_repack_transpose(
@@ -147,7 +147,8 @@ def rht16_transpose(
         .to(x.dtype)
         .contiguous()
     )
-    grid = (triton.cdiv(m_pad, 16), triton.cdiv(c, block_c))
+    k_tiles = 2 if m_pad <= 32 else 4
+    grid = (triton.cdiv(m_pad, k_tiles * 16), triton.cdiv(c, block_c))
     _rht16_transpose_kernel[grid](
         x,
         q,
@@ -155,6 +156,7 @@ def rht16_transpose(
         m,
         c,
         m_pad,
+        K_TILES=k_tiles,
         BC=block_c,
         IS_FP32=(x.dtype == torch.float32),
         num_warps=4,

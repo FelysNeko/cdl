@@ -180,10 +180,11 @@ def cdl_proxy_coeffs(
         sb += e * d * d
         sbl += e * d * d * lv
 
-    p_lt = sl / z
-    dth_coeff = (sal / z - p_lt * (sa / z)) / kgap
+    inv_z = 1.0 / z
+    p_lt = sl * inv_z
+    dth_coeff = (sal * inv_z - p_lt * (sa * inv_z)) / kgap
     ds_coeff = p_lt - v * dth_coeff
-    dk_term = p_lt * (sb / z) - sbl / z
+    dk_term = p_lt * (sb * inv_z) - sbl * inv_z
     return dth_coeff, ds_coeff, dk_term
 
 
@@ -233,8 +234,9 @@ def cdl_proxy_coeffs_truncated(
         sb += w * d * d
         sbl += w * d * d * lv
 
-    p_lt = sl / z
-    dth_coeff = (sal / z - p_lt * (sa / z)) / kgap
+    inv_z = 1.0 / z
+    p_lt = sl * inv_z
+    dth_coeff = (sal * inv_z - p_lt * (sa * inv_z)) / kgap
     ds_coeff = p_lt - v * dth_coeff
-    dk_term = p_lt * (sb / z) - sbl / z
+    dk_term = p_lt * (sb * inv_z) - sbl * inv_z
     return dth_coeff, ds_coeff, dk_term

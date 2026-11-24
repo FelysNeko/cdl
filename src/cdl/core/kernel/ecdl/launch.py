@@ -41,10 +41,12 @@ def _launch_ecdl_fwd_2d(
 
     if mode == 0:
         bamax = torch.empty((m, nb_r, nb_c), dtype=torch.float32, device=theta.device)
+        gmax_u32 = torch.full((), 0x00800000, dtype=torch.uint32, device=theta.device)
         if ntiles > 0:
             _ecdl_absmax_2d[(ntiles,)](
                 flat,
                 bamax,
+                gmax_u32,
                 h,
                 k,
                 nb_r,
@@ -52,14 +54,7 @@ def _launch_ecdl_fwd_2d(
                 TPB=tpb,
                 num_warps=ABSMAX_CONFIG.num_warps,
             )
-            global_absmax = bamax.max().clamp_min(torch.finfo(torch.float32).tiny)
-        else:
-            global_absmax = torch.full(
-                (),
-                torch.finfo(torch.float32).tiny,
-                dtype=torch.float32,
-                device=theta.device,
-            )
+        global_absmax = gmax_u32.view(torch.float32)
         qmax = fmt.q_max
         alpha_eff = global_absmax / fmt.f_max
     else:
@@ -128,21 +123,33 @@ def launch_ecdl_fwd(
 
     flat, lead, m, nb, tpb = flatten_theta(theta)
     k = nb * tpb
-    ngb = triton.cdiv(nb, config.block_chunk)
+    if config == DEFAULT_CONFIG:
+        bm = 16 if tpb == 16 else 8
+        bb = 1 if nb <= 1 else (2 if nb == 2 else 4)
+        nw = 4
+    else:
+        bm, bb, nw = 1, config.block_chunk, config.num_warps
+    ngb = triton.cdiv(nb, bb)
+    nm = triton.cdiv(m, bm)
     mode = _scale_mode_id(scale_mode)
 
     if mode == 0:
         bamax = torch.empty((m, nb), dtype=torch.float32, device=theta.device)
-        _ecdl_absmax[(m, triton.cdiv(nb, ABSMAX_CONFIG.block_chunk))](
-            flat,
-            bamax,
-            k,
-            nb,
-            TPB=tpb,
-            BB=ABSMAX_CONFIG.block_chunk,
-            num_warps=ABSMAX_CONFIG.num_warps,
-        )
-        global_absmax = bamax.max().clamp_min(torch.finfo(torch.float32).tiny)
+        gmax_u32 = torch.full((), 0x00800000, dtype=torch.uint32, device=theta.device)
+        if m > 0 and nb > 0:
+            _ecdl_absmax[(nm, ngb)](
+                flat,
+                bamax,
+                gmax_u32,
+                m,
+                k,
+                nb,
+                TPB=tpb,
+                BM=bm,
+                BB=bb,
+                num_warps=nw,
+            )
+        global_absmax = gmax_u32.view(torch.float32)
         qmax = fmt.q_max
         alpha_eff = global_absmax / fmt.f_max
     else:
@@ -158,33 +165,36 @@ def launch_ecdl_fwd(
         (m, nb * packed_cols), dtype=torch.uint8, device=theta.device
     )
     packed_scale = torch.empty((m, nb), dtype=torch.uint8, device=theta.device)
-    _ecdl_fwd[(m, ngb)](
-        flat,
-        bamax,
-        global_absmax,
-        qmax,
-        fmt.theta_level,
-        fmt.theta_gap,
-        fmt.q_level,
-        theta_kappa,
-        alpha_eff,
-        seed,
-        packed_theta,
-        packed_scale,
-        k,
-        nb,
-        fmt.q_ordinal,
-        fmt.theta_ordinal,
-        TOPK=theta_topk,
-        TPB=tpb,
-        TN=fmt.tn,
-        QN=fmt.qn,
-        BB=config.block_chunk,
-        MODE=mode,
-        EMAX=fmt.theta_emax,
-        SCALE_BIAS=fmt.scale_bias,
-        num_warps=config.num_warps,
-    )
+    if m > 0 and nb > 0:
+        _ecdl_fwd[(nm, ngb)](
+            flat,
+            bamax,
+            global_absmax,
+            qmax,
+            fmt.theta_level,
+            fmt.theta_gap,
+            fmt.q_level,
+            theta_kappa,
+            alpha_eff,
+            seed,
+            packed_theta,
+            packed_scale,
+            m,
+            k,
+            nb,
+            fmt.q_ordinal,
+            fmt.theta_ordinal,
+            TOPK=theta_topk,
+            TPB=tpb,
+            TN=fmt.tn,
+            QN=fmt.qn,
+            BM=bm,
+            BB=bb,
+            MODE=mode,
+            EMAX=fmt.theta_emax,
+            SCALE_BIAS=fmt.scale_bias,
+            num_warps=nw,
+        )
 
     packed_theta = packed_theta.reshape(*lead, nb, packed_cols)
     if not is_fp4:
@@ -281,35 +291,45 @@ def launch_ecdl_bwd(
     ps_flat = packed_scale.reshape(m, nb)
 
     dtheta = theta.new_empty((m, k), dtype=theta.dtype)
-    ngb = triton.cdiv(nb, config.block_chunk)
+    if config == DEFAULT_CONFIG:
+        bm = 4
+        bb = 1 if nb <= 1 else (2 if nb == 2 else 4)
+        nw = 2
+    else:
+        bm, bb, nw = 1, config.block_chunk, config.num_warps
+    ngb = triton.cdiv(nb, bb)
+    nm = triton.cdiv(m, bm)
     partials = (
-        torch.empty((m * ngb, 2), dtype=torch.float32, device=theta.device)
+        torch.empty((nm * ngb, 2), dtype=torch.float32, device=theta.device)
         if need_dkappa
         else alpha
     )
-    _ecdl_bwd[(m, ngb)](
-        g,
-        flat,
-        ps_flat,
-        fmt.q_level,
-        fmt.theta_level,
-        fmt.theta_gap,
-        kappa_backward,
-        alpha,
-        dtheta,
-        partials,
-        k,
-        nb,
-        k,
-        fmt.theta_ordinal,
-        TOPK=theta_topk,
-        TPB=tpb,
-        TN=fmt.tn,
-        BB=config.block_chunk,
-        SCALE_BIAS=fmt.scale_bias,
-        COMPUTE_SCALARS=need_dkappa,
-        num_warps=config.num_warps,
-    )
+    if m > 0 and nb > 0:
+        _ecdl_bwd[(nm, ngb)](
+            g,
+            flat,
+            ps_flat,
+            fmt.q_level,
+            fmt.theta_level,
+            fmt.theta_gap,
+            kappa_backward,
+            alpha,
+            dtheta,
+            partials,
+            m,
+            k,
+            nb,
+            k,
+            fmt.theta_ordinal,
+            TOPK=theta_topk,
+            TPB=tpb,
+            TN=fmt.tn,
+            BM=bm,
+            BB=bb,
+            SCALE_BIAS=fmt.scale_bias,
+            COMPUTE_SCALARS=need_dkappa,
+            num_warps=nw,
+        )
     scalars = (
         partials.sum(0)
         if need_dkappa
