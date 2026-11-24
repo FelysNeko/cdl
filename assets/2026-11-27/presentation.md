@@ -10,31 +10,6 @@ paginate: true
 
 ---
 
-## Does LSQ Still Fit LLMs?
-
-_Challenge: Transformers exhibit severe, dynamically shifting outliers._
-
-The industry has introduced the fine-grained format to address this problem. If LSQ is still applied, the number of trainable parameters increases by roughly 5%, potentially moving closer to the global optimum. However, it fails to address activation outliers (see the previous analysis of batch-independent block scales), the major problem in Transformers.
-
----
-
-## Industry Choices
-
-It seems that dynamically computed scales are the trend.
-
-- NVIDIA [Model-Optimizer](https://github.com/NVIDIA/Model-Optimizer) is an application of Dual-LSQ on LLMs, but it is only designed for post-training fine-tuning instead of pre-training. (Cascaded CDL)
-- [BitNet](https://arxiv.org/abs/2402.17764) from Microsoft pre-trained an LLM using 1.5-bit weight quantization, but the per-tensor scale is still derived from statistics. (Extended CDL)
-- The official full-stack NVFP4 pre-training [recipe](https://arxiv.org/abs/2509.25149) from NVIDIA still uses STE as the gradient proxy and computes scales from statistics. (Extended CDL)
-- [DeepSeek-V3](https://arxiv.org/abs/2412.19437) was trained on FP8 with a customized block-scale design that has coarser granularity than MXFP8, with the scales also computed from statistics. (Extended CDL)
-
----
-
-## Decision
-
-It's time to move from Cascaded CDL to Extended CDL. Current QAT and QAD experiments either show that the former does not outperform the latter, or the benchmark results are mostly noise.
-
----
-
 ## KV-Cache Quantization
 
 The same fine-tuning tasks as in the last two weeks, except that
@@ -61,6 +36,48 @@ Test perplexity, evaluated every 500 steps:
 | ---- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
 | STE  | 15.24 | 15.19 | 15.20 | 15.16 | 15.04 | 15.01 | 14.96 | 14.99 |
 | ECDL | 15.24 | 15.01 | 14.98 | 14.95 | 14.93 | 14.88 | 14.91 | 14.90 |
+
+---
+
+## The Four Bits Era: W4-A4-G4-KV4
+
+Following the official NVFP4 [recipe](https://arxiv.org/abs/2509.25149) from NVIDIA, we additionally apply:
+
+- Random Hadamard transforms (RHT) to bound outliers for backward gradients
+- Stochastic rounding for unbiased gradient estimation
+- 2D ($16 \times 16$) block scales for weights instead of 1D ($1 \times 16$)
+
+_Note: it only stabilizes backward propagation, and is orthogonal to Extended CDL._
+
+---
+
+## NVFP4 Backward Ablation
+
+Test perplexity, evaluated every 500 steps:
+
+| Step     |  500  | 1000  | 1500  | 2000  | 2500  | 3000  | 3500  | 4000  |
+| -------- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| STE-G16  | 15.99 | 15.99 | 15.86 | 15.79 | 15.63 | 15.52 | 15.45 | 15.45 |
+| STE-G4   | 16.08 | 15.84 | 15.82 | 15.81 | 15.74 | 15.61 | 15.50 | 15.47 |
+| ECDL-G16 | 15.80 | 15.60 | 15.55 | 15.41 | 15.36 | 15.35 | 15.39 | 15.35 |
+| ECDL-G4  | 15.90 | 15.61 | 15.53 | 15.50 | 15.43 | 15.39 | 15.39 | 15.34 |
+
+NVFP4 backward precision works well for this fine-tuning task. As expected, Extended CDL consistently outperforms STE on test perplexity.
+
+---
+
+## Progressive Quantization
+
+Ordered from easiest to hardest.
+
+| Variants         | $\downarrow$ Wiki-2 | $\downarrow$ C4 | $\uparrow$ HellaSwag | $\uparrow$ ARC-Easy | $\uparrow$ PIQA |
+| ---------------- | :-----------------: | :-------------: | :------------------: | :-----------------: | :-------------: |
+| Base             |        11.47        |      16.98      |        54.47         |        69.49        |      71.82      |
+| W16-A16-G16-KV16 |                     |                 |                      |                     |                 |
+| W4-A16-G16-KV16  |                     |                 |                      |                     |                 |
+| W4-A4-G16-KV16   |                     |                 |                      |                     |                 |
+| W4-A4-G16-KV4    |        13.79        |      19.46      |        51.31         |        65.61        |      71.16      |
+| W4-A4-G4-KV4     |        14.35        |      20.01      |        50.31         |        63.68        |      69.86      |
 
 ---
 
