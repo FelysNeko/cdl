@@ -31,4 +31,4 @@ class Quant(nn.Module, abc.ABC):
     def forward(self, x: torch.Tensor) -> QTensor: ...
 
 
-type MatMul = Callable[[QTensor, QTensor], torch.Tensor]
+type MatMul = Callable[[QTensor, QTensor, bool], torch.Tensor]

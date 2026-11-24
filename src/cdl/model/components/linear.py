@@ -45,6 +45,7 @@ class QLinear(nn.Linear):
         self.activation_quant = SteQuant(None, False)
         self.weight_quant = SteQuant(None, False)
         self.backend = "native"
+        self.low_precision_backward = False
         self.lora = nn.Identity()
 
     def set_activation_quant(self, quant: Quant) -> None:
@@ -53,8 +54,11 @@ class QLinear(nn.Linear):
     def set_weight_quant(self, quant: Quant) -> None:
         self.weight_quant = quant
 
-    def set_backend(self, backend: Backend) -> None:
+    def set_backend(
+        self, backend: Backend, low_precision_backward: bool = False
+    ) -> None:
         self.backend = backend
+        self.low_precision_backward = low_precision_backward
 
     def set_lora(self, r: int, alpha: int) -> None:
         self.lora = MergedLoRALayer(self, r, alpha)
@@ -89,7 +93,9 @@ class QLinear(nn.Linear):
         activation = self.activation_quant(x2d)
         weight = self.weight_quant(self.lora(self.weight))
 
-        out = self.available_backend_fn[self.backend](activation, weight)
+        out = self.available_backend_fn[self.backend](
+            activation, weight, self.low_precision_backward
+        )
         if self.bias is not None:
             out = out + self.bias
 
@@ -97,7 +103,9 @@ class QLinear(nn.Linear):
 
 
 class QLinearMixin(nn.Module):
-    def q_linear_switch_backend(self, backend: Backend) -> None:
+    def q_linear_switch_backend(
+        self, backend: Backend, low_precision_backward: bool = False
+    ) -> None:
         for m in self.modules():
             if isinstance(m, QLinear):
-                m.set_backend(backend)
+                m.set_backend(backend, low_precision_backward)

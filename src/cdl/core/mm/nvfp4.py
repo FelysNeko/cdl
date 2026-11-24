@@ -36,8 +36,8 @@ def mm_nvfp4(
     )[:m, :n]
 
 
-def matmul(x: QTensor, w: QTensor) -> torch.Tensor:
-    return MatMul.apply(x, x.proxy(), w, w.proxy())
+def matmul(x: QTensor, w: QTensor, low_precision_backward: bool) -> torch.Tensor:
+    return MatMul.apply(x, x.proxy(), w, w.proxy(), low_precision_backward)
 
 
 class MatMul(torch.autograd.Function):
@@ -48,9 +48,11 @@ class MatMul(torch.autograd.Function):
         x_proxy: torch.Tensor | None,
         w: QTensor,
         w_proxy: torch.Tensor | None,
+        low_precision_backward: bool,
     ) -> torch.Tensor:
         ctx.x_k = x_proxy.shape[-1] if x_proxy is not None else None
         ctx.w_k = w_proxy.shape[-1] if w_proxy is not None else None
+        ctx.low_precision_backward = low_precision_backward
 
         x_theta, x_q, x_alpha = x.nvfp4()
         w_theta, w_q, w_alpha = w.nvfp4()
@@ -71,13 +73,13 @@ class MatMul(torch.autograd.Function):
     def backward(
         ctx: torch.autograd.function.FunctionCtx,
         grad_output: torch.Tensor,
-    ) -> tuple[None, torch.Tensor | None, None, torch.Tensor | None]:
+    ) -> tuple[None, torch.Tensor | None, None, torch.Tensor | None, None]:
         grad_output = grad_output.contiguous()
         x_theta, x_q, x_alpha, w_theta, w_q, w_alpha = ctx.saved_tensors
         dx = dw = None
 
         if ctx.x_k is not None:
-            if ctx.weight_2d:
+            if ctx.low_precision_backward and ctx.weight_2d:
                 w_rep = fp4_repack_transpose(w_theta)
                 w_q_rep = expand_rows(w_q.T.contiguous(), w_rep.shape[0])
                 w_rep, w_q_rep = pad_k(w_rep, w_q_rep, 2, 16, 32)
@@ -89,35 +91,40 @@ class MatMul(torch.autograd.Function):
                     dy_theta, dy_q, dy_alpha, w_rep, w_q_rep, w_alpha, ctx.m, ctx.x_k
                 )
             else:
-                w = nvfp4_dequant(w_theta, w_q, w_alpha)
+                w = nvfp4_dequant(w_theta, expand_rows(w_q, w_theta.shape[0]), w_alpha)
                 dx = grad_output @ w[: ctx.n, : ctx.x_k]
 
         if ctx.w_k is not None:
             x = nvfp4_dequant(x_theta, expand_rows(x_q, x_theta.shape[0]), x_alpha)[
                 : ctx.m, : ctx.w_k
             ]
-            signs = torch.where(
-                torch.randint(0, 2, (16,), device=grad_output.device, dtype=torch.bool),
-                1.0,
-                -1.0,
-            )
-            dy_t = rht16_transpose(grad_output, signs)
-            x_t = rht16_transpose(x, signs)
-            dy_t_theta, dy_t_q, dy_t_alpha = nvfp4_quant(
-                dy_t, rand_seed(grad_output.device), False
-            )
-            x_t_theta, x_t_q, x_t_alpha = nvfp4_quant(
-                x_t, rand_seed(grad_output.device), False
-            )
-            dw = mm_nvfp4(
-                dy_t_theta,
-                dy_t_q,
-                dy_t_alpha,
-                x_t_theta,
-                x_t_q,
-                x_t_alpha,
-                ctx.n,
-                ctx.w_k,
-            )
+            if ctx.low_precision_backward:
+                signs = torch.where(
+                    torch.randint(
+                        0, 2, (16,), device=grad_output.device, dtype=torch.bool
+                    ),
+                    1.0,
+                    -1.0,
+                )
+                dy_t = rht16_transpose(grad_output, signs)
+                x_t = rht16_transpose(x, signs)
+                dy_t_theta, dy_t_q, dy_t_alpha = nvfp4_quant(
+                    dy_t, rand_seed(grad_output.device), False
+                )
+                x_t_theta, x_t_q, x_t_alpha = nvfp4_quant(
+                    x_t, rand_seed(grad_output.device), False
+                )
+                dw = mm_nvfp4(
+                    dy_t_theta,
+                    dy_t_q,
+                    dy_t_alpha,
+                    x_t_theta,
+                    x_t_q,
+                    x_t_alpha,
+                    ctx.n,
+                    ctx.w_k,
+                )
+            else:
+                dw = grad_output.T @ x
 
-        return None, dx, None, dw
+        return None, dx, None, dw, None

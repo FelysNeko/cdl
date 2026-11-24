@@ -40,6 +40,7 @@ class QConv2d(nn.Conv2d):
         self.activation_quant = SteQuant(None, False)
         self.weight_quant = SteQuant(None, False)
         self.backend = "native"
+        self.low_precision_backward = False
 
     def set_activation_quant(self, quant: Quant) -> None:
         self.activation_quant = quant
@@ -47,8 +48,11 @@ class QConv2d(nn.Conv2d):
     def set_weight_quant(self, quant: Quant) -> None:
         self.weight_quant = quant
 
-    def set_backend(self, backend: Backend) -> None:
+    def set_backend(
+        self, backend: Backend, low_precision_backward: bool = False
+    ) -> None:
         self.backend = backend
+        self.low_precision_backward = low_precision_backward
 
     @property
     def available_backend_fn(self) -> dict[str, MatMul]:
@@ -68,7 +72,9 @@ class QConv2d(nn.Conv2d):
         activation = self.activation_quant(rows)
         weight = self.weight_quant(self.weight.flatten(1))
 
-        out = self.available_backend_fn[self.backend](activation, weight)
+        out = self.available_backend_fn[self.backend](
+            activation, weight, self.low_precision_backward
+        )
         if self.bias is not None:
             out = out + self.bias
 
@@ -89,7 +95,9 @@ class QConv2d(nn.Conv2d):
 
 
 class QConv2dMixin(nn.Module):
-    def q_conv2d_switch_backend(self, backend: Backend) -> None:
+    def q_conv2d_switch_backend(
+        self, backend: Backend, low_precision_backward: bool = False
+    ) -> None:
         for m in self.modules():
             if isinstance(m, QConv2d):
-                m.set_backend(backend)
+                m.set_backend(backend, low_precision_backward)

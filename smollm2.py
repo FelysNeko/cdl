@@ -183,6 +183,7 @@ class ModelConfig:
     q_topk: int = 5
     block_size: int = 16  # 16 for nvfp4, 32 for mxfp4/mxfp8
     weight_block_2d: bool = False
+    low_precision_backward: bool = False
     kernel: str = "triton"
     backend: str = "nvfp4"
     use_lora: bool = True
@@ -247,6 +248,10 @@ class ModelConfig:
         if self.weight_block_2d and self.weight.endswith("_ccdl"):
             raise ValueError(
                 f"weight_block_2d is not supported for *_ccdl weight variants, got {self.weight!r}"
+            )
+        if self.low_precision_backward and self.backend != "nvfp4":
+            raise ValueError(
+                f"low_precision_backward is only supported for backend='nvfp4', got {self.backend!r}"
             )
 
 
@@ -528,7 +533,7 @@ class ModelController(QLinearMixin, CascadedCdlQuantMixin, ExtendedCdlQuantMixin
                 )
             )
             qlinear.set_weight_quant(_build_weight_quant(cfg, qlinear.weight, dtype))
-            qlinear.set_backend("native")
+            qlinear.set_backend("native", False)
             setattr(parent, leaf, qlinear)
 
         if cfg.kv != "none":
@@ -617,12 +622,13 @@ def init_activation_q(
     calib_blocks: torch.Tensor,
     device: torch.device,
     backend: str = "nvfp4",
+    low_precision_backward: bool = False,
 ) -> None:
     """Initialize CCDL activation scales from calibration blocks, then set backend."""
-    controller.q_linear_switch_backend("native")
+    controller.q_linear_switch_backend("native", False)
     samples = [block.unsqueeze(0).to(device) for block in calib_blocks]
     controller.cascaded_cdl_init_act_q_pass(iter(samples))
-    controller.q_linear_switch_backend(backend)
+    controller.q_linear_switch_backend(backend, low_precision_backward)
 
     for key, value in controller.quant_stats().items():
         logger.info(f"{key} = {value}")
@@ -1104,7 +1110,13 @@ def training_pipeline() -> None:
         )
         model.enable_input_require_grads()
 
-    init_activation_q(controller, calib_blocks, device, cfg.model.backend)
+    init_activation_q(
+        controller,
+        calib_blocks,
+        device,
+        cfg.model.backend,
+        cfg.model.low_precision_backward,
+    )
     optimizer, lr_scheduler, master_pairs = build_optimizer(
         controller, model, cfg.train
     )

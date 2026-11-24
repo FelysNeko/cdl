@@ -3,7 +3,8 @@ import torch
 from cdl.api.quant import QTensor
 
 
-def matmul(x: QTensor, w: QTensor) -> torch.Tensor:
+def matmul(x: QTensor, w: QTensor, low_precision_backward: bool) -> torch.Tensor:
+    assert not low_precision_backward
     fp_x = x.dequantize()
     fp_x_proxy = x.proxy()
     if fp_x_proxy is not None:
