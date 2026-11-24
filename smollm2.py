@@ -167,30 +167,30 @@ class ModelConfig:
             "down_proj",
         ]
     )
-    activation: str = "ste"  # "none", "ste", "*_ccdl", or "*_ecdl"
-    weight: str = "nvfp4_ccdl"  # "none", "ste", "*_ccdl", or "*_ecdl"
-    kv: str = "none"  # "none", "ste", "*_ccdl", or "*_ecdl"
-    weight_kappa: float = 2.0
+    activation: str = "nvfp4_ecdl"  # "none", "ste", "*_ccdl", or "*_ecdl"
+    weight: str = "nvfp4_ecdl"  # "none", "ste", "*_ccdl", or "*_ecdl"
+    kv: str = "nvfp4_ecdl"  # "none", "ste", "*_ccdl", or "*_ecdl"
+    weight_kappa: float = 64.0
     weight_kappa_bwd: float | None = None
     weight_q_kappa_bwd: float | None = None
-    activation_kappa: float = 2.0
-    activation_kappa_bwd: float | None = None
+    activation_kappa: float = 16.0
+    activation_kappa_bwd: float | None = 2.0
     activation_q_kappa_bwd: float | None = None
-    kv_kappa: float = 2.0
-    kv_kappa_bwd: float | None = None
+    kv_kappa: float = 16.0
+    kv_kappa_bwd: float | None = 2.0
     kv_q_kappa_bwd: float | None = None
     theta_topk: int = 5
     q_topk: int = 5
     block_size: int = 16  # 16 for nvfp4, 32 for mxfp4/mxfp8
-    weight_block_2d: bool = False
-    low_precision_backward: bool = False
+    weight_block_2d: bool = True
+    low_precision_backward: bool = True
     kernel: str = "triton"
     backend: str = "nvfp4"
     use_lora: bool = True
     freeze_base: bool = False  # with use_lora=false, keep base weights frozen
     train_head: bool = True  # only applies when use_lora=false
-    lora_r: int = 8
-    lora_alpha: int = 16
+    lora_r: int = 16
+    lora_alpha: int = 32
 
     def validate(self, dtype: torch.dtype = MODEL_DTYPE) -> None:
         if self.kernel not in KERNEL_VARIANTS:
@@ -260,7 +260,7 @@ class DataConfig:
     ratios: dict[str, float] = field(
         default_factory=lambda: {"web": 0.58, "math": 0.14, "cosmopedia": 0.04}
     )
-    num_docs: int = 20_000
+    num_docs: int = 100_000
     seed: int = 0
     seq_len: int = 1024
     batch_size: int = 16
@@ -272,19 +272,19 @@ class DataConfig:
 @dataclass
 class TrainingConfig:
     epochs: int = 1
-    max_steps: int = 0  # 0 = full epoch
+    max_steps: int = 4000  # 0 = full epoch
     grad_accum_steps: int = 1
-    learning_rate: float = 1e-4
+    learning_rate: float = 3e-4
     warmup_steps: int = 200
-    weight_decay: float = 0.0
+    weight_decay: float = 0.01
     betas: list[float] = field(default_factory=lambda: [0.9, 0.95])
     grad_clip: float = 1.0
-    train_alpha: bool = True
+    train_alpha: bool = False
     train_kappa: bool = False
     quant_adamw_lr: float = 3e-4
     gradient_checkpointing: bool = False
     fp32_master_weights: bool = False
-    lr_decay: str = "constant"
+    lr_decay: str = "cosine"
     min_lr_ratio: float = 0.1
     save_every_iters: int = 500
 
@@ -329,7 +329,7 @@ def load_config(yaml_path: Path | str) -> Config:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    group = parser.add_mutually_exclusive_group(required=True)
+    group = parser.add_mutually_exclusive_group()
     group.add_argument("--config", type=Path)
     group.add_argument("--resume", type=Path)
     parser.add_argument("--workers", type=int, default=2)
@@ -369,7 +369,12 @@ def resolve_settings(args: argparse.Namespace) -> tuple[Path, Config]:
     )
     output_dir = output_dir / run_name
 
-    cfg = load_config(args.config)
+    if args.config is not None:
+        cfg = load_config(args.config)
+    elif Path("config.yaml").is_file():
+        cfg = load_config("config.yaml")
+    else:
+        cfg = Config()
     if args.cache_dir is not None:
         cfg.data.cache_dir = str(args.cache_dir)
     output_dir.mkdir(parents=True, exist_ok=True)

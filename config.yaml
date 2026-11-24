@@ -1,0 +1,73 @@
+# SmolLM2 NVFP4 ECDL (W+A+KV) + low-precision NVFP4 backward + LoRA recipe.
+# Full hyperparameter dump matching smollm2.py Config defaults.
+model:
+  model_id: HuggingFaceTB/SmolLM2-135M
+  quant_targets:
+    - q_proj
+    - k_proj
+    - v_proj
+    - o_proj
+    - gate_proj
+    - up_proj
+    - down_proj
+  activation: nvfp4_ecdl
+  weight: nvfp4_ecdl
+  kv: nvfp4_ecdl
+  weight_kappa: 64.0
+  weight_kappa_bwd: null
+  weight_q_kappa_bwd: null
+  activation_kappa: 16.0
+  activation_kappa_bwd: 2.0
+  activation_q_kappa_bwd: null
+  kv_kappa: 16.0
+  kv_kappa_bwd: 2.0
+  kv_q_kappa_bwd: null
+  theta_topk: 5
+  q_topk: 5
+  block_size: 16
+  weight_block_2d: true
+  low_precision_backward: true
+  kernel: triton
+  backend: nvfp4
+  use_lora: true
+  freeze_base: false
+  train_head: true
+  lora_r: 16
+  lora_alpha: 32
+
+data:
+  ratios:
+    web: 0.58
+    math: 0.14
+    cosmopedia: 0.04
+  num_docs: 100000
+  seed: 0
+  seq_len: 1024
+  batch_size: 16
+  num_test_blocks: 64
+  num_calib_blocks: 8
+  cache_dir: null
+
+train:
+  epochs: 1
+  max_steps: 4000
+  grad_accum_steps: 1
+  learning_rate: 3.0e-4
+  warmup_steps: 200
+  weight_decay: 0.01
+  betas:
+    - 0.9
+    - 0.95
+  grad_clip: 1.0
+  train_alpha: false
+  train_kappa: false
+  quant_adamw_lr: 3.0e-4
+  gradient_checkpointing: false
+  fp32_master_weights: false
+  lr_decay: cosine
+  min_lr_ratio: 0.1
+  save_every_iters: 500
+
+logging:
+  log_every_steps: 10
+  eval_every_iters: 500
