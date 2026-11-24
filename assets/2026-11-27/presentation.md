@@ -47,13 +47,13 @@ The same fine-tuning tasks as in the last two weeks, except that
 
 ## Metrics
 
-The same common benchmarks as before:
+The same common benchmarks as before (all accuracies length-normalized):
 
 | Variants | $\downarrow$ Wiki-2 | $\downarrow$ C4 | $\uparrow$ HellaSwag | $\uparrow$ ARC-Easy | $\uparrow$ PIQA |
 | -------- | :-----------------: | :-------------: | :------------------: | :-----------------: | :-------------: |
-| Base     |        11.47        |      16.98      |        54.47         |        70.33        |      71.87      |
-| STE      |        13.96        |      19.65      |        51.28         |        67.17        |      70.18      |
-| ECDL     |        13.79        |      19.46      |        51.31         |        68.01        |      70.40      |
+| Base     |        11.47        |      16.98      |        54.47         |        69.49        |      71.82      |
+| STE      |        13.96        |      19.65      |        51.28         |        63.93        |      71.44      |
+| ECDL     |        13.79        |      19.46      |        51.31         |        65.61        |      71.16      |
 
 Test perplexity, evaluated every 500 steps:
 

@@ -26,12 +26,12 @@ Trainable parameters: 4.88M
 
 | Variants              | $\downarrow$ Wiki-2 | $\downarrow$ C4 | $\uparrow$ HellaSwag | $\uparrow$ ARC-Easy | $\uparrow$ PIQA |
 | --------------------- | :-----------------: | :-------------: | :------------------: | :-----------------: | :-------------: |
-| Original Weights      |        15.43        |      21.62      |        42.04         |        64.44        |      68.28      |
-| BF16 w/o Quantization |        15.77        |      21.68      |        41.98         |        63.05        |      68.34      |
-| NVFP4 STE             |        19.82        |      26.02      |        39.77         |        56.99        |      64.91      |
-| NVFP4 Extended CDL    |        19.08        |      25.52      |        39.89         |        59.60        |      64.64      |
-| MXFP4 STE             |        24.37        |      31.12      |        37.48         |        55.72        |      62.89      |
-| MXFP4 Extended CDL    |        23.14        |      30.00      |        37.54         |        56.27        |      62.73      |
+| Original Weights      |        15.43        |      21.62      |        42.04         |        59.30        |      68.88      |
+| BF16 w/o Quantization |        15.77        |      21.68      |        41.98         |        57.49        |      68.06      |
+| NVFP4 STE             |        19.82        |      26.02      |        39.77         |        52.23        |      65.07      |
+| NVFP4 Extended CDL    |        19.08        |      25.52      |        39.89         |        54.50        |      64.58      |
+| MXFP4 STE             |        24.37        |      31.12      |        37.48         |        52.15        |      63.28      |
+| MXFP4 Extended CDL    |        23.14        |      30.00      |        37.54         |        51.68        |      62.40      |
 
 ---
 
@@ -41,12 +41,12 @@ Trainable parameters: 8.68M
 
 | Variants              | $\downarrow$ Wiki-2 | $\downarrow$ C4 | $\uparrow$ HellaSwag | $\uparrow$ ARC-Easy | $\uparrow$ PIQA |
 | --------------------- | :-----------------: | :-------------: | :------------------: | :-----------------: | :-------------: |
-| Original Weights      |        11.47        |      16.98      |        54.47         |        70.33        |      71.87      |
-| BF16 w/o Quantization |        11.61        |      16.85      |        54.76         |        70.66        |      71.65      |
-| NVFP4 STE             |        13.65        |      19.26      |        51.35         |        67.30        |      68.93      |
-| NVFP4 Extended CDL    |        13.29        |      18.87      |        51.99         |        67.55        |      69.31      |
-| MXFP4 STE             |        16.63        |      22.45      |        47.73         |        62.84        |      67.36      |
-| MXFP4 Extended CDL    |        15.61        |      21.42      |        48.28         |        65.66        |      67.95      |
+| Original Weights      |        11.47        |      16.98      |        54.47         |        69.49        |      71.82      |
+| BF16 w/o Quantization |        11.61        |      16.85      |        54.76         |        68.18        |      72.47      |
+| NVFP4 STE             |        13.65        |      19.26      |        51.35         |        64.23        |      70.13      |
+| NVFP4 Extended CDL    |        13.29        |      18.87      |        51.99         |        65.28        |      71.44      |
+| MXFP4 STE             |        16.63        |      22.45      |        47.73         |        60.31        |      67.46      |
+| MXFP4 Extended CDL    |        15.61        |      21.42      |        48.28         |        61.95        |      68.44      |
 
 ---
 
@@ -56,12 +56,12 @@ Trainable parameters: 18.09M
 
 | Variants              | $\downarrow$ Wiki-2 | $\downarrow$ C4 | $\uparrow$ HellaSwag | $\uparrow$ ARC-Easy | $\uparrow$ PIQA |
 | --------------------- | :-----------------: | :-------------: | :------------------: | :-----------------: | :-------------: |
-| Original Weights      |        8.12         |      12.60      |        69.39         |        77.82        |      76.82      |
-| BF16 w/o Quantization |        8.18         |      12.65      |        69.22         |        77.53        |      76.88      |
-| NVFP4 STE             |        9.15         |      13.85      |        66.81         |        75.46        |      76.12      |
-| NVFP4 Extended CDL    |        9.14         |      13.76      |        67.24         |        75.55        |      75.68      |
-| MXFP4 STE             |        10.62        |      15.49      |        63.75         |        73.19        |      73.12      |
-| MXFP4 Extended CDL    |        10.44        |      15.12      |        63.80         |        72.85        |      73.88      |
+| Original Weights      |        8.12         |      12.60      |        69.39         |        74.49        |      77.86      |
+| BF16 w/o Quantization |        8.18         |      12.65      |        69.22         |        73.99        |      77.86      |
+| NVFP4 STE             |        9.15         |      13.85      |        66.81         |        72.22        |      76.33      |
+| NVFP4 Extended CDL    |        9.14         |      13.76      |        67.24         |        72.05        |      76.33      |
+| MXFP4 STE             |        10.62        |      15.49      |        63.75         |        68.86        |      73.99      |
+| MXFP4 Extended CDL    |        10.44        |      15.12      |        63.80         |        68.64        |      74.76      |
 
 ---
 
@@ -71,10 +71,10 @@ State-of-the-art PTQ method: Randomized Hadamard Transform (block size 32) with 
 
 | Variants         | $\downarrow$ Wiki-2 | $\downarrow$ C4 | $\uparrow$ HellaSwag | $\uparrow$ ARC-Easy | $\uparrow$ PIQA |
 | ---------------- | :-----------------: | :-------------: | :------------------: | :-----------------: | :-------------: |
-| Original Weights |        15.43        |      21.62      |        42.04         |        64.44        |      68.28      |
-| MXFP4 ECDL (SFT) |        23.14        |      30.00      |        37.54         |        56.27        |      62.73      |
-| MXFP4 STE (KL)   |        20.77        |      27.70      |        38.74         |        58.38        |      64.53      |
-| MXFP4 ECDL (KL)  |        19.95        |      26.86      |        38.80         |        58.88        |      63.71      |
+| Original Weights |        15.43        |      21.62      |        42.04         |        59.30        |      68.88      |
+| MXFP4 ECDL (SFT) |        23.14        |      30.00      |        37.54         |        51.68        |      62.40      |
+| MXFP4 STE (KL)   |        20.77        |      27.70      |        38.74         |        54.46        |     64.53\*     |
+| MXFP4 ECDL (KL)  |        19.95        |      26.86      |        38.80         |        54.97        |     63.71\*     |
 
 This uses the exact same setup as supervised fine-tuning, except that it adopts cosine learning rate decay ($\eta: 3 \cdot 10^{-4} \to 3 \cdot 10^{-5}$). This experiment was implemented by an LLM. For now, CDL achieves slightly better accuracy and lower perplexity; however, I believe that I have not yet unlocked the full potential of CDL.
 
