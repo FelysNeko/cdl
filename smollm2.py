@@ -12,6 +12,7 @@ import math
 import random
 import time
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from itertools import islice
 from pathlib import Path
@@ -30,7 +31,11 @@ from transformers import (
     LlamaForCausalLM,
     PreTrainedTokenizerBase,
 )
+from transformers.integrations.sdpa_attention import sdpa_attention_forward
+from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
+from transformers.models.llama.modeling_llama import LlamaAttention
 
+from cdl.api.quant import Quant
 from cdl.checkpoint import load_checkpoint, save_checkpoint
 from cdl.core.format.fp4 import E2M1
 from cdl.core.format.fp8 import E4M3, E8M0, UE4M3ExcludeZero
@@ -71,6 +76,7 @@ MODEL_DTYPE = torch.bfloat16
 KERNEL_VARIANTS = ("torch", "triton")
 BACKEND_VARIANTS = ("native", "nvfp4", "mxfp4", "mxfp8")
 LR_DECAY_VARIANTS = ("constant", "cosine")
+KV_QUANT_ATTN_NAME = "cdl_kv_quant_sdpa"
 
 
 @dataclass(frozen=True)
@@ -137,6 +143,7 @@ _QUANT_VARIANTS: dict[str, _QuantVariantSpec] = {
 QUANT_VARIANTS = ("none", "ste", "sr", *_QUANT_VARIANTS)
 ACTIVATION_VARIANTS = QUANT_VARIANTS
 WEIGHT_VARIANTS = QUANT_VARIANTS
+KV_VARIANTS = QUANT_VARIANTS
 
 type MasterPairs = list[tuple[nn.Parameter, nn.Parameter]]
 
@@ -162,12 +169,16 @@ class ModelConfig:
     )
     activation: str = "ste"  # "none", "ste", "sr", "*_ccdl", or "*_ecdl"
     weight: str = "nvfp4_ccdl"  # "none", "ste", "sr", "*_ccdl", or "*_ecdl"
+    kv: str = "none"  # "none", "ste", "sr", "*_ccdl", or "*_ecdl"
     weight_kappa: float = 2.0
     weight_kappa_bwd: float | None = None
     weight_q_kappa_bwd: float | None = None
     activation_kappa: float = 2.0
     activation_kappa_bwd: float | None = None
     activation_q_kappa_bwd: float | None = None
+    kv_kappa: float = 2.0
+    kv_kappa_bwd: float | None = None
+    kv_q_kappa_bwd: float | None = None
     theta_topk: int = 5
     q_topk: int = 5
     block_size: int = 16  # 16 for nvfp4, 32 for mxfp4/mxfp8
@@ -188,10 +199,12 @@ class ModelConfig:
             raise ValueError(f"unknown activation variant {self.activation!r}")
         if self.weight not in WEIGHT_VARIANTS:
             raise ValueError(f"unknown weight variant {self.weight!r}")
+        if self.kv not in KV_VARIANTS:
+            raise ValueError(f"unknown kv variant {self.kv!r}")
 
         uses_mx = self.backend.startswith("mxfp") or any(
             v in _QUANT_VARIANTS and _QUANT_VARIANTS[v].block_size == 32
-            for v in (self.activation, self.weight)
+            for v in (self.activation, self.weight, self.kv)
         )
         required_block = 32 if uses_mx else 16
         if self.block_size != required_block:
@@ -199,8 +212,10 @@ class ModelConfig:
                 f"block_size must be {required_block} for this variant/backend combo"
             )
 
-        spec = _QUANT_VARIANTS.get(self.activation)
-        if spec is not None:
+        for variant in (self.activation, self.kv):
+            spec = _QUANT_VARIANTS.get(variant)
+            if spec is None:
+                continue
             theta_n = spec.theta_format(dtype).n
             if not 1 <= self.theta_topk <= theta_n:
                 raise ValueError(f"theta_topk {self.theta_topk} out of range")
@@ -209,20 +224,27 @@ class ModelConfig:
                 and not 1 <= self.q_topk <= spec.q_format(dtype).n
             ):
                 raise ValueError(f"q_topk {self.q_topk} out of range")
-        if self.weight_kappa_bwd is not None and not (
-            self.weight.endswith("_ccdl") or self.weight.endswith("_ecdl")
+
+        for role, variant, k_bwd, qk_bwd in (
+            ("weight", self.weight, self.weight_kappa_bwd, self.weight_q_kappa_bwd),
+            (
+                "activation",
+                self.activation,
+                None,
+                self.activation_q_kappa_bwd,
+            ),
+            ("kv", self.kv, self.kv_kappa_bwd, self.kv_q_kappa_bwd),
         ):
-            raise ValueError(
-                f"weight_kappa_bwd is only supported for *_ccdl or *_ecdl weight variants, got {self.weight!r}"
-            )
-        if self.weight_q_kappa_bwd is not None and not self.weight.endswith("_ccdl"):
-            raise ValueError(
-                f"weight_q_kappa_bwd is only supported for *_ccdl weight variants, got {self.weight!r}"
-            )
-        if self.activation_q_kappa_bwd is not None and not self.activation.endswith("_ccdl"):
-            raise ValueError(
-                f"activation_q_kappa_bwd is only supported for *_ccdl activation variants, got {self.activation!r}"
-            )
+            if k_bwd is not None and not (
+                variant.endswith("_ccdl") or variant.endswith("_ecdl")
+            ):
+                raise ValueError(
+                    f"{role}_kappa_bwd is only supported for *_ccdl or *_ecdl {role} variants, got {variant!r}"
+                )
+            if qk_bwd is not None and not variant.endswith("_ccdl"):
+                raise ValueError(
+                    f"{role}_q_kappa_bwd is only supported for *_ccdl {role} variants, got {variant!r}"
+                )
 
 
 @dataclass
@@ -366,30 +388,79 @@ def _ste_simulation(cfg: ModelConfig) -> str:
     return cfg.backend if cfg.backend.startswith("mxfp") else "nvfp4"
 
 
-def _build_activation_quant(cfg: ModelConfig, in_features: int, dtype: torch.dtype):
-    if cfg.activation == "none":
+def _build_input_quant(
+    variant: str,
+    input_shape: Sequence[int],
+    kappa_forward: float,
+    kappa_backward: float | None,
+    q_kappa_backward: float | None,
+    cfg: ModelConfig,
+    dtype: torch.dtype,
+) -> Quant:
+    if variant == "none":
         return IdentityQuant()
-    if cfg.activation in ("ste", "sr"):
-        return SteQuant(_ste_simulation(cfg), stochastic=(cfg.activation == "sr"))
-    spec = _QUANT_VARIANTS[cfg.activation]
+    if variant in ("ste", "sr"):
+        return SteQuant(_ste_simulation(cfg), stochastic=(variant == "sr"))
+    spec = _QUANT_VARIANTS[variant]
     if spec.family == "ccdl":
         return spec.act_cls(
-            (1, in_features),
+            tuple(input_shape),
             cfg.theta_topk,
             cfg.q_topk,
             dtype,
-            kappa_forward=cfg.activation_kappa,
-            theta_kappa_backward=cfg.activation_kappa_bwd,
-            q_kappa_backward=cfg.activation_q_kappa_bwd,
+            kappa_forward=kappa_forward,
+            theta_kappa_backward=kappa_backward,
+            q_kappa_backward=q_kappa_backward,
             kernel=cfg.kernel,
         )
+    block_dims = (False,) * (len(input_shape) - 1) + (True,)
     return spec.act_cls(
-        (1, in_features),
+        input_shape,
+        block_dims,
         cfg.theta_topk,
         dtype,
-        kappa_forward=cfg.activation_kappa,
-        kappa_backward=cfg.activation_kappa_bwd,
+        kappa_forward=kappa_forward,
+        kappa_backward=kappa_backward,
         kernel=cfg.kernel,
+    )
+
+
+def _fake_quant(x: torch.Tensor, quant: Quant) -> torch.Tensor:
+    q = quant(x.contiguous())
+    fp_x = q.dequantize()
+    proxy = q.proxy()
+    if proxy is not None:
+        return proxy + (fp_x - proxy).detach()
+    return fp_x
+
+
+def _kv_quant_sdpa_attention_forward(
+    module: nn.Module,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    attention_mask: torch.Tensor | None,
+    dropout: float = 0.0,
+    scaling: float | None = None,
+    is_causal: bool | None = None,
+    **kwargs,
+) -> tuple[torch.Tensor, None]:
+    k_quant = getattr(module, "k_quant", None)
+    if k_quant is not None:
+        key = _fake_quant(key, k_quant)
+    v_quant = getattr(module, "v_quant", None)
+    if v_quant is not None:
+        value = _fake_quant(value, v_quant)
+    return sdpa_attention_forward(
+        module,
+        query,
+        key,
+        value,
+        attention_mask,
+        dropout=dropout,
+        scaling=scaling,
+        is_causal=is_causal,
+        **kwargs,
     )
 
 
@@ -408,8 +479,10 @@ def _build_weight_quant(cfg: ModelConfig, weight: torch.Tensor, dtype: torch.dty
             q_kappa_backward=cfg.weight_q_kappa_bwd,
             kernel=cfg.kernel,
         )
+    block_dims = (False,) * (weight.ndim - 1) + (True,)
     return spec.weight_cls(
         weight,
+        block_dims,
         dtype=dtype,
         kappa_forward=cfg.weight_kappa,
         kappa_backward=cfg.weight_kappa_bwd,
@@ -439,11 +512,48 @@ class ModelController(QLinearMixin, CascadedCdlQuantMixin, ExtendedCdlQuantMixin
             if cfg.use_lora:
                 qlinear.set_lora(cfg.lora_r, cfg.lora_alpha)
             qlinear.set_activation_quant(
-                _build_activation_quant(cfg, qlinear.in_features, dtype)
+                _build_input_quant(
+                    cfg.activation,
+                    (1, qlinear.in_features),
+                    cfg.activation_kappa,
+                    cfg.activation_kappa_bwd,
+                    cfg.activation_q_kappa_bwd,
+                    cfg,
+                    dtype,
+                )
             )
             qlinear.set_weight_quant(_build_weight_quant(cfg, qlinear.weight, dtype))
             qlinear.set_backend("native")
             setattr(parent, leaf, qlinear)
+
+        if cfg.kv != "none":
+            ALL_ATTENTION_FUNCTIONS.register(
+                KV_QUANT_ATTN_NAME, _kv_quant_sdpa_attention_forward
+            )
+            self.model.config._attn_implementation = KV_QUANT_ATTN_NAME
+            for module in self.modules():
+                if not isinstance(module, LlamaAttention):
+                    continue
+                kv_shape = (1, module.config.num_key_value_heads, 1, module.head_dim)
+                module.k_quant = _build_input_quant(
+                    cfg.kv,
+                    kv_shape,
+                    cfg.kv_kappa,
+                    cfg.kv_kappa_bwd,
+                    cfg.kv_q_kappa_bwd,
+                    cfg,
+                    dtype,
+                )
+                module.v_quant = _build_input_quant(
+                    cfg.kv,
+                    kv_shape,
+                    cfg.kv_kappa,
+                    cfg.kv_kappa_bwd,
+                    cfg.kv_q_kappa_bwd,
+                    cfg,
+                    dtype,
+                )
+                module.config._attn_implementation = KV_QUANT_ATTN_NAME
 
     def quant_stats(self) -> dict[str, float]:
         return {

@@ -42,6 +42,31 @@ def group_tensor_into_blocks(
     return theta.reshape(blocked_shape), tuple(block_mask), orig_shape
 
 
+def ungroup_blocks(
+    tensor: torch.Tensor,
+    block_mask: Sequence[bool],
+    orig_shape: Sequence[int] | None = None,
+) -> torch.Tensor:
+    merged_shape: list[int] = []
+    for size, is_block in zip(tensor.shape, block_mask, strict=True):
+        if is_block:
+            merged_shape[-1] *= size
+        else:
+            merged_shape.append(size)
+    out = tensor.reshape(merged_shape)
+    if orig_shape is not None and tuple(out.shape) != tuple(orig_shape):
+        out = out[tuple(slice(None, d) for d in orig_shape)]
+    return out
+
+
+def squeeze_block_scale(
+    scale: torch.Tensor,
+    block_mask: Sequence[bool],
+) -> torch.Tensor:
+    dims = tuple(i for i, is_block in enumerate(block_mask) if is_block)
+    return scale.squeeze(dims) if dims else scale
+
+
 @dataclass
 class ExtendedCdlTensor(QTensor):
     theta_format: Format
@@ -50,19 +75,19 @@ class ExtendedCdlTensor(QTensor):
     q_indices: torch.Tensor
     alpha: torch.Tensor
     grad_proxy: torch.Tensor | None
-    k_dim: int
+    block_mask: Sequence[bool]
+    orig_shape: Sequence[int]
 
     def dequantize(self) -> torch.Tensor:
         theta = self.theta_format.level[self.theta_indices.long()]
         q = self.q_format.level[self.q_indices.long()]
         alpha = self.alpha.to(theta.dtype)
-        x = (theta * q * alpha).flatten(-2)[..., : self.k_dim]
-        return x
+        return ungroup_blocks(theta * q * alpha, self.block_mask, self.orig_shape)
 
     def proxy(self) -> torch.Tensor | None:
         if self.grad_proxy is None:
             return None
-        return self.grad_proxy.flatten(-2)[..., : self.k_dim]
+        return ungroup_blocks(self.grad_proxy, self.block_mask, self.orig_shape)
 
 
 @dataclass
@@ -81,7 +106,8 @@ class ExtendedCdlQuant(Quant):
 
     def __init__(
         self,
-        input_shape: tuple[int, ...],
+        input_shape: Sequence[int],
+        block_dims: Sequence[bool],
         theta_format: Format,
         theta_topk: int,
         q_format: Format,
@@ -91,8 +117,12 @@ class ExtendedCdlQuant(Quant):
         scale_mode: Literal["ocp", "nvidia"],
     ):
         super().__init__()
-        self.input_shape = input_shape
-        self.k_dim = input_shape[-1]
+        self.input_shape = tuple(input_shape)
+        self.block_dims = tuple(block_dims)
+        if len(self.block_dims) != len(input_shape):
+            raise ValueError(
+                f"expected block_dims of length {len(input_shape)}, got {len(self.block_dims)}"
+            )
         self.theta_format = theta_format
         self.theta_topk = theta_topk
         self.q_format = q_format
@@ -116,8 +146,12 @@ class ExtendedCdlQuant(Quant):
     def kappa(self) -> torch.Tensor:
         return self.log_kappa.exp()
 
-    def eval_forward(self, theta: torch.Tensor) -> QTensor:
-        block_mask = (False,) * (theta.ndim - 1) + (True,)
+    def eval_forward(
+        self,
+        theta: torch.Tensor,
+        block_mask: Sequence[bool],
+        orig_shape: Sequence[int],
+    ) -> QTensor:
         theta_indices, q_indices, global_scale = extended_nearest_round(
             theta,
             block_mask,
@@ -132,11 +166,16 @@ class ExtendedCdlQuant(Quant):
             q_indices,
             global_scale.detach(),
             None,
-            self.k_dim,
+            block_mask,
+            orig_shape,
         )
 
-    def training_forward(self, theta: torch.Tensor) -> QTensor:
-        block_mask = (False,) * (theta.ndim - 1) + (True,)
+    def training_forward(
+        self,
+        theta: torch.Tensor,
+        block_mask: Sequence[bool],
+        orig_shape: Sequence[int],
+    ) -> QTensor:
         theta_indices, q_indices, grad_proxy, global_scale, _ = (
             extended_cdl_topk_forward(
                 theta,
@@ -157,7 +196,8 @@ class ExtendedCdlQuant(Quant):
             q_indices,
             global_scale.detach(),
             grad_proxy,
-            self.k_dim,
+            block_mask,
+            orig_shape,
         )
 
     def forward(self, x: torch.Tensor) -> QTensor:
@@ -174,19 +214,21 @@ class ExtendedCdlQuant(Quant):
                     f"expected input shaped like {self.input_shape}, got {tuple(x.shape)}"
                 )
 
-        block_dims = (False,) * (x.ndim - 1) + (True,)
-        theta, _, _ = group_tensor_into_blocks(x, block_dims, self.block_size)
+        theta, block_mask, orig_shape = group_tensor_into_blocks(
+            x, self.block_dims, self.block_size
+        )
 
         if not self.training:
-            return self.eval_forward(theta)
+            return self.eval_forward(theta, block_mask, orig_shape)
 
-        return self.training_forward(theta)
+        return self.training_forward(theta, block_mask, orig_shape)
 
 
 class ExtendedCdlQuantForActivation(ExtendedCdlQuant):
     def __init__(
         self,
-        input_shape: tuple[int, ...],
+        input_shape: Sequence[int],
+        block_dims: Sequence[bool],
         theta_format: Format,
         theta_topk: int,
         q_format: Format,
@@ -197,6 +239,7 @@ class ExtendedCdlQuantForActivation(ExtendedCdlQuant):
     ):
         super().__init__(
             input_shape,
+            block_dims,
             theta_format,
             theta_topk,
             q_format,
@@ -211,6 +254,7 @@ class ExtendedCdlQuantForWeight(ExtendedCdlQuant):
     def __init__(
         self,
         weight: torch.Tensor,
+        block_dims: Sequence[bool],
         theta_format: Format,
         q_format: Format,
         block_size: int,
@@ -220,6 +264,7 @@ class ExtendedCdlQuantForWeight(ExtendedCdlQuant):
     ):
         super().__init__(
             tuple(weight.shape),
+            block_dims,
             theta_format,
             theta_format.n,
             q_format,
