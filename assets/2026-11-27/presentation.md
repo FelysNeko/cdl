@@ -4,7 +4,7 @@ math: mathjax
 paginate: true
 ---
 
-# One Step Back
+# One Step Forward
 
 [Coded Deep Learning: Framework and Algorithm](https://arxiv.org/abs/2501.09849) - C1 & C2
 
@@ -43,11 +43,16 @@ Test perplexity, evaluated every 500 steps:
 
 Following the official NVFP4 [recipe](https://arxiv.org/abs/2509.25149) from NVIDIA, we additionally apply:
 
-- Random Hadamard transforms (RHT) to bound outliers for backward gradients
-- Stochastic rounding for unbiased gradient estimation
-- 2D ($16 \times 16$) block scales for weights instead of 1D ($1 \times 16$)
+- $\uparrow$ Random Hadamard transforms (RHT) to bound outliers for backward gradients
+- $\uparrow$ Stochastic rounding for unbiased gradient estimation
+- $\downarrow$ 2D ($16 \times 16$) block scales for weights instead of 1D ($1 \times 16$), unfortunately
 
 _Note: it only stabilizes backward propagation, and is orthogonal to Extended CDL._
+
+
+---
+
+![](recipe.png)
 
 ---
 
@@ -68,19 +73,34 @@ NVFP4 backward precision works well for this fine-tuning task. As expected, Exte
 
 ## Progressive Quantization
 
-Ordered from easiest to hardest.
+Ordered from easiest to hardest, at the finest possible granularity.
 
-| Variants         | $\downarrow$ Wiki-2 | $\downarrow$ C4 | $\uparrow$ HellaSwag | $\uparrow$ ARC-Easy | $\uparrow$ PIQA |
-| ---------------- | :-----------------: | :-------------: | :------------------: | :-----------------: | :-------------: |
-| Base             |        11.47        |      16.98      |        54.47         |        69.49        |      71.82      |
-| W16-A16-G16-KV16 |                     |                 |                      |                     |                 |
-| W4-A16-G16-KV16  |                     |                 |                      |                     |                 |
-| W4-A4-G16-KV16   |                     |                 |                      |                     |                 |
-| W4-A4-G16-KV4    |        13.79        |      19.46      |        51.31         |        65.61        |      71.16      |
-| W4-A4-G4-KV4     |        14.35        |      20.01      |        50.31         |        63.68        |      69.86      |
+| Variants            | $\downarrow$ Wiki-2 | $\downarrow$ C4 | $\uparrow$ HellaSwag | $\uparrow$ ARC-Easy | $\uparrow$ PIQA |
+| ------------------- | :-----------------: | :-------------: | :------------------: | :-----------------: | :-------------: |
+| Base                |        11.47        |      16.98      |        54.47         |        69.49        |      71.82      |
+| W16-A16-G16-KV16    |        11.56        |      16.82      |        54.76         |        68.43        |      72.52      |
+| W4(1D)-A16-G16-KV16 |                     |                 |                      |                     |                 |
+| W4(1D)-A4-G16-KV16  |                     |                 |                      |                     |                 |
+| W4(1D)-A4-G16-KV4   |        13.79        |      19.46      |        51.31         |        65.61        |      71.16      |
+| W4(2D)-A4-G4-KV4    |        14.35        |      20.01      |        50.31         |        63.68        |      69.86      |
+
+---
+
+## Weight Block Scaling
+
+2D means each $16 \times 16$ block shares one scale, versus $1 \times 16$ for 1D.
+
+| Variants            | $\downarrow$ Wiki-2 | $\downarrow$ C4 | $\uparrow$ HellaSwag | $\uparrow$ ARC-Easy | $\uparrow$ PIQA |
+| ------------------- | :-----------------: | :-------------: | :------------------: | :-----------------: | :-------------: |
+| W4(1D)-A16-G16-KV16 |        12.16        |      17.53      |        53.51         |        67.13        |      71.55      |
+| W4(2D)-A16-G16-KV16 |                     |                 |                      |                     |                 |
+| W4(1D)-A4-G16-KV16  |                     |                 |                      |                     |                 |
+| W4(2D)-A4-G16-KV16  |                     |                 |                      |                     |                 |
+| W4(1D)-A4-G16-KV4   |        13.79        |      19.46      |        51.31         |        65.61        |      71.16      |
+| W4(2D)-A4-G16-KV4   |        14.33        |      20.00      |        50.29         |        63.93        |      69.70      |
 
 ---
 
 ## Caveat
 
-Neither the QAT nor the QAD experiment shows a significant difference. We cannot conclude anything at the moment until we have finished pre-training, which is more sensitive to the accumulated error during training.
+Due to the nature of LoRA and limited training steps, we cannot conclude much things at the moment. Pre-training is more sensitive to the accumulated error during training, but also has more flexibility adjust the weights.
