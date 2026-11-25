@@ -8,8 +8,19 @@ from cdl.core.mm.swizzle import expand_rows, pad_k, pad_n, swizzle_scale_factors
 from cdl.model.wrapper.flashinfer import mm_fp4
 
 
-def rand_seed(device: torch.device) -> torch.Tensor:
-    return torch.randint(0, 2**31, (), dtype=torch.int32, device=device)
+@torch.library.custom_op(
+    "cdl::rand_seed",
+    mutates_args=(),
+    tags=(torch.Tag.nondeterministic_seeded,),
+)
+def rand_seed(ref: torch.Tensor) -> torch.Tensor:
+    """Sample a 0-d int32 seed; prevents AOTAutograd/Inductor from rematerializing different seeds across fwd/bwd."""
+    return torch.randint(0, 2**31, (), dtype=torch.int32, device=ref.device)
+
+
+@rand_seed.register_fake
+def _(ref: torch.Tensor) -> torch.Tensor:
+    return torch.empty((), dtype=torch.int32, device=ref.device)
 
 
 def mm_nvfp4(
@@ -73,7 +84,7 @@ class MatMul(torch.autograd.Function):
         if need_wgrad:
             if low_precision_backward:
                 x_raw = x.source()
-                seed = rand_seed(x_raw.device)
+                seed = rand_seed(x_raw)
                 x_t = rht16_transpose(x_raw, seed)
                 x_t_theta, x_t_q, x_t_alpha = nvfp4_quant(x_t, None, False)
                 save_xt = (x_t_theta, x_t_q, x_t_alpha, seed)
@@ -114,7 +125,7 @@ class MatMul(torch.autograd.Function):
                 w_q_rep = expand_rows(w_q.T.contiguous(), w_rep.shape[0])
                 w_rep, w_q_rep = pad_k(w_rep, w_q_rep, 2, 16, 32)
                 dy_theta, dy_q, dy_alpha = nvfp4_quant(
-                    grad_output, rand_seed(grad_output.device), False
+                    grad_output, rand_seed(grad_output), False
                 )
                 dy_theta, dy_q = pad_k(dy_theta, dy_q, 2, 16, 32)
                 dx = mm_nvfp4(
@@ -128,7 +139,7 @@ class MatMul(torch.autograd.Function):
             if ctx.low_precision_backward:
                 dy_t = rht16_transpose(grad_output, rht_seed)
                 dy_t_theta, dy_t_q, dy_t_alpha = nvfp4_quant(
-                    dy_t, rand_seed(grad_output.device), False
+                    dy_t, rand_seed(grad_output), False
                 )
                 dw = mm_nvfp4(
                     dy_t_theta,
