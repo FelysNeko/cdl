@@ -53,6 +53,8 @@ _Note: it only stabilizes backward propagation, and is orthogonal to Extended CD
 
 ![](recipe.png)
 
+_Figure 5 from [Pretraining Large Language Models with NVFP4](https://arxiv.org/abs/2509.25149) (NVIDIA et al., 2025)._
+
 ---
 
 ## NVFP4 Backward Ablation
