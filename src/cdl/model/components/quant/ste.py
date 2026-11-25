@@ -81,6 +81,9 @@ class SteTensor(QTensor):
     def proxy(self) -> torch.Tensor | None:
         return self.theta
 
+    def source(self) -> torch.Tensor:
+        return self.theta
+
 
 class SteQuant(Quant):
     def __init__(self, simulation: Simulation | None, block_2d: bool):

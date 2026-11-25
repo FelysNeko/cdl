@@ -13,35 +13,6 @@ from cdl.core.ecdl import extended_cdl_topk_forward, extended_nearest_round
 from cdl.model.mixin.batchnorm_batch_stats import BatchNormBatchStatsMixin
 
 
-def group_tensor_into_blocks(
-    theta: torch.Tensor,
-    block_dims: Sequence[bool],
-    block_size: int,
-) -> tuple[torch.Tensor, tuple[bool, ...], tuple[int, ...]]:
-    orig_shape = tuple(theta.shape)
-    pads = tuple(
-        (-s % block_size) if is_block else 0
-        for s, is_block in zip(orig_shape, block_dims, strict=True)
-    )
-    if any(pads):
-        pad_args: list[int] = []
-        for p in reversed(pads):
-            pad_args.extend((0, p))
-        theta = F.pad(theta, pad_args)
-
-    blocked_shape: list[int] = []
-    block_mask: list[bool] = []
-    for s, is_block in zip(theta.shape, block_dims):
-        if is_block:
-            blocked_shape.extend((s // block_size, block_size))
-            block_mask.extend((False, True))
-        else:
-            blocked_shape.append(s)
-            block_mask.append(False)
-
-    return theta.reshape(blocked_shape), tuple(block_mask), orig_shape
-
-
 def ungroup_blocks(
     tensor: torch.Tensor,
     block_mask: Sequence[bool],
@@ -92,6 +63,7 @@ class ExtendedCdlTensor(QTensor):
     grad_proxy: torch.Tensor | None
     block_mask: Sequence[bool]
     orig_shape: Sequence[int]
+    x: torch.Tensor
 
     @property
     def shape(self) -> Sequence[int]:
@@ -108,6 +80,9 @@ class ExtendedCdlTensor(QTensor):
             return None
         return ungroup_blocks(self.grad_proxy, self.block_mask, self.orig_shape)
 
+    def source(self) -> torch.Tensor:
+        return self.x
+
 
 @dataclass
 class ExtendedCdlBypassTensor(QTensor):
@@ -122,6 +97,9 @@ class ExtendedCdlBypassTensor(QTensor):
 
     def proxy(self) -> torch.Tensor | None:
         return None
+
+    def source(self) -> torch.Tensor:
+        return self.theta
 
 
 class ExtendedCdlQuant(Quant):
@@ -169,12 +147,34 @@ class ExtendedCdlQuant(Quant):
     def kappa(self) -> torch.Tensor:
         return self.log_kappa.exp()
 
-    def eval_forward(
-        self,
-        theta: torch.Tensor,
-        block_mask: Sequence[bool],
-        orig_shape: Sequence[int],
-    ) -> QTensor:
+    def group_tensor_into_blocks(
+        self, x: torch.Tensor
+    ) -> tuple[torch.Tensor, tuple[bool, ...], tuple[int, ...]]:
+        orig_shape = tuple(x.shape)
+        pads = tuple(
+            (-s % self.block_size) if is_block else 0
+            for s, is_block in zip(orig_shape, self.block_dims, strict=True)
+        )
+        if any(pads):
+            pad_args: list[int] = []
+            for p in reversed(pads):
+                pad_args.extend((0, p))
+            x = F.pad(x, pad_args)
+
+        blocked_shape: list[int] = []
+        block_mask: list[bool] = []
+        for s, is_block in zip(x.shape, self.block_dims):
+            if is_block:
+                blocked_shape.extend((s // self.block_size, self.block_size))
+                block_mask.extend((False, True))
+            else:
+                blocked_shape.append(s)
+                block_mask.append(False)
+
+        return x.reshape(blocked_shape), tuple(block_mask), orig_shape
+
+    def eval_forward(self, x: torch.Tensor) -> QTensor:
+        theta, block_mask, orig_shape = self.group_tensor_into_blocks(x)
         theta_indices, q_indices, global_scale = extended_nearest_round(
             theta,
             block_mask,
@@ -191,14 +191,11 @@ class ExtendedCdlQuant(Quant):
             None,
             block_mask,
             orig_shape,
+            x,
         )
 
-    def training_forward(
-        self,
-        theta: torch.Tensor,
-        block_mask: Sequence[bool],
-        orig_shape: Sequence[int],
-    ) -> QTensor:
+    def training_forward(self, x: torch.Tensor) -> QTensor:
+        theta, block_mask, orig_shape = self.group_tensor_into_blocks(x)
         theta_indices, q_indices, grad_proxy, global_scale, _ = (
             extended_cdl_topk_forward(
                 theta,
@@ -221,6 +218,7 @@ class ExtendedCdlQuant(Quant):
             grad_proxy,
             block_mask,
             orig_shape,
+            x,
         )
 
     def forward(self, x: torch.Tensor) -> QTensor:
@@ -237,14 +235,10 @@ class ExtendedCdlQuant(Quant):
                     f"expected input shaped like {self.input_shape}, got {tuple(x.shape)}"
                 )
 
-        theta, block_mask, orig_shape = group_tensor_into_blocks(
-            x, self.block_dims, self.block_size
-        )
-
         if not self.training:
-            return self.eval_forward(theta, block_mask, orig_shape)
+            return self.eval_forward(x)
 
-        return self.training_forward(theta, block_mask, orig_shape)
+        return self.training_forward(x)
 
 
 class ExtendedCdlQuantForActivation(ExtendedCdlQuant):

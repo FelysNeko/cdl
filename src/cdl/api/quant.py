@@ -25,6 +25,9 @@ class QTensor(abc.ABC):
     def proxy(self) -> torch.Tensor | None:
         raise NotImplementedError()
 
+    def source(self) -> torch.Tensor:
+        raise NotImplementedError()
+
 
 class Quant(nn.Module, abc.ABC):
     @abc.abstractmethod

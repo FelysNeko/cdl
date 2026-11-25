@@ -39,6 +39,7 @@ class CascadedCdlTensor(QTensor):
     alpha: torch.Tensor
     grad_proxy: torch.Tensor | None
     k_dim: int
+    raw: torch.Tensor
 
     @property
     def shape(self) -> Sequence[int]:
@@ -56,6 +57,9 @@ class CascadedCdlTensor(QTensor):
             return None
         return self.grad_proxy.flatten(-2)[..., : self.k_dim]
 
+    def source(self) -> torch.Tensor:
+        return self.raw
+
 
 @dataclass
 class CascadedCdlBypassTensor(QTensor):
@@ -70,6 +74,9 @@ class CascadedCdlBypassTensor(QTensor):
 
     def proxy(self) -> torch.Tensor | None:
         return None
+
+    def source(self) -> torch.Tensor:
+        return self.theta
 
 
 class CascadedCdlQuant(Quant):
@@ -167,7 +174,8 @@ class CascadedCdlQuant(Quant):
         log_q_tensor = q_tensor.clamp_min(torch.finfo(torch.float32).tiny).log()
         self.copy_log_q(log_q_tensor)
 
-    def eval_forward(self, theta: torch.Tensor) -> QTensor:
+    def eval_forward(self, x: torch.Tensor) -> QTensor:
+        theta, _ = group_tensor_into_blocks(x, self.block_size)
         theta_indices, q_indices = cascaded_nearest_round(
             theta,
             self.theta_format,
@@ -183,9 +191,11 @@ class CascadedCdlQuant(Quant):
             self.alpha.detach(),
             None,
             self.k_dim,
+            x,
         )
 
-    def training_forward(self, theta: torch.Tensor) -> QTensor:
+    def training_forward(self, x: torch.Tensor) -> QTensor:
+        theta, _ = group_tensor_into_blocks(x, self.block_size)
         theta_indices, q_indices, grad_proxy, _, _ = cascaded_cdl_topk_forward(
             theta,
             self.theta_format,
@@ -210,6 +220,7 @@ class CascadedCdlQuant(Quant):
             self.alpha.detach(),
             grad_proxy,
             self.k_dim,
+            x,
         )
 
     def forward(self, x: torch.Tensor) -> QTensor:
@@ -227,12 +238,10 @@ class CascadedCdlQuant(Quant):
                     f"expected input shaped like {self.input_shape}, got {tuple(x.shape)}"
                 )
 
-        theta, _ = group_tensor_into_blocks(x, self.block_size)
-
         if not self.training:
-            return self.eval_forward(theta)
+            return self.eval_forward(x)
 
-        return self.training_forward(theta)
+        return self.training_forward(x)
 
 
 class CascadedCdlQuantForActivation(CascadedCdlQuant):

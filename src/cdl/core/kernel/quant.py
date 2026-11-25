@@ -517,7 +517,9 @@ def _quant(
     if block_2d:
         nb_r = triton.cdiv(rows, group_size)
         out_rows = nb_r * group_size
-        packed = torch.empty((out_rows, pack_stride), dtype=packed_dtype, device=x.device)
+        packed = torch.empty(
+            (out_rows, pack_stride), dtype=packed_dtype, device=x.device
+        )
         scale = torch.empty((nb_r, nb), dtype=torch.uint8, device=x.device)
     else:
         nb_r = 0

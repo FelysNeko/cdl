@@ -2,19 +2,6 @@ import torch
 import triton
 import triton.language as tl
 
-_HADAMARD16_CACHE: dict[torch.device, torch.Tensor] = {}
-
-
-def _hadamard16(device: torch.device) -> torch.Tensor:
-    h = _HADAMARD16_CACHE.get(device)
-    if h is None:
-        idx = torch.arange(16, device=device, dtype=torch.int32)
-        bits = idx[:, None] & idx[None, :]
-        pop = (bits & 1) + ((bits >> 1) & 1) + ((bits >> 2) & 1) + ((bits >> 3) & 1)
-        h = torch.where(pop % 2 == 0, 0.25, -0.25).to(torch.float32)
-        _HADAMARD16_CACHE[device] = h
-    return h
-
 
 @triton.jit
 def _fp4_repack_transpose_kernel(
@@ -77,7 +64,7 @@ def _rht16_configs() -> list[triton.Config]:
 @triton.jit
 def _rht16_transpose_kernel_impl(
     x_ptr,
-    q_ptr,
+    seed_ptr,
     out_ptr,
     M,
     C,
@@ -91,8 +78,14 @@ def _rht16_transpose_kernel_impl(
     pid_m = tl.program_id(0)
     pid_c = tl.program_id(1)
 
+    seed = tl.load(seed_ptr)
     ar16 = tl.arange(0, 16)
-    q = tl.load(q_ptr + ar16[:, None] * 16 + ar16[None, :])
+    bits = ar16[:, None] & ar16[None, :]
+    pop = (bits & 1) + ((bits >> 1) & 1) + ((bits >> 2) & 1) + ((bits >> 3) & 1)
+    h16 = tl.where((pop & 1) == 0, 0.25, -0.25)
+    s16 = tl.where(((seed >> ar16) & 1) == 1, 1.0, -1.0)
+    q = (h16 * s16[None, :]).to(x_ptr.dtype.element_ty)
+
     rc = pid_c * BC + tl.arange(0, BC)
     cmask = rc < C
 
@@ -154,12 +147,13 @@ def fp4_repack_transpose(
 
 def rht16_transpose(
     x: torch.Tensor,
-    signs: torch.Tensor,
+    seed: torch.Tensor,
     m_multiple: int = 32,
     block_c: int | None = None,
 ) -> torch.Tensor:
-    """Apply 16x16 Random Hadamard Transform along M and transpose ``(M, C) -> (C, M_pad)``."""
-    assert x.ndim == 2 and signs.shape == (16,)
+    """Apply 16x16 Random Hadamard Transform along M using the low 16 bits of ``seed`` and transpose ``(M, C) -> (C, M_pad)``."""
+    assert x.ndim == 2 and seed.shape == () and seed.dtype == torch.int32
+    assert seed.device == x.device
     assert m_multiple % 16 == 0
     x = x.contiguous()
     m, c = x.shape
@@ -167,22 +161,16 @@ def rht16_transpose(
     out = x.new_empty((c, m_pad))
     if m == 0 or c == 0:
         return out.zero_()
-    q = (
-        (
-            _hadamard16(x.device)
-            * signs.to(device=x.device, dtype=torch.float32)[None, :]
-        )
-        .to(x.dtype)
-        .contiguous()
+    m_bucket = (
+        0 if m_pad <= 32 else (1 if m_pad <= 512 else (2 if m_pad <= 2048 else 3))
     )
-    m_bucket = 0 if m_pad <= 32 else (1 if m_pad <= 512 else (2 if m_pad <= 2048 else 3))
     c_bucket = 0 if c <= 256 else (1 if c <= 1024 else 2)
     if block_c is not None:
         k_tiles = 2 if m_pad <= 32 else 4
         grid = (triton.cdiv(m_pad, k_tiles * 16), triton.cdiv(c, block_c))
         _rht16_transpose_kernel_impl[grid](
             x,
-            q,
+            seed,
             out,
             m,
             c,
@@ -202,7 +190,7 @@ def rht16_transpose(
             )
         ](
             x,
-            q,
+            seed,
             out,
             m,
             c,

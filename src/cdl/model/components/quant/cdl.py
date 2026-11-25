@@ -16,6 +16,7 @@ from cdl.model.mixin.batchnorm_batch_stats import BatchNormBatchStatsMixin
 class CdlTensor(QTensor):
     theta: torch.Tensor
     grad_proxy: torch.Tensor | None
+    raw: torch.Tensor
 
     @property
     def shape(self) -> Sequence[int]:
@@ -26,6 +27,9 @@ class CdlTensor(QTensor):
 
     def proxy(self) -> torch.Tensor | None:
         return self.grad_proxy
+
+    def source(self) -> torch.Tensor:
+        return self.raw
 
 
 class CdlQuant(Quant):
@@ -73,13 +77,13 @@ class CdlQuant(Quant):
 
     def forward(self, x: torch.Tensor) -> QTensor:
         if self.bypassing:
-            return CdlTensor(x, None)
+            return CdlTensor(x, None, x)
 
         assert self.initialized
 
         if not self.training:
             theta = nearest_round(x, self.f, self.q)
-            return CdlTensor(theta, None)
+            return CdlTensor(theta, None, x)
 
         quantized, _ = cdl_topk_forward(
             x,
@@ -90,7 +94,7 @@ class CdlQuant(Quant):
             self.companded,
             self.relaxed,
         )
-        return CdlTensor(quantized.detach(), quantized)
+        return CdlTensor(quantized.detach(), quantized, x)
 
 
 class CdlQuantForWeight(CdlQuant):

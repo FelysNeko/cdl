@@ -13,6 +13,7 @@ from cdl.model.components.quant.ccdl.ccdl import (
     CascadedCdlQuantForActivation,
     CascadedCdlQuantForWeight,
     CascadedCdlTensor,
+    group_tensor_into_blocks,
 )
 
 
@@ -33,6 +34,7 @@ class PackedNvfp4CascadedCdlTensor(QTensor):
     grad_proxy: torch.Tensor | None
     k_dim: int
     dtype: torch.dtype
+    x: torch.Tensor
 
     @property
     def shape(self) -> Sequence[int]:
@@ -60,6 +62,9 @@ class PackedNvfp4CascadedCdlTensor(QTensor):
         if self.grad_proxy is None:
             return None
         return self.grad_proxy.flatten(-2)[..., : self.k_dim]
+
+    def source(self) -> torch.Tensor:
+        return self.x
 
 
 class Nvfp4CascadedCdlQuantForActivation(CascadedCdlQuantForActivation):
@@ -93,10 +98,11 @@ class Nvfp4CascadedCdlQuantForActivation(CascadedCdlQuantForActivation):
                 "kernel_seed", torch.zeros((), dtype=torch.int64), persistent=False
             )
 
-    def training_forward(self, theta: torch.Tensor) -> QTensor:
+    def training_forward(self, x: torch.Tensor) -> QTensor:
         if self.kernel == "torch":
-            return super().training_forward(theta)
+            return super().training_forward(x)
 
+        theta, _ = group_tensor_into_blocks(x, self.block_size)
         self.kernel_seed.add_(1)
         packed_theta, packed_scale, grad_proxy = nvfp4_ccdl_quant(
             theta,
@@ -117,6 +123,7 @@ class Nvfp4CascadedCdlQuantForActivation(CascadedCdlQuantForActivation):
             grad_proxy=grad_proxy,
             k_dim=self.k_dim,
             dtype=self.theta_format.level.dtype,
+            x=x,
         )
 
 
@@ -147,10 +154,11 @@ class Nvfp4CascadedCdlQuantForWeight(CascadedCdlQuantForWeight):
                 "kernel_seed", torch.zeros((), dtype=torch.int64), persistent=False
             )
 
-    def training_forward(self, theta: torch.Tensor) -> QTensor:
+    def training_forward(self, x: torch.Tensor) -> QTensor:
         if self.kernel == "torch":
-            return super().training_forward(theta)
+            return super().training_forward(x)
 
+        theta, _ = group_tensor_into_blocks(x, self.block_size)
         self.kernel_seed.add_(1)
         packed_theta, packed_scale, grad_proxy = nvfp4_ccdl_quant(
             theta,
@@ -171,4 +179,5 @@ class Nvfp4CascadedCdlQuantForWeight(CascadedCdlQuantForWeight):
             grad_proxy=grad_proxy,
             k_dim=self.k_dim,
             dtype=self.theta_format.level.dtype,
+            x=x,
         )

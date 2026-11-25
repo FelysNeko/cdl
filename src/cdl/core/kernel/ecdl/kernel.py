@@ -37,9 +37,7 @@ def _ecdl_absmax(
         block_absmax,
         mask=rbmask,
     )
-    tl.atomic_max(
-        gmax_u32_ptr, tl.cast(tl.max(block_absmax), tl.uint32, bitcast=True)
-    )
+    tl.atomic_max(gmax_u32_ptr, tl.cast(tl.max(block_absmax), tl.uint32, bitcast=True))
 
 
 @triton.jit

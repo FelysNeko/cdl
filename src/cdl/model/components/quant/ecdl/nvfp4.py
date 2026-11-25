@@ -40,6 +40,7 @@ class PackedNvfp4ExtendedCdlTensor(QTensor):
     block_mask: Sequence[bool]
     orig_shape: Sequence[int]
     dtype: torch.dtype
+    x: torch.Tensor
 
     @property
     def shape(self) -> Sequence[int]:
@@ -69,6 +70,9 @@ class PackedNvfp4ExtendedCdlTensor(QTensor):
         if self.grad_proxy is None:
             return None
         return ungroup_blocks(self.grad_proxy, self.block_mask, self.orig_shape)
+
+    def source(self) -> torch.Tensor:
+        return self.x
 
 
 class Nvfp4ExtendedCdlQuantForActivation(ExtendedCdlQuantForActivation):
@@ -102,15 +106,11 @@ class Nvfp4ExtendedCdlQuantForActivation(ExtendedCdlQuantForActivation):
                 "kernel_seed", torch.zeros((), dtype=torch.int64), persistent=False
             )
 
-    def eval_forward(
-        self,
-        theta: torch.Tensor,
-        block_mask: Sequence[bool],
-        orig_shape: Sequence[int],
-    ) -> QTensor:
+    def eval_forward(self, x: torch.Tensor) -> QTensor:
         if self.kernel == "torch":
-            return super().eval_forward(theta, block_mask, orig_shape)
+            return super().eval_forward(x)
 
+        theta, block_mask, orig_shape = self.group_tensor_into_blocks(x)
         if self.triton_block_2d:
             lead = theta.shape[:-4]
             nb_r, tpb, nb_c, _ = theta.shape[-4:]
@@ -133,17 +133,14 @@ class Nvfp4ExtendedCdlQuantForActivation(ExtendedCdlQuantForActivation):
             block_mask=block_mask,
             orig_shape=orig_shape,
             dtype=self.theta_format.level.dtype,
+            x=x,
         )
 
-    def training_forward(
-        self,
-        theta: torch.Tensor,
-        block_mask: Sequence[bool],
-        orig_shape: Sequence[int],
-    ) -> QTensor:
+    def training_forward(self, x: torch.Tensor) -> QTensor:
         if self.kernel == "torch":
-            return super().training_forward(theta, block_mask, orig_shape)
+            return super().training_forward(x)
 
+        theta, block_mask, orig_shape = self.group_tensor_into_blocks(x)
         self.kernel_seed.add_(1)
         packed_theta, packed_scale, grad_proxy, global_scale = nvfp4_ecdl_quant(
             theta,
@@ -162,6 +159,7 @@ class Nvfp4ExtendedCdlQuantForActivation(ExtendedCdlQuantForActivation):
             block_mask=block_mask,
             orig_shape=orig_shape,
             dtype=self.theta_format.level.dtype,
+            x=x,
         )
 
 
@@ -194,15 +192,11 @@ class Nvfp4ExtendedCdlQuantForWeight(ExtendedCdlQuantForWeight):
                 "kernel_seed", torch.zeros((), dtype=torch.int64), persistent=False
             )
 
-    def eval_forward(
-        self,
-        theta: torch.Tensor,
-        block_mask: Sequence[bool],
-        orig_shape: Sequence[int],
-    ) -> QTensor:
+    def eval_forward(self, x: torch.Tensor) -> QTensor:
         if self.kernel == "torch":
-            return super().eval_forward(theta, block_mask, orig_shape)
+            return super().eval_forward(x)
 
+        theta, block_mask, orig_shape = self.group_tensor_into_blocks(x)
         if self.triton_block_2d:
             lead = theta.shape[:-4]
             nb_r, tpb, nb_c, _ = theta.shape[-4:]
@@ -226,17 +220,14 @@ class Nvfp4ExtendedCdlQuantForWeight(ExtendedCdlQuantForWeight):
             block_mask=block_mask,
             orig_shape=orig_shape,
             dtype=self.theta_format.level.dtype,
+            x=x,
         )
 
-    def training_forward(
-        self,
-        theta: torch.Tensor,
-        block_mask: Sequence[bool],
-        orig_shape: Sequence[int],
-    ) -> QTensor:
+    def training_forward(self, x: torch.Tensor) -> QTensor:
         if self.kernel == "torch":
-            return super().training_forward(theta, block_mask, orig_shape)
+            return super().training_forward(x)
 
+        theta, block_mask, orig_shape = self.group_tensor_into_blocks(x)
         self.kernel_seed.add_(1)
         packed_theta, packed_scale, grad_proxy, global_scale = nvfp4_ecdl_quant(
             theta,
@@ -255,4 +246,5 @@ class Nvfp4ExtendedCdlQuantForWeight(ExtendedCdlQuantForWeight):
             block_mask=block_mask,
             orig_shape=orig_shape,
             dtype=self.theta_format.level.dtype,
+            x=x,
         )

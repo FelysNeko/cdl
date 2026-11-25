@@ -9,27 +9,7 @@ from cdl.model.wrapper.flashinfer import mm_fp4
 
 
 def rand_seed(device: torch.device) -> torch.Tensor:
-    return torch.randint(0, 2**31 - 1, (), dtype=torch.int32, device=device)
-
-
-@torch.library.custom_op(
-    "cdl::rht16_signs",
-    mutates_args=(),
-    tags=(torch.Tag.nondeterministic_seeded,),
-)
-def _rht16_signs(ref: torch.Tensor) -> torch.Tensor:
-    """Sample one shared 16-sign vector; prevents Inductor from rematerializing
-    different random signs into paired dy_t / x_t RHT kernels."""
-    return torch.where(
-        torch.randint(0, 2, (16,), device=ref.device, dtype=torch.bool),
-        1.0,
-        -1.0,
-    )
-
-
-@_rht16_signs.register_fake
-def _(ref: torch.Tensor) -> torch.Tensor:
-    return torch.empty((16,), device=ref.device, dtype=torch.float32)
+    return torch.randint(0, 2**31, (), dtype=torch.int32, device=device)
 
 
 def mm_nvfp4(
@@ -70,8 +50,10 @@ class MatMul(torch.autograd.Function):
         w_proxy: torch.Tensor | None,
         low_precision_backward: bool,
     ) -> torch.Tensor:
-        ctx.x_k = x_proxy.shape[-1] if x_proxy is not None else None
-        ctx.w_k = w_proxy.shape[-1] if w_proxy is not None else None
+        need_dgrad = x_proxy is not None and ctx.needs_input_grad[1]
+        need_wgrad = w_proxy is not None and ctx.needs_input_grad[3]
+        ctx.x_k = x_proxy.shape[-1] if need_dgrad else None
+        ctx.w_k = w_proxy.shape[-1] if need_wgrad else None
         ctx.low_precision_backward = low_precision_backward
 
         x_theta, x_q, x_alpha = x.nvfp4()
@@ -85,7 +67,24 @@ class MatMul(torch.autograd.Function):
         x_theta, x_q = pad_k(x_theta, x_q, 2, 16, 32)
         w_theta, w_q = pad_k(w_theta, w_q, 2, 16, 32)
         ctx.weight_2d = w_q.shape[0] != w_theta.shape[0]
-        ctx.save_for_backward(x_theta, x_q, x_alpha, w_theta, w_q, w_alpha)
+
+        save_x: tuple[torch.Tensor | None, ...] = (None, None, None)
+        save_xt: tuple[torch.Tensor | None, ...] = (None, None, None, None)
+        if need_wgrad:
+            if low_precision_backward:
+                x_raw = x.source()
+                seed = rand_seed(x_raw.device)
+                x_t = rht16_transpose(x_raw, seed)
+                x_t_theta, x_t_q, x_t_alpha = nvfp4_quant(x_t, None, False)
+                save_xt = (x_t_theta, x_t_q, x_t_alpha, seed)
+            else:
+                save_x = (x_theta, x_q, x_alpha)
+
+        save_w: tuple[torch.Tensor | None, ...] = (
+            (w_theta, w_q, w_alpha) if need_dgrad else (None, None, None)
+        )
+
+        ctx.save_for_backward(*save_x, *save_w, *save_xt)
 
         return mm_nvfp4(x_theta, x_q, x_alpha, w_theta, w_q, w_alpha, m, n)
 
@@ -95,7 +94,18 @@ class MatMul(torch.autograd.Function):
         grad_output: torch.Tensor,
     ) -> tuple[None, torch.Tensor | None, None, torch.Tensor | None, None]:
         grad_output = grad_output.contiguous()
-        x_theta, x_q, x_alpha, w_theta, w_q, w_alpha = ctx.saved_tensors
+        (
+            x_theta,
+            x_q,
+            x_alpha,
+            w_theta,
+            w_q,
+            w_alpha,
+            x_t_theta,
+            x_t_q,
+            x_t_alpha,
+            rht_seed,
+        ) = ctx.saved_tensors
         dx = dw = None
 
         if ctx.x_k is not None:
@@ -115,18 +125,10 @@ class MatMul(torch.autograd.Function):
                 dx = grad_output @ w[: ctx.n, : ctx.x_k]
 
         if ctx.w_k is not None:
-            x = nvfp4_dequant(x_theta, expand_rows(x_q, x_theta.shape[0]), x_alpha)[
-                : ctx.m, : ctx.w_k
-            ]
             if ctx.low_precision_backward:
-                signs = _rht16_signs(grad_output)
-                dy_t = rht16_transpose(grad_output, signs)
-                x_t = rht16_transpose(x, signs)
+                dy_t = rht16_transpose(grad_output, rht_seed)
                 dy_t_theta, dy_t_q, dy_t_alpha = nvfp4_quant(
                     dy_t, rand_seed(grad_output.device), False
-                )
-                x_t_theta, x_t_q, x_t_alpha = nvfp4_quant(
-                    x_t, rand_seed(grad_output.device), False
                 )
                 dw = mm_nvfp4(
                     dy_t_theta,
@@ -139,6 +141,9 @@ class MatMul(torch.autograd.Function):
                     ctx.w_k,
                 )
             else:
+                x = nvfp4_dequant(x_theta, expand_rows(x_q, x_theta.shape[0]), x_alpha)[
+                    : ctx.m, : ctx.w_k
+                ]
                 dw = grad_output.T @ x
 
         return None, dx, None, dw, None

@@ -20,6 +20,9 @@ class IdentityTensor(QTensor):
     def proxy(self) -> torch.Tensor | None:
         return None
 
+    def source(self) -> torch.Tensor:
+        return self.theta
+
 
 class IdentityQuant(Quant):
     def forward(self, x: torch.Tensor) -> IdentityTensor:
