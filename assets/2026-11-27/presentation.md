@@ -27,15 +27,15 @@ The same common benchmarks as before (all accuracies length-normalized):
 | Variants | $\downarrow$ Wiki-2 | $\downarrow$ C4 | $\uparrow$ HellaSwag | $\uparrow$ ARC-Easy | $\uparrow$ PIQA |
 | -------- | :-----------------: | :-------------: | :------------------: | :-----------------: | :-------------: |
 | Base     |        11.47        |      16.98      |        54.47         |        69.49        |      71.82      |
-| STE      |        13.96        |      19.65      |        51.28         |        63.93        |      71.44      |
-| ECDL     |        13.79        |      19.46      |        51.31         |        65.61        |      71.16      |
+| STE      |                     |                 |                      |                     |                 |
+| ECDL     |                     |                 |                      |                     |                 |
 
 Test perplexity, evaluated every 500 steps:
 
-| Step |  500  | 1000  | 1500  | 2000  | 2500  | 3000  | 3500  | 4000  |
-| ---- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| STE  | 15.24 | 15.19 | 15.20 | 15.16 | 15.04 | 15.01 | 14.96 | 14.99 |
-| ECDL | 15.24 | 15.01 | 14.98 | 14.95 | 14.93 | 14.88 | 14.91 | 14.90 |
+| Step | 500 | 1000 | 1500 | 2000 | 2500 | 3000 | 3500 | 4000 |
+| ---- | :-: | :--: | :--: | :--: | :--: | :--: | :--: | :--: |
+| STE  |     |      |      |      |      |      |      |      |
+| ECDL |     |      |      |      |      |      |      |      |
 
 ---
 
@@ -48,7 +48,6 @@ Following the official NVFP4 [recipe](https://arxiv.org/abs/2509.25149) from NVI
 - $\downarrow$ 2D ($16 \times 16$) block scales for weights instead of 1D ($1 \times 16$), unfortunately
 
 _Note: it only stabilizes backward propagation, and is orthogonal to Extended CDL._
-
 
 ---
 
@@ -63,9 +62,9 @@ Test perplexity, evaluated every 500 steps:
 | Step     |  500  | 1000  | 1500  | 2000  | 2500  | 3000  | 3500  | 4000  |
 | -------- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
 | STE-G16  | 15.99 | 15.99 | 15.86 | 15.79 | 15.63 | 15.52 | 15.45 | 15.45 |
-| STE-G4   | 16.08 | 15.84 | 15.82 | 15.81 | 15.74 | 15.61 | 15.50 | 15.47 |
+| STE-G4   |       |       |       |       |       |       |       |       |
 | ECDL-G16 | 15.80 | 15.60 | 15.55 | 15.41 | 15.36 | 15.35 | 15.39 | 15.35 |
-| ECDL-G4  | 15.90 | 15.61 | 15.53 | 15.50 | 15.43 | 15.39 | 15.39 | 15.34 |
+| ECDL-G4  |       |       |       |       |       |       |       |       |
 
 NVFP4 backward precision works well for this fine-tuning task. As expected, Extended CDL consistently outperforms STE on test perplexity.
 
@@ -79,10 +78,10 @@ Ordered from easiest to hardest, at the finest possible granularity.
 | ------------------- | :-----------------: | :-------------: | :------------------: | :-----------------: | :-------------: |
 | Base                |        11.47        |      16.98      |        54.47         |        69.49        |      71.82      |
 | W16-A16-G16-KV16    |        11.56        |      16.82      |        54.76         |        68.43        |      72.52      |
-| W4(1D)-A16-G16-KV16 |                     |                 |                      |                     |                 |
+| W4(1D)-A16-G16-KV16 |        12.16        |      17.53      |        53.51         |        67.13        |      71.55      |
 | W4(1D)-A4-G16-KV16  |                     |                 |                      |                     |                 |
-| W4(1D)-A4-G16-KV4   |        13.79        |      19.46      |        51.31         |        65.61        |      71.16      |
-| W4(2D)-A4-G4-KV4    |        14.35        |      20.01      |        50.31         |        63.68        |      69.86      |
+| W4(1D)-A4-G16-KV4   |                     |                 |                      |                     |                 |
+| W4(2D)-A4-G4-KV4    |                     |                 |                      |                     |                 |
 
 ---
 
@@ -93,10 +92,10 @@ Ordered from easiest to hardest, at the finest possible granularity.
 | Variants            | $\downarrow$ Wiki-2 | $\downarrow$ C4 | $\uparrow$ HellaSwag | $\uparrow$ ARC-Easy | $\uparrow$ PIQA |
 | ------------------- | :-----------------: | :-------------: | :------------------: | :-----------------: | :-------------: |
 | W4(1D)-A16-G16-KV16 |        12.16        |      17.53      |        53.51         |        67.13        |      71.55      |
-| W4(2D)-A16-G16-KV16 |                     |                 |                      |                     |                 |
+| W4(2D)-A16-G16-KV16 |        12.62        |      18.04      |        52.82         |        67.00        |      71.06      |
 | W4(1D)-A4-G16-KV16  |                     |                 |                      |                     |                 |
 | W4(2D)-A4-G16-KV16  |                     |                 |                      |                     |                 |
-| W4(1D)-A4-G16-KV4   |        13.79        |      19.46      |        51.31         |        65.61        |      71.16      |
+| W4(1D)-A4-G16-KV4   |                     |                 |                      |                     |                 |
 | W4(2D)-A4-G16-KV4   |        14.33        |      20.00      |        50.29         |        63.93        |      69.70      |
 
 ---
