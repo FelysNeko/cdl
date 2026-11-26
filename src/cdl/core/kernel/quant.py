@@ -3,7 +3,7 @@ import triton
 import triton.language as tl
 
 from cdl.core.kernel.formats.ordinals import (
-    e2m1_triton_ordinal,
+    e2m1_single_zero_triton_ordinal,
     ue4m3_triton_ordinal,
 )
 
@@ -57,8 +57,8 @@ def _fp4_scale(block_absmax, gmax_ptr, alpha_ptr, SCALE_IS_E8M0: tl.constexpr):
 def _fp4_quant_code(v, seed_ptr, offset, STOCHASTIC: tl.constexpr):
     if STOCHASTIC:
         return _fp4_stochastic_round(v, tl.load(seed_ptr).to(tl.int32), offset)
-    ti = e2m1_triton_ordinal(v, 16)
-    return tl.where(ti < 8, 15 - ti, ti - 8)
+    ti = e2m1_single_zero_triton_ordinal(v, 15)
+    return tl.where(ti < 7, 15 - ti, ti - 7)
 
 
 @triton.jit

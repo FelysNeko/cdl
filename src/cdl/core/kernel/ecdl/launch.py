@@ -65,7 +65,7 @@ def _launch_ecdl_fwd_2d(
         qmax = 0.0
         alpha_eff = theta.new_ones((), dtype=torch.float32)
 
-    is_fp4 = fmt.tn == 16
+    is_fp4 = fmt.tn <= 16
     packed_cols = tpb // 2 if is_fp4 else tpb
     packed_theta = torch.empty(
         (m, h, nb_c * packed_cols), dtype=torch.uint8, device=theta.device
@@ -154,7 +154,7 @@ def launch_ecdl_fwd(
         qmax = 0.0
         alpha_eff = theta.new_ones((), dtype=torch.float32)
 
-    is_fp4 = fmt.tn == 16
+    is_fp4 = fmt.tn <= 16
     packed_cols = tpb // 2 if is_fp4 else tpb
     packed_theta = torch.empty(
         (m, nb * packed_cols), dtype=torch.uint8, device=theta.device

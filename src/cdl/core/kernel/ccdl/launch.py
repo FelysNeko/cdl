@@ -27,7 +27,7 @@ def launch_ccdl_fwd(
     k = nb * tpb
     lq, qs = flatten_q(lead, nb, q)
 
-    is_fp4 = fmt.tn == 16
+    is_fp4 = fmt.tn <= 16
     packed_cols = tpb // 2 if is_fp4 else tpb
     packed_theta = torch.empty(
         (m, nb * packed_cols), dtype=torch.uint8, device=theta.device

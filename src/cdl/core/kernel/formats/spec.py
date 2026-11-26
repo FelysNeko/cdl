@@ -13,13 +13,13 @@ from enum import IntEnum
 import torch
 
 from cdl.core.kernel.formats.ordinals import (
-    e2m1_triton_ordinal,
+    e2m1_single_zero_triton_ordinal,
     e4m3_triton_ordinal,
     e8m0_triton_ordinal,
     ue4m3_triton_ordinal,
 )
 from cdl.core.tables import (
-    e2m1_tables,
+    e2m1_single_zero_tables,
     e4m3_tables,
     e8m0_tables,
     ue4m3_exclude_zero_tables,
@@ -57,7 +57,7 @@ def _theta_emax(theta_level: torch.Tensor) -> int:
 
 def _build(fmt_id: FormatId, device: torch.device) -> FormatSpec:
     if fmt_id is FormatId.NVFP4:
-        theta_level, theta_gap = e2m1_tables(torch.float32, device)
+        theta_level, theta_gap = e2m1_single_zero_tables(torch.float32, device)
         q_level, q_gap = ue4m3_exclude_zero_tables(torch.float32, device)
         return FormatSpec(
             "nvfp4",
@@ -69,13 +69,13 @@ def _build(fmt_id: FormatId, device: torch.device) -> FormatSpec:
             theta_gap,
             q_level,
             q_gap,
-            e2m1_triton_ordinal,
+            e2m1_single_zero_triton_ordinal,
             ue4m3_triton_ordinal,
             _theta_emax(theta_level),
             1,
         )
     if fmt_id is FormatId.MXFP4:
-        theta_level, theta_gap = e2m1_tables(torch.float32, device)
+        theta_level, theta_gap = e2m1_single_zero_tables(torch.float32, device)
         q_level, q_gap = e8m0_tables(torch.float32, device)
         return FormatSpec(
             "mxfp4",
@@ -87,7 +87,7 @@ def _build(fmt_id: FormatId, device: torch.device) -> FormatSpec:
             theta_gap,
             q_level,
             q_gap,
-            e2m1_triton_ordinal,
+            e2m1_single_zero_triton_ordinal,
             e8m0_triton_ordinal,
             _theta_emax(theta_level),
             0,

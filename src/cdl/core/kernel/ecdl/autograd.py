@@ -30,7 +30,13 @@ def ecdl_quant_fwd(
 
 @ecdl_quant_fwd.register_fake
 def _ecdl_quant_fwd_fake(
-    theta, theta_kappa, seed, format_id, theta_topk, scale_mode, block_2d
+    theta,
+    theta_kappa,
+    seed,
+    format_id,
+    theta_topk,
+    scale_mode,
+    block_2d,
 ):
     is_fp4 = format_id in (FormatId.NVFP4, FormatId.MXFP4)
     packed_dtype = torch.uint8 if is_fp4 else torch.float8_e4m3fn
@@ -146,12 +152,10 @@ class EcdlQuantFn(torch.autograd.Function):
         theta, packed_scale, kappa_forward, kappa_backward, alpha_eff = (
             ctx.saved_tensors
         )
-        # None means coupled mode: reuse kappa_forward and route d(kappa) back to it.
         coupled = kappa_backward is None
         kappa_bwd = kappa_forward if coupled else kappa_backward
         need_dkappa = ctx.needs_input_grad[1] if coupled else ctx.needs_input_grad[2]
-        # scalars[1] is d(alpha_eff); alpha_eff carries no learnable parameter
-        # in either scale mode, so it is dropped.
+
         dtheta, scalars = ecdl_quant_bwd(
             g_proxy.contiguous(),
             theta,

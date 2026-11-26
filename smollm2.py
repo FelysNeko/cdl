@@ -37,7 +37,7 @@ from transformers.models.llama.modeling_llama import LlamaAttention
 
 from cdl.api.quant import Quant
 from cdl.checkpoint import load_checkpoint, save_checkpoint
-from cdl.core.format.fp4 import E2M1
+from cdl.core.format.fp4 import E2M1SingleZero
 from cdl.core.format.fp8 import E4M3, E8M0, UE4M3ExcludeZero
 from cdl.dataset.token_cache import CacheSpec, TokenCache
 from cdl.model.components.linear import QLinear, QLinearMixin
@@ -93,7 +93,7 @@ _QUANT_VARIANTS: dict[str, _QuantVariantSpec] = {
     "nvfp4_ccdl": _QuantVariantSpec(
         "ccdl",
         16,
-        E2M1,
+        E2M1SingleZero,
         UE4M3ExcludeZero,
         Nvfp4CascadedCdlQuantForActivation,
         Nvfp4CascadedCdlQuantForWeight,
@@ -101,7 +101,7 @@ _QUANT_VARIANTS: dict[str, _QuantVariantSpec] = {
     "mxfp4_ccdl": _QuantVariantSpec(
         "ccdl",
         32,
-        E2M1,
+        E2M1SingleZero,
         E8M0,
         Mxfp4CascadedCdlQuantForActivation,
         Mxfp4CascadedCdlQuantForWeight,
@@ -117,7 +117,7 @@ _QUANT_VARIANTS: dict[str, _QuantVariantSpec] = {
     "nvfp4_ecdl": _QuantVariantSpec(
         "ecdl",
         16,
-        E2M1,
+        E2M1SingleZero,
         None,
         Nvfp4ExtendedCdlQuantForActivation,
         Nvfp4ExtendedCdlQuantForWeight,
@@ -125,7 +125,7 @@ _QUANT_VARIANTS: dict[str, _QuantVariantSpec] = {
     "mxfp4_ecdl": _QuantVariantSpec(
         "ecdl",
         32,
-        E2M1,
+        E2M1SingleZero,
         None,
         Mxfp4ExtendedCdlQuantForActivation,
         Mxfp4ExtendedCdlQuantForWeight,

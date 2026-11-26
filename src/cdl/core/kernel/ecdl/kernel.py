@@ -198,8 +198,8 @@ def _ecdl_fwd(
     seed = tl.load(seed_ptr).to(tl.int32)
     u_t = tl.rand(seed, offs)
     theta_indices = cdl_sample(v, thl_ptr, thg_ptr, kt, u_t, TN, TOPK, t_ordinal)
-    if TN == 16:
-        code = tl.where(theta_indices < 8, 15 - theta_indices, theta_indices - 8)
+    if TN == 15:
+        code = tl.where(theta_indices < 7, 15 - theta_indices, theta_indices - 7)
         lo, hi = tl.split(tl.reshape(code, (BM, BB, TPB // 2, 2)))
         packed = (lo | (hi << 4)).to(tl.uint8)
         pcols = bs[:, None] * (TPB // 2) + tl.arange(0, TPB // 2)[None, :]
@@ -288,6 +288,7 @@ def _ecdl_bwd(
     dth_coeff, ds_coeff, dk_term = cdl_proxy_coeffs(
         v, thl_ptr, thg_ptr, kt, TN, TOPK, t_ordinal
     )
+
     dth = g * dth_coeff
     tl.store(dth_ptr + offs, dth.to(dth_ptr.dtype.element_ty), mask=lmask)
 
@@ -396,8 +397,8 @@ def _ecdl_fwd_2d(
     seed = tl.load(seed_ptr).to(tl.int32)
     u_t = tl.rand(seed, offs.to(tl.int32))
     theta_indices = cdl_sample(v, thl_ptr, thg_ptr, kt, u_t, TN, TOPK, t_ordinal)
-    if TN == 16:
-        code = tl.where(theta_indices < 8, 15 - theta_indices, theta_indices - 8)
+    if TN == 15:
+        code = tl.where(theta_indices < 7, 15 - theta_indices, theta_indices - 7)
         lo, hi = tl.split(tl.reshape(code, (TPB, TPB // 2, 2)))
         packed = (lo | (hi << 4)).to(tl.uint8)
         pcol_offs = bc * (TPB // 2) + tl.arange(0, TPB // 2)
@@ -458,6 +459,7 @@ def _ecdl_bwd_2d(
     dth_coeff, ds_coeff, dk_term = cdl_proxy_coeffs(
         v, thl_ptr, thg_ptr, kt, TN, TOPK, t_ordinal
     )
+
     dth = g * dth_coeff
     tl.store(dth_ptr + offs, dth.to(dth_ptr.dtype.element_ty))
 

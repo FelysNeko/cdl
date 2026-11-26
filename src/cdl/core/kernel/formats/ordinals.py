@@ -5,7 +5,7 @@ import triton.language as tl
 
 
 @triton.jit
-def e2m1_triton_ordinal(v, n):
+def e2m1_single_zero_triton_ordinal(v, n):
     sgn = (tl.cast(v, tl.uint32, bitcast=True) >> 31) != 0
     av = tl.minimum(tl.abs(v), 6.0)
     mag = (
@@ -17,7 +17,7 @@ def e2m1_triton_ordinal(v, n):
         + (av > 3.5).to(tl.int32)
         + (av > 5.0).to(tl.int32)
     )
-    return tl.where(sgn, 7 - mag, 8 + mag)
+    return tl.where(sgn & (mag > 0), 7 - mag, 7 + mag)
 
 
 @triton.jit

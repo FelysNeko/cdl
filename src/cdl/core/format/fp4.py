@@ -1,12 +1,12 @@
 import torch
 
 from cdl.api.format import Format
-from cdl.core.tables import e2m1_tables
+from cdl.core.tables import e2m1_single_zero_tables
 
 
-class E2M1(Format):
+class E2M1SingleZero(Format):
     def __init__(self, dtype: torch.dtype) -> None:
-        level, _ = e2m1_tables(dtype)
+        level, _ = e2m1_single_zero_tables(dtype)
         super().__init__(level)
         h = level.numel() // 2
         mid = (level[h:-1] + level[h + 1 :]) / 2
@@ -14,10 +14,10 @@ class E2M1(Format):
 
     def ordinal(self, v: torch.Tensor) -> torch.Tensor:
         m = (v.abs().clamp(max=6.0).unsqueeze(-1) > self.mid).sum(-1, dtype=torch.uint8)
-        return torch.where(torch.signbit(v), 7 - m, m + 8)
+        return torch.where(torch.signbit(v) & (m > 0), 7 - m, 7 + m)
 
     def pack(self, i: torch.Tensor) -> torch.Tensor:
-        code = torch.where(i < 8, 15 - i, i - 8).to(torch.uint8)
+        code = torch.where(i < 7, 15 - i, i - 7).to(torch.uint8)
         return code[..., 0::2] | (code[..., 1::2] << 4)
 
 

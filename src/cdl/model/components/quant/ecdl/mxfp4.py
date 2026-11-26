@@ -5,7 +5,7 @@ from typing import Literal
 import torch
 
 from cdl.api.quant import QTensor
-from cdl.core.format.fp4 import E2M1
+from cdl.core.format.fp4 import E2M1SingleZero
 from cdl.core.format.fp8 import E8M0
 from cdl.core.kernel import mxfp4_ecdl_quant
 from cdl.core.kernel.dequant import mxfp4_dequant
@@ -91,7 +91,7 @@ class Mxfp4ExtendedCdlQuantForActivation(ExtendedCdlQuantForActivation):
         super().__init__(
             input_shape,
             block_dims,
-            E2M1(dtype),
+            E2M1SingleZero(dtype),
             theta_topk,
             E8M0(dtype),
             32,
@@ -178,7 +178,7 @@ class Mxfp4ExtendedCdlQuantForWeight(ExtendedCdlQuantForWeight):
         super().__init__(
             weight,
             block_dims,
-            E2M1(dtype),
+            E2M1SingleZero(dtype),
             E8M0(dtype),
             32,
             kappa_forward,

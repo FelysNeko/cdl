@@ -99,8 +99,8 @@ def _ccdl_fwd(
     v = raw.to(tl.float32) / s[:, None]
     u_t = tl.rand(seed, r * K + idx)
     theta_indices = cdl_sample(v, thl_ptr, thg_ptr, kt, u_t, TN, TOPK, t_ordinal)
-    if TN == 16:
-        code = tl.where(theta_indices < 8, 15 - theta_indices, theta_indices - 8)
+    if TN == 15:
+        code = tl.where(theta_indices < 7, 15 - theta_indices, theta_indices - 7)
         lo, hi = tl.split(tl.reshape(code, (BB, TPB // 2, 2)))
         packed = (lo | (hi << 4)).to(tl.uint8)
         pidx = (offs_b[:, None] * (TPB // 2) + tl.arange(0, TPB // 2)[None, :]).to(

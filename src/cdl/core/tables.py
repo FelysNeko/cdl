@@ -6,16 +6,31 @@ from cdl.api.format import gaps
 
 
 @functools.cache
-def e2m1_tables(
+def e2m1_single_zero_tables(
     dtype: torch.dtype, device: torch.device | None = None
 ) -> tuple[torch.Tensor, torch.Tensor]:
     device = torch.device("cpu") if device is None else device
-    key = torch.arange(16, device=device)
-    m = torch.where(key >= 8, key - 8, 7 - key)
-    magnitude = torch.tensor(
-        [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0], dtype=dtype, device=device
+    level = torch.tensor(
+        [
+            -6.0,
+            -4.0,
+            -3.0,
+            -2.0,
+            -1.5,
+            -1.0,
+            -0.5,
+            0.0,
+            0.5,
+            1.0,
+            1.5,
+            2.0,
+            3.0,
+            4.0,
+            6.0,
+        ],
+        dtype=dtype,
+        device=device,
     )
-    level = torch.where(key >= 8, magnitude[m], -magnitude[m])
     return level, gaps(level)
 
 
