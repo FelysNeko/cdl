@@ -10,35 +10,6 @@ paginate: true
 
 ---
 
-## KV-Cache Quantization
-
-The same fine-tuning tasks as in the last two weeks, except that
-
-- All the KV-caches are quantized, similar to the activations
-- The learning rate scheduler is changed to cosine
-- Only NVFP4 on SmolLM2-360M is reported
-
----
-
-## Metrics
-
-The same common benchmarks as before (all accuracies length-normalized):
-
-| Variants | $\downarrow$ Wiki-2 | $\downarrow$ C4 | $\uparrow$ HellaSwag | $\uparrow$ ARC-Easy | $\uparrow$ PIQA |
-| -------- | :-----------------: | :-------------: | :------------------: | :-----------------: | :-------------: |
-| Base     |        11.47        |      16.98      |        54.47         |        69.49        |      71.82      |
-| STE      |        13.95        |      19.57      |        50.99         |        63.97        |      70.08      |
-| ECDL     |        13.76        |      19.45      |        51.71         |        63.89        |      70.46      |
-
-Test perplexity, evaluated every 500 steps:
-
-| Step |  500  | 1000  | 1500  | 2000  | 2500  | 3000  | 3500  | 4000  |
-| ---- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| STE  | 15.29 | 15.19 | 15.18 | 15.09 | 15.05 | 15.00 | 14.94 | 14.93 |
-| ECDL | 15.18 | 15.05 | 15.03 | 14.96 | 14.93 | 14.89 | 14.92 | 14.91 |
-
----
-
 ## The Four Bits Era: W4-A4-G4-KV4
 
 Following the official NVFP4 [recipe](https://arxiv.org/abs/2509.25149) from NVIDIA, we additionally apply:
@@ -47,7 +18,7 @@ Following the official NVFP4 [recipe](https://arxiv.org/abs/2509.25149) from NVI
 - $\uparrow$ Stochastic rounding for unbiased gradient estimation
 - $\downarrow$ 2D ($16 \times 16$) block scales for weights instead of 1D ($1 \times 16$), unfortunately
 
-_Note: it only stabilizes backward propagation, and is orthogonal to Extended CDL._
+_Note: it only stabilizes backward propagation, and is orthogonal to CDL variants._
 
 ---
 
@@ -57,18 +28,66 @@ _Figure 5 from [Pretraining Large Language Models with NVFP4](https://arxiv.org/
 
 ---
 
+## Experiments
+
+The same fine-tuning tasks as in the last two weeks, except that
+
+- All the KV-caches are quantized, similar to the activations
+- The learning rate scheduler is changed from constant to cosine decay
+- Full fine-tuning instead LoRA which is more similar to pre-training
+
+Only NVFP4 on SmolLM2-360M is reported for this week unless specified.
+
+---
+
+## Weight Block Scaling
+
+2D means each $16 \times 16$ block shares one scale, versus $1 \times 16$ for 1D. Acitvation and KV caches are proxied by STE for simplicity. We focus on the weights only.
+
+| Variants | $\downarrow$ Wiki-2 | $\downarrow$ C4 | $\uparrow$ HellaSwag | $\uparrow$ ARC-Easy | $\uparrow$ PIQA |
+| -------- | :-----------------: | :-------------: | :------------------: | :-----------------: | :-------------: |
+| STE-1D   |
+| STE-2D   |
+| ECDL-1D  |
+| ECDL-2D  |
+| CCDL-1D  |
+| CCDL-2D  |
+
+---
+
 ## NVFP4 Backward Ablation
 
-Test perplexity, evaluated every 500 steps:
+Same, acitvation and KV caches are proxied by STE for simplicity.
 
-| Step     |  500  | 1000  | 1500  | 2000  | 2500  | 3000  | 3500  | 4000  |
-| -------- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| STE-G16  | 15.99 | 15.99 | 15.86 | 15.79 | 15.63 | 15.52 | 15.45 | 15.45 |
-| STE-G4   | 16.03 | 15.90 | 15.88 | 15.78 | 15.72 | 15.57 | 15.50 | 15.43 |
-| ECDL-G16 | 15.80 | 15.60 | 15.55 | 15.41 | 15.36 | 15.35 | 15.39 | 15.35 |
-| ECDL-G4  | 15.83 | 15.57 | 15.47 | 15.28 | 15.36 | 15.30 | 15.29 | 15.29 |
+| Step     | 500 | 1000 | 1500 | 2000 | 2500 | 3000 | 3500 | 4000 |
+| -------- | :-: | :--: | :--: | :--: | :--: | :--: | :--: | :--: |
+| STE-G16  |
+| STE-G4   |
+| ECDL-G16 |
+| ECDL-G4  |
+| CCDL-G16 |
+| CCDL-G4  |
 
-NVFP4 backward precision works well for this fine-tuning task. As expected, Extended CDL consistently outperforms STE on test perplexity.
+---
+
+## Short Conlusion
+
+The full-stack NVFP4 recipe seems to work fine for all. Then we shall make decisions.
+
+---
+
+## Deisgn Choices
+
+Weights, activations, KV caches, and gradients are all in NVFP4.
+
+| Variants (W-A) | $\downarrow$ Wiki-2 | $\downarrow$ C4 | $\uparrow$ HellaSwag | $\uparrow$ ARC-Easy | $\uparrow$ PIQA |
+| -------------- | :-----------------: | :-------------: | :------------------: | :-----------------: | :-------------: |
+| STE-STE        |
+| STE-ECDL       |
+| ECDL-STE       |
+| ECDL-ECDL      |
+| CCDL-STE       |
+| CCDL-ECDL      |
 
 ---
 
@@ -78,30 +97,30 @@ Ordered from easiest to hardest, at the finest possible granularity.
 
 | Variants            | $\downarrow$ Wiki-2 | $\downarrow$ C4 | $\uparrow$ HellaSwag | $\uparrow$ ARC-Easy | $\uparrow$ PIQA |
 | ------------------- | :-----------------: | :-------------: | :------------------: | :-----------------: | :-------------: |
-| Base                |        11.47        |      16.98      |        54.47         |        69.49        |      71.82      |
-| W16-A16-G16-KV16    |        11.56        |      16.82      |        54.76         |        68.43        |      72.52      |
-| W4(1D)-A16-G16-KV16 |        12.16        |      17.53      |        53.51         |        67.13        |      71.55      |
-| W4(1D)-A4-G16-KV16  |        13.23        |      18.82      |        52.25         |        64.73        |      70.95      |
-| W4(1D)-A4-G16-KV4   |        13.76        |      19.45      |        51.71         |        63.89        |      70.46      |
-| W4(2D)-A4-G4-KV4    |        14.35        |      20.01      |        49.82         |        63.59        |      69.70      |
+| Base                |
+| W16-A16-G16-KV16    |
+| W4(1D)-A16-G16-KV16 |
+| W4(1D)-A4-G16-KV16  |
+| W4(1D)-A4-G16-KV4   |
+| W4(2D)-A4-G4-KV4    |
 
 ---
 
-## Weight Block Scaling
+## Different Model Sizes
 
-2D means each $16 \times 16$ block shares one scale, versus $1 \times 16$ for 1D.
+Given that CCDL-STE is the best variant, we compare it againt STE-STE baseline only.
 
-| Variants            | $\downarrow$ Wiki-2 | $\downarrow$ C4 | $\uparrow$ HellaSwag | $\uparrow$ ARC-Easy | $\uparrow$ PIQA |
-| ------------------- | :-----------------: | :-------------: | :------------------: | :-----------------: | :-------------: |
-| W4(1D)-A16-G16-KV16 |        12.16        |      17.53      |        53.51         |        67.13        |      71.55      |
-| W4(2D)-A16-G16-KV16 |        12.62        |      18.04      |        52.82         |        67.00        |      71.06      |
-| W4(1D)-A4-G16-KV16  |        13.23        |      18.82      |        52.25         |        64.73        |      70.95      |
-| W4(2D)-A4-G16-KV16  |        13.76        |      19.33      |        51.26         |        66.29        |      70.35      |
-| W4(1D)-A4-G16-KV4   |        13.76        |      19.45      |        51.71         |        63.89        |      70.46      |
-| W4(2D)-A4-G16-KV4   |        14.33        |      20.00      |        50.29         |        63.93        |      69.70      |
+| Variants      | $\downarrow$ Wiki-2 | $\downarrow$ C4 | $\uparrow$ HellaSwag | $\uparrow$ ARC-Easy | $\uparrow$ PIQA |
+| ------------- | :-----------------: | :-------------: | :------------------: | :-----------------: | :-------------: |
+| 135M-STE-STE  |
+| 135M-CCDL-STE |
+| 360M-STE-STE  |
+| 360M-CCDL-STE |
+| 1.7B-STE-STE  |
+| 1.7B-CCDL-STE |
 
 ---
 
 ## Caveat
 
-Due to the nature of LoRA and limited training steps, we cannot conclude much things at the moment. Pre-training is more sensitive to the accumulated error during training, but also has more flexibility adjust the weights.
+We cannot conclude much things at the moment. Pre-training is more sensitive to the accumulated error during training, but also has more flexibility adjust the weights.
