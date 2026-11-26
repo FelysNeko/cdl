@@ -171,7 +171,7 @@ class ModelConfig:
     weight: str = "nvfp4_ecdl"  # "none", "ste", "*_ccdl", or "*_ecdl"
     kv: str = "nvfp4_ecdl"  # "none", "ste", "*_ccdl", or "*_ecdl"
     weight_kappa: float = 64.0
-    weight_kappa_bwd: float | None = None
+    weight_kappa_bwd: float | None = 2.0
     weight_q_kappa_bwd: float | None = None
     activation_kappa: float = 16.0
     activation_kappa_bwd: float | None = 2.0
@@ -186,9 +186,9 @@ class ModelConfig:
     low_precision_backward: bool = True
     kernel: str = "triton"
     backend: str = "nvfp4"
-    use_lora: bool = True
+    use_lora: bool = False
     freeze_base: bool = False  # with use_lora=false, keep base weights frozen
-    train_head: bool = True  # only applies when use_lora=false
+    train_head: bool = False  # only applies when use_lora=false
     lora_r: int = 16
     lora_alpha: int = 32
 
@@ -263,7 +263,7 @@ class DataConfig:
     num_docs: int = 100_000
     seed: int = 0
     seq_len: int = 1024
-    batch_size: int = 16
+    batch_size: int = 8
     num_test_blocks: int = 64
     num_calib_blocks: int = 8
     cache_dir: str | None = None
@@ -273,8 +273,8 @@ class DataConfig:
 class TrainingConfig:
     epochs: int = 1
     max_steps: int = 4000  # 0 = full epoch
-    grad_accum_steps: int = 1
-    learning_rate: float = 3e-4
+    grad_accum_steps: int = 2
+    learning_rate: float = 2e-4
     warmup_steps: int = 200
     weight_decay: float = 0.01
     betas: list[float] = field(default_factory=lambda: [0.9, 0.95])
@@ -283,7 +283,7 @@ class TrainingConfig:
     train_kappa: bool = False
     quant_adamw_lr: float = 3e-4
     gradient_checkpointing: bool = False
-    fp32_master_weights: bool = False
+    fp32_master_weights: bool = True
     lr_decay: str = "cosine"
     min_lr_ratio: float = 0.1
     save_every_iters: int = 500
