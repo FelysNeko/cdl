@@ -14,6 +14,7 @@ model:
   weight: nvfp4_ecdl
   kv: nvfp4_ecdl
   weight_kappa: 64.0
+  weight_kappa_end: null
   weight_kappa_bwd: 2.0
   weight_q_kappa_bwd: null
   activation_kappa: 16.0
@@ -27,6 +28,7 @@ model:
   block_size: 16
   weight_block_2d: true
   low_precision_backward: true
+  skip_last_layers: 0
   kernel: triton
   backend: nvfp4
   use_lora: false

@@ -54,7 +54,10 @@ from cdl.model.components.quant.ccdl.nvfp4 import (
     Nvfp4CascadedCdlQuantForActivation,
     Nvfp4CascadedCdlQuantForWeight,
 )
-from cdl.model.components.quant.ecdl.ecdl import ExtendedCdlQuantMixin
+from cdl.model.components.quant.ecdl.ecdl import (
+    ExtendedCdlQuantForWeight,
+    ExtendedCdlQuantMixin,
+)
 from cdl.model.components.quant.ecdl.mxfp4 import (
     Mxfp4ExtendedCdlQuantForActivation,
     Mxfp4ExtendedCdlQuantForWeight,
@@ -171,6 +174,7 @@ class ModelConfig:
     weight: str = "nvfp4_ecdl"  # "none", "ste", "*_ccdl", or "*_ecdl"
     kv: str = "nvfp4_ecdl"  # "none", "ste", "*_ccdl", or "*_ecdl"
     weight_kappa: float = 64.0
+    weight_kappa_end: float | None = None
     weight_kappa_bwd: float | None = 2.0
     weight_q_kappa_bwd: float | None = None
     activation_kappa: float = 16.0
@@ -184,6 +188,7 @@ class ModelConfig:
     block_size: int = 16  # 16 for nvfp4, 32 for mxfp4/mxfp8
     weight_block_2d: bool = True
     low_precision_backward: bool = True
+    skip_last_layers: int = 0
     kernel: str = "triton"
     backend: str = "nvfp4"
     use_lora: bool = False
@@ -252,6 +257,21 @@ class ModelConfig:
         if self.low_precision_backward and self.backend != "nvfp4":
             raise ValueError(
                 f"low_precision_backward is only supported for backend='nvfp4', got {self.backend!r}"
+            )
+        if self.weight_kappa <= 0:
+            raise ValueError(f"weight_kappa must be > 0, got {self.weight_kappa}")
+        if self.weight_kappa_end is not None:
+            if not self.weight.endswith("_ecdl"):
+                raise ValueError(
+                    f"weight_kappa_end is only supported for *_ecdl weight variants, got {self.weight!r}"
+                )
+            if self.weight_kappa_end < self.weight_kappa:
+                raise ValueError(
+                    f"weight_kappa_end ({self.weight_kappa_end}) must be >= weight_kappa ({self.weight_kappa})"
+                )
+        if self.skip_last_layers < 0:
+            raise ValueError(
+                f"skip_last_layers must be >= 0, got {self.skip_last_layers}"
             )
 
 
@@ -517,8 +537,16 @@ class ModelController(QLinearMixin, CascadedCdlQuantMixin, ExtendedCdlQuantMixin
 
     @torch.no_grad()
     def apply_quant(self, cfg: ModelConfig, dtype: torch.dtype = MODEL_DTYPE) -> None:
+        skip_modules: set[int] = set()
+        if cfg.skip_last_layers > 0:
+            layers = self.model.model.layers
+            for layer in layers[max(len(layers) - cfg.skip_last_layers, 0) :]:
+                skip_modules.update(id(m) for m in layer.modules())
+
         targets = set(cfg.quant_targets)
         for name, module in list(self.named_modules()):
+            if id(module) in skip_modules:
+                continue
             parent_name, _, leaf = name.rpartition(".")
             if leaf not in targets or not isinstance(module, nn.Linear):
                 continue
@@ -547,7 +575,7 @@ class ModelController(QLinearMixin, CascadedCdlQuantMixin, ExtendedCdlQuantMixin
             )
             self.model.config._attn_implementation = KV_QUANT_ATTN_NAME
             for module in self.modules():
-                if not isinstance(module, LlamaAttention):
+                if id(module) in skip_modules or not isinstance(module, LlamaAttention):
                     continue
                 kv_shape = (1, module.config.num_key_value_heads, 1, module.head_dim)
                 module.k_quant = _build_input_quant(
@@ -922,6 +950,20 @@ def _init_grad_buffers_if_accum(trainable: list[nn.Parameter], grad_accum: int) 
             p.grad = torch.zeros_like(p)
 
 
+def _anneal_weight_kappa(
+    controller: ModelController, cfg: Config, step: int, total_steps: int
+) -> None:
+    if cfg.model.weight_kappa_end is None:
+        return
+    frac = min(max(step / max(total_steps - 1, 1), 0.0), 1.0)
+    log_k = math.log(cfg.model.weight_kappa) + frac * (
+        math.log(cfg.model.weight_kappa_end) - math.log(cfg.model.weight_kappa)
+    )
+    for m in controller.model.modules():
+        if isinstance(m, ExtendedCdlQuantForWeight):
+            m.log_kappa.data.fill_(log_k)
+
+
 def run_training(
     controller: ModelController,
     run_model: nn.Module,
@@ -943,6 +985,7 @@ def run_training(
 
     batches_per_epoch = len(train_loader)
     steps_per_epoch = math.ceil(batches_per_epoch / grad_accum)
+    total_steps = cfg.train.max_steps or max(steps_per_epoch * cfg.train.epochs, 1)
     start_epoch = min(start_step // steps_per_epoch, cfg.train.epochs - 1)
     resume_skip = max(start_step - start_epoch * steps_per_epoch, 0) * grad_accum
     logger.info(
@@ -975,6 +1018,7 @@ def run_training(
             start=resume_skip,
         ):
             if accum_count == 0:
+                _anneal_weight_kappa(controller, cfg, global_step, total_steps)
                 _zero_grads(
                     trainable,
                     optimizer,
