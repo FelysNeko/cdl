@@ -73,8 +73,8 @@ from cdl.model.components.quant.ecdl.nvfp4 import (
     Nvfp4ExtendedCdlQuantForActivation,
     Nvfp4ExtendedCdlQuantForWeight,
 )
-from cdl.model.components.quant.identity import IdentityQuant
-from cdl.model.components.quant.ste import SteQuant
+from cdl.model.components.quant.identity.identity import IdentityQuant
+from cdl.model.components.quant.ste.ste import SteQuant
 
 logger = logging.getLogger(__name__)
 

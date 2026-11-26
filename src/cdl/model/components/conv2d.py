@@ -6,7 +6,7 @@ from torch import nn
 
 from cdl.api.quant import MatMul, Quant
 from cdl.core.mm import mxfp4, mxfp8, native, nvfp4
-from cdl.model.components.quant.ste import SteQuant
+from cdl.model.components.quant.ste.ste import SteQuant
 
 type Backend = Literal["native", "nvfp4", "mxfp4", "mxfp8"]
 

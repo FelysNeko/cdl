@@ -10,13 +10,15 @@ from cdl.core.format.fp8 import UE4M3ExcludeZero
 from cdl.core.kernel import nvfp4_ecdl_quant
 from cdl.core.kernel.dequant import nvfp4_dequant
 from cdl.core.kernel.quant import nvfp4_quant
+from cdl.model.components.quant.block import (
+    check_triton_block_dims,
+    squeeze_block_scale,
+    ungroup_blocks,
+)
 from cdl.model.components.quant.ecdl.ecdl import (
     ExtendedCdlQuantForActivation,
     ExtendedCdlQuantForWeight,
     ExtendedCdlTensor,
-    check_triton_block_dims,
-    squeeze_block_scale,
-    ungroup_blocks,
 )
 
 

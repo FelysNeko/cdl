@@ -9,13 +9,15 @@ from cdl.core.format.fp8 import E4M3, E8M0
 from cdl.core.kernel import mxfp8_ecdl_quant
 from cdl.core.kernel.dequant import mxfp8_dequant
 from cdl.core.kernel.quant import mxfp8_quant
+from cdl.model.components.quant.block import (
+    check_triton_block_dims,
+    squeeze_block_scale,
+    ungroup_blocks,
+)
 from cdl.model.components.quant.ecdl.ecdl import (
     ExtendedCdlQuantForActivation,
     ExtendedCdlQuantForWeight,
     ExtendedCdlTensor,
-    check_triton_block_dims,
-    squeeze_block_scale,
-    ungroup_blocks,
 )
 
 
