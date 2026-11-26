@@ -4,7 +4,7 @@ import torch
 
 from cdl.core.kernel.ccdl.launch import launch_ccdl_bwd, launch_ccdl_fwd
 from cdl.core.kernel.formats.spec import FormatId, get_format
-from cdl.core.kernel.layout import q_indices_shape, reduce_q_grad
+from cdl.core.kernel.layout import q_indices_shape, q_indices_shape_2d, reduce_q_grad
 
 
 @torch.library.custom_op("cdl::ccdl_quant_fwd", mutates_args=())
@@ -18,6 +18,7 @@ def ccdl_quant_fwd(
     alpha: torch.Tensor,
     seed: torch.Tensor,
     format_id: int,
+    block_2d: bool,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     fmt = get_format(format_id, theta.device)
     return launch_ccdl_fwd(
@@ -30,18 +31,36 @@ def ccdl_quant_fwd(
         alpha,
         seed,
         fmt,
+        block_2d,
     )
 
 
 @ccdl_quant_fwd.register_fake
 def _ccdl_quant_fwd_fake(
-    theta, theta_kappa, theta_topk, q, q_kappa, q_topk, alpha, seed, format_id
+    theta,
+    theta_kappa,
+    theta_topk,
+    q,
+    q_kappa,
+    q_topk,
+    alpha,
+    seed,
+    format_id,
+    block_2d,
 ):
+    is_fp4 = format_id in (FormatId.NVFP4, FormatId.MXFP4)
+    packed_dtype = torch.uint8 if is_fp4 else torch.float8_e4m3fn
+    if block_2d:
+        lead = theta.shape[:-4]
+        nb_r, tpb, nb_c, _ = theta.shape[-4:]
+        packed_cols = tpb // 2 if is_fp4 else tpb
+        return (
+            theta.new_empty((*lead, nb_r, tpb, nb_c, packed_cols), dtype=packed_dtype),
+            theta.new_empty(q_indices_shape_2d(lead, nb_r, nb_c, q), dtype=torch.uint8),
+        )
     lead = theta.shape[:-2]
     nb, tpb = theta.shape[-2:]
-    is_fp4 = format_id in (FormatId.NVFP4, FormatId.MXFP4)
     packed_cols = tpb // 2 if is_fp4 else tpb
-    packed_dtype = torch.uint8 if is_fp4 else torch.float8_e4m3fn
     return (
         theta.new_empty((*lead, nb, packed_cols), dtype=packed_dtype),
         theta.new_empty(q_indices_shape(lead, nb, q), dtype=torch.uint8),
@@ -64,6 +83,7 @@ def ccdl_quant_bwd(
     need_dkt: bool,
     need_dkq: bool,
     need_dal: bool,
+    block_2d: bool,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     fmt = get_format(format_id, theta.device)
     return launch_ccdl_bwd(
@@ -81,6 +101,7 @@ def ccdl_quant_bwd(
         need_dkt,
         need_dkq,
         need_dal,
+        block_2d=block_2d,
     )
 
 
@@ -100,12 +121,21 @@ def _ccdl_quant_bwd_fake(
     need_dkt,
     need_dkq,
     need_dal,
+    block_2d,
 ):
-    m = math.prod(theta.shape[:-2])
-    nb, tpb = theta.shape[-2:]
+    if block_2d:
+        m = math.prod(theta.shape[:-4])
+        nb_r, tpb, nb_c, _ = theta.shape[-4:]
+        dtheta = theta.new_empty((m, nb_r * tpb, nb_c * tpb), dtype=theta.dtype)
+        dq_shape = (m, nb_r, nb_c) if need_dq else (0,)
+    else:
+        m = math.prod(theta.shape[:-2])
+        nb, tpb = theta.shape[-2:]
+        dtheta = theta.new_empty((m, nb * tpb), dtype=theta.dtype)
+        dq_shape = (m, nb) if need_dq else (0,)
     return (
-        theta.new_empty((m, nb * tpb), dtype=theta.dtype),
-        theta.new_empty((m, nb) if need_dq else (0,), dtype=torch.float32),
+        dtheta,
+        theta.new_empty(dq_shape, dtype=torch.float32),
         theta.new_empty(
             (3 if (need_dkt or need_dkq or need_dal) else 0,), dtype=torch.float32
         ),
@@ -127,6 +157,7 @@ class CcdlQuantFn(torch.autograd.Function):
         alpha: torch.Tensor,
         seed: torch.Tensor,
         format_id: int,
+        block_2d: bool,
     ):
         packed_theta, packed_scale = ccdl_quant_fwd(
             theta,
@@ -138,6 +169,7 @@ class CcdlQuantFn(torch.autograd.Function):
             alpha,
             seed,
             format_id,
+            block_2d,
         )
         # Only the u8 scale byte is kept for backward; the kernel rebuilds the
         # block scale from it (no fp32 ``s`` tensor).
@@ -153,6 +185,7 @@ class CcdlQuantFn(torch.autograd.Function):
         )
         ctx.format_id = format_id
         ctx.topk = (theta_topk, q_topk)
+        ctx.block_2d = block_2d
         carrier = theta.new_zeros(()).expand(theta.shape)
         return packed_theta, packed_scale, carrier
 
@@ -193,6 +226,7 @@ class CcdlQuantFn(torch.autograd.Function):
             need_dkt,
             need_dkq,
             need_dal,
+            ctx.block_2d,
         )
         dkt_fwd = scalars[0] if (coupled_kt and need_dkt) else None
         dkt_bwd = scalars[0] if ((not coupled_kt) and need_dkt) else None
@@ -203,11 +237,12 @@ class CcdlQuantFn(torch.autograd.Function):
             dkt_fwd,
             dkt_bwd,
             None,
-            reduce_q_grad(dq, theta, q) if need_q else None,
+            reduce_q_grad(dq, theta, q, ctx.block_2d) if need_q else None,
             dkq_fwd,
             dkq_bwd,
             None,
             scalars[2] if need_dal else None,
+            None,
             None,
             None,
         )
@@ -225,6 +260,7 @@ def ccdl_quant(
     alpha: torch.Tensor,
     seed: torch.Tensor,
     format_id: int,
+    block_2d: bool,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     return CcdlQuantFn.apply(
         theta,
@@ -238,4 +274,5 @@ def ccdl_quant(
         alpha,
         seed,
         int(format_id),
+        block_2d,
     )

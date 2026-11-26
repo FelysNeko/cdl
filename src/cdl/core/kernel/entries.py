@@ -18,6 +18,7 @@ def nvfp4_ccdl_quant(
     q_topk: int,
     alpha: torch.Tensor,
     seed: torch.Tensor,
+    block_2d: bool,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     return ccdl_quant(
         theta,
@@ -31,6 +32,7 @@ def nvfp4_ccdl_quant(
         alpha,
         seed,
         FormatId.NVFP4,
+        block_2d,
     )
 
 
@@ -45,6 +47,7 @@ def mxfp4_ccdl_quant(
     q_topk: int,
     alpha: torch.Tensor,
     seed: torch.Tensor,
+    block_2d: bool,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     return ccdl_quant(
         theta,
@@ -58,6 +61,7 @@ def mxfp4_ccdl_quant(
         alpha,
         seed,
         FormatId.MXFP4,
+        block_2d,
     )
 
 
@@ -72,6 +76,7 @@ def mxfp8_ccdl_quant(
     q_topk: int,
     alpha: torch.Tensor,
     seed: torch.Tensor,
+    block_2d: bool,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     return ccdl_quant(
         theta,
@@ -85,6 +90,7 @@ def mxfp8_ccdl_quant(
         alpha,
         seed,
         FormatId.MXFP8,
+        block_2d,
     )
 
 

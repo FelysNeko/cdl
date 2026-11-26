@@ -4,30 +4,16 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 
 import torch
-import torch.nn.functional as F
 from torch import nn
 
 from cdl.api.format import Format
 from cdl.api.quant import QTensor, Quant
 from cdl.core.ccdl import cascaded_cdl_topk_forward, cascaded_nearest_round
+from cdl.model.components.quant.block import (
+    group_blocks_by_dims,
+    ungroup_blocks,
+)
 from cdl.model.mixin.batchnorm_batch_stats import BatchNormBatchStatsMixin
-
-
-def group_tensor_into_blocks(
-    theta: torch.Tensor,
-    block_size: int,
-) -> tuple[torch.Tensor, int]:
-    k = theta.shape[-1]
-
-    extra = k % block_size
-    pad_size = 0
-    if extra:
-        pad_size = block_size - extra
-        theta = F.pad(theta, (0, pad_size))
-
-    num_blocks = (k + pad_size) // block_size
-    cdl_style_theta = theta.reshape(*theta.shape[:-1], num_blocks, block_size)
-    return cdl_style_theta, pad_size
 
 
 @dataclass
@@ -38,24 +24,24 @@ class CascadedCdlTensor(QTensor):
     q_indices: torch.Tensor
     alpha: torch.Tensor
     grad_proxy: torch.Tensor | None
-    k_dim: int
+    block_mask: Sequence[bool]
+    orig_shape: Sequence[int]
     raw: torch.Tensor
 
     @property
     def shape(self) -> Sequence[int]:
-        return (*self.theta_indices.shape[:-2], self.k_dim)
+        return self.orig_shape
 
     def dequantize(self) -> torch.Tensor:
         theta = self.theta_format.level[self.theta_indices.long()]
         q = self.q_format.level[self.q_indices.long()]
         alpha = self.alpha.to(theta.dtype)
-        x = (theta * q * alpha).flatten(-2)[..., : self.k_dim]
-        return x
+        return ungroup_blocks(theta * q * alpha, self.block_mask, self.orig_shape)
 
     def proxy(self) -> torch.Tensor | None:
         if self.grad_proxy is None:
             return None
-        return self.grad_proxy.flatten(-2)[..., : self.k_dim]
+        return ungroup_blocks(self.grad_proxy, self.block_mask, self.orig_shape)
 
     def source(self) -> torch.Tensor:
         return self.raw
@@ -84,7 +70,8 @@ class CascadedCdlQuant(Quant):
 
     def __init__(
         self,
-        input_shape: tuple[int, ...],
+        input_shape: Sequence[int],
+        block_dims: Sequence[bool],
         theta_format: Format,
         theta_topk: int,
         q_format: Format,
@@ -95,20 +82,33 @@ class CascadedCdlQuant(Quant):
         q_kappa_backward: float | None,
     ):
         super().__init__()
-        self.input_shape = input_shape
-        self.k_dim = input_shape[-1]
+        self.input_shape = tuple(input_shape)
+        self.block_dims = tuple(block_dims)
+        if len(self.block_dims) != len(self.input_shape):
+            raise ValueError(
+                f"expected block_dims of length {len(self.input_shape)}, got {len(self.block_dims)}"
+            )
+        if not any(self.block_dims):
+            raise ValueError(
+                f"block_dims must block at least one dim, got {self.block_dims}"
+            )
         self.theta_format = theta_format
         self.theta_topk = theta_topk
         self.q_format = q_format
         self.q_topk = q_topk
         self.block_size = block_size
 
-        num_blocks = (self.k_dim + block_size - 1) // block_size
+        q_shape: list[int] = []
+        for s, is_block in zip(self.input_shape, self.block_dims, strict=True):
+            if is_block:
+                nb = (s + block_size - 1) // block_size
+                q_shape.extend((nb, 1))
+            else:
+                q_shape.append(s)
 
-        self.q_num_quantized_params = math.prod(input_shape[:-1]) * num_blocks
-        self.theta_num_quantized_params = math.prod(input_shape[:-1]) * self.k_dim
-
-        q_shape = input_shape[:-1] + (num_blocks, 1)
+        self.theta_num_quantized_params = math.prod(self.input_shape)
+        self.q_num_quantized_params = math.prod(q_shape)
+        self.q_block_numel = block_size ** sum(self.block_dims)
 
         self.log_theta_kappa = nn.Parameter(torch.full((), math.log(kappa_forward)))
         self.log_q_kappa = nn.Parameter(torch.full((), math.log(kappa_forward)))
@@ -174,8 +174,13 @@ class CascadedCdlQuant(Quant):
         log_q_tensor = q_tensor.clamp_min(torch.finfo(torch.float32).tiny).log()
         self.copy_log_q(log_q_tensor)
 
+    def group_tensor_into_blocks(
+        self, x: torch.Tensor
+    ) -> tuple[torch.Tensor, tuple[bool, ...], tuple[int, ...]]:
+        return group_blocks_by_dims(x, self.block_dims, self.block_size)
+
     def eval_forward(self, x: torch.Tensor) -> QTensor:
-        theta, _ = group_tensor_into_blocks(x, self.block_size)
+        theta, block_mask, orig_shape = self.group_tensor_into_blocks(x)
         theta_indices, q_indices = cascaded_nearest_round(
             theta,
             self.theta_format,
@@ -190,12 +195,13 @@ class CascadedCdlQuant(Quant):
             q_indices,
             self.alpha.detach(),
             None,
-            self.k_dim,
+            block_mask,
+            orig_shape,
             x,
         )
 
     def training_forward(self, x: torch.Tensor) -> QTensor:
-        theta, _ = group_tensor_into_blocks(x, self.block_size)
+        theta, block_mask, orig_shape = self.group_tensor_into_blocks(x)
         theta_indices, q_indices, grad_proxy, _, _ = cascaded_cdl_topk_forward(
             theta,
             self.theta_format,
@@ -219,7 +225,8 @@ class CascadedCdlQuant(Quant):
             q_indices,
             self.alpha.detach(),
             grad_proxy,
-            self.k_dim,
+            block_mask,
+            orig_shape,
             x,
         )
 
@@ -247,7 +254,8 @@ class CascadedCdlQuant(Quant):
 class CascadedCdlQuantForActivation(CascadedCdlQuant):
     def __init__(
         self,
-        input_shape: tuple[int, ...],
+        input_shape: Sequence[int],
+        block_dims: Sequence[bool],
         theta_format: Format,
         theta_topk: int,
         q_format: Format,
@@ -259,6 +267,7 @@ class CascadedCdlQuantForActivation(CascadedCdlQuant):
     ):
         super().__init__(
             input_shape,
+            block_dims,
             theta_format,
             theta_topk,
             q_format,
@@ -270,7 +279,7 @@ class CascadedCdlQuantForActivation(CascadedCdlQuant):
         )
 
     def get_q_lr(self, eta: float) -> float:
-        n = self.block_size
+        n = self.q_block_numel
         bits = self.theta_format.bits
         return eta / math.sqrt(n * (2**bits))
 
@@ -284,6 +293,7 @@ class CascadedCdlQuantForWeight(CascadedCdlQuant):
     def __init__(
         self,
         weight: torch.Tensor,
+        block_dims: Sequence[bool],
         theta_format: Format,
         q_format: Format,
         block_size: int,
@@ -291,9 +301,9 @@ class CascadedCdlQuantForWeight(CascadedCdlQuant):
         theta_kappa_backward: float | None = None,
         q_kappa_backward: float | None = None,
     ):
-        out_dim, k_dim = weight.shape
         super().__init__(
-            (out_dim, k_dim),
+            tuple(weight.shape),
+            block_dims,
             theta_format,
             theta_format.n,
             q_format,
@@ -307,7 +317,7 @@ class CascadedCdlQuantForWeight(CascadedCdlQuant):
         self.initialized = True
 
     def get_q_lr(self, eta: float) -> float:
-        n = self.block_size
+        n = self.q_block_numel
         bits = self.theta_format.bits
         return eta / math.sqrt(n * (2 ** (bits - 1)))
 
@@ -318,8 +328,9 @@ class CascadedCdlQuantForWeight(CascadedCdlQuant):
 
     @torch.no_grad()
     def init_q_from_weight(self, weight: torch.Tensor) -> None:
-        blocked, _ = group_tensor_into_blocks(weight, self.block_size)
-        self.init_q_from_block_amax(blocked.abs().amax(dim=-1, keepdim=True))
+        blocked, block_mask, _ = self.group_tensor_into_blocks(weight)
+        reduce_dims = tuple(i for i, is_block in enumerate(block_mask) if is_block)
+        self.init_q_from_block_amax(blocked.abs().amax(dim=reduce_dims, keepdim=True))
 
 
 class CascadedCdlQuantMixin(BatchNormBatchStatsMixin):
@@ -404,11 +415,15 @@ class CascadedCdlQuantMixin(BatchNormBatchStatsMixin):
 
         def hook(m: nn.Module, args: tuple[torch.Tensor, ...]) -> None:
             x = args[0]
-            blocked, _ = group_tensor_into_blocks(x, m.block_size)
+            blocked, block_mask, _ = m.group_tensor_into_blocks(x)
             reduce_dims = tuple(
-                i for i in range(blocked.ndim - 2) if m.input_shape[i] == 1
-            ) + (blocked.ndim - 1,)
-            block_amax = blocked.abs().amax(dim=reduce_dims)
+                i
+                for i, (is_block, qs) in enumerate(
+                    zip(block_mask, m.q.shape, strict=True)
+                )
+                if is_block or qs == 1
+            )
+            block_amax = blocked.abs().amax(dim=reduce_dims, keepdim=True)
             previous = stats.get(m)
             stats[m] = (
                 block_amax if previous is None else torch.maximum(previous, block_amax)
@@ -433,6 +448,5 @@ class CascadedCdlQuantMixin(BatchNormBatchStatsMixin):
 
         for m in modules:
             assert m in stats
-            block_amax = stats[m].flatten().reshape(m.input_shape[:-1] + (-1, 1))
-            m.init_q_from_block_amax(block_amax)
+            m.init_q_from_block_amax(stats[m])
             m.initialized = True

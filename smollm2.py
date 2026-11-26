@@ -41,7 +41,10 @@ from cdl.core.format.fp4 import E2M1SingleZero
 from cdl.core.format.fp8 import E4M3, E8M0, UE4M3ExcludeZero
 from cdl.dataset.token_cache import CacheSpec, TokenCache
 from cdl.model.components.linear import QLinear, QLinearMixin
-from cdl.model.components.quant.ccdl.ccdl import CascadedCdlQuantMixin
+from cdl.model.components.quant.ccdl.ccdl import (
+    CascadedCdlQuantForWeight,
+    CascadedCdlQuantMixin,
+)
 from cdl.model.components.quant.ccdl.mxfp4 import (
     Mxfp4CascadedCdlQuantForActivation,
     Mxfp4CascadedCdlQuantForWeight,
@@ -250,10 +253,6 @@ class ModelConfig:
                 raise ValueError(
                     f"{role}_q_kappa_bwd is only supported for *_ccdl {role} variants, got {variant!r}"
                 )
-        if self.weight_block_2d and self.weight.endswith("_ccdl"):
-            raise ValueError(
-                f"weight_block_2d is not supported for *_ccdl weight variants, got {self.weight!r}"
-            )
         if self.low_precision_backward and self.backend != "nvfp4":
             raise ValueError(
                 f"low_precision_backward is only supported for backend='nvfp4', got {self.backend!r}"
@@ -261,9 +260,9 @@ class ModelConfig:
         if self.weight_kappa <= 0:
             raise ValueError(f"weight_kappa must be > 0, got {self.weight_kappa}")
         if self.weight_kappa_end is not None:
-            if not self.weight.endswith("_ecdl"):
+            if not self.weight.endswith(("_ccdl", "_ecdl")):
                 raise ValueError(
-                    f"weight_kappa_end is only supported for *_ecdl weight variants, got {self.weight!r}"
+                    f"weight_kappa_end is only supported for *_ccdl or *_ecdl weight variants, got {self.weight!r}"
                 )
             if self.weight_kappa_end < self.weight_kappa:
                 raise ValueError(
@@ -435,9 +434,11 @@ def _build_input_quant(
     if variant == "ste":
         return SteQuant(_ste_simulation(cfg), False)
     spec = _QUANT_VARIANTS[variant]
+    block_dims = (False,) * (len(input_shape) - 1) + (True,)
     if spec.family == "ccdl":
         return spec.act_cls(
             tuple(input_shape),
+            block_dims,
             cfg.theta_topk,
             cfg.q_topk,
             dtype,
@@ -446,7 +447,6 @@ def _build_input_quant(
             q_kappa_backward=q_kappa_backward,
             kernel=cfg.kernel,
         )
-    block_dims = (False,) * (len(input_shape) - 1) + (True,)
     return spec.act_cls(
         input_shape,
         block_dims,
@@ -503,18 +503,19 @@ def _build_weight_quant(cfg: ModelConfig, weight: torch.Tensor, dtype: torch.dty
     if cfg.weight == "ste":
         return SteQuant(_ste_simulation(cfg), cfg.weight_block_2d)
     spec = _QUANT_VARIANTS[cfg.weight]
+    block_dims = (
+        (True, True) if cfg.weight_block_2d else (False,) * (weight.ndim - 1) + (True,)
+    )
     if spec.family == "ccdl":
         return spec.weight_cls(
             weight,
+            block_dims,
             dtype=dtype,
             kappa_forward=cfg.weight_kappa,
             theta_kappa_backward=cfg.weight_kappa_bwd,
             q_kappa_backward=cfg.weight_q_kappa_bwd,
             kernel=cfg.kernel,
         )
-    block_dims = (
-        (True, True) if cfg.weight_block_2d else (False,) * (weight.ndim - 1) + (True,)
-    )
     return spec.weight_cls(
         weight,
         block_dims,
@@ -962,6 +963,9 @@ def _anneal_weight_kappa(
     for m in controller.model.modules():
         if isinstance(m, ExtendedCdlQuantForWeight):
             m.log_kappa.data.fill_(log_k)
+        elif isinstance(m, CascadedCdlQuantForWeight):
+            m.log_theta_kappa.data.fill_(log_k)
+            m.log_q_kappa.data.fill_(log_k)
 
 
 def run_training(

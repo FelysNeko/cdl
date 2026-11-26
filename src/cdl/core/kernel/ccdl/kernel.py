@@ -236,3 +236,170 @@ def _ccdl_bwd(
         tl.atomic_add(part_ptr + slot + 0, dkt)
         tl.atomic_add(part_ptr + slot + 1, dkq)
         tl.atomic_add(part_ptr + slot + 2, dal)
+
+
+@triton.jit
+def _ccdl_fwd_2d(
+    th_ptr,
+    thl_ptr,
+    thg_ptr,
+    kt_ptr,
+    t_ordinal,
+    q_ptr,
+    QS,
+    ql_ptr,
+    qg_ptr,
+    kq_ptr,
+    q_ordinal,
+    al_ptr,
+    seed_ptr,
+    pt_ptr,
+    ps_ptr,
+    M,
+    H,
+    K,
+    NB_R,
+    NB_C,
+    TPB: tl.constexpr,
+    TN: tl.constexpr,
+    TOPK: tl.constexpr,
+    QN: tl.constexpr,
+    QT: tl.constexpr,
+    SCALE_BIAS: tl.constexpr,
+):
+    tid = tl.program_id(0)
+    tiles_per_m = NB_R * NB_C
+    m_idx = (tid // tiles_per_m).to(tl.int64)
+    rem = tid % tiles_per_m
+    br = (rem // NB_C).to(tl.int64)
+    bc = (rem % NB_C).to(tl.int64)
+
+    kt = tl.load(kt_ptr)
+    kq = tl.load(kq_ptr)
+    al = tl.load(al_ptr)
+
+    q_offs = m_idx * QS + br * NB_C + bc
+    qv = tl.load(q_ptr + q_offs).to(tl.float32)
+    seed = tl.load(seed_ptr).to(tl.int32)
+    uq = tl.rand(seed, (M * H * K + q_offs).to(tl.int32))
+    q_indices = cdl_sample_truncated(qv, ql_ptr, qg_ptr, kq, uq, QN, QT, q_ordinal)
+    q_hat = tl.load(ql_ptr + q_indices).to(tl.float32)
+    s = q_hat * al
+    tl.store(ps_ptr + tid, (q_indices + SCALE_BIAS).to(tl.uint8))
+
+    row_offs = m_idx * H + br * TPB + tl.arange(0, TPB)
+    col_offs = bc * TPB + tl.arange(0, TPB)
+    offs = row_offs[:, None] * K + col_offs[None, :]
+    raw = tl.load(th_ptr + offs)
+    v = raw.to(tl.float32) / s
+    u_t = tl.rand(seed, offs.to(tl.int32))
+    theta_indices = cdl_sample(v, thl_ptr, thg_ptr, kt, u_t, TN, TOPK, t_ordinal)
+    if TN == 15:
+        code = tl.where(theta_indices < 7, 15 - theta_indices, theta_indices - 7)
+        lo, hi = tl.split(tl.reshape(code, (TPB, TPB // 2, 2)))
+        packed = (lo | (hi << 4)).to(tl.uint8)
+        pcol_offs = bc * (TPB // 2) + tl.arange(0, TPB // 2)
+        tl.store(pt_ptr + row_offs[:, None] * (K // 2) + pcol_offs[None, :], packed)
+    else:
+        packed = tl.where(
+            theta_indices < 127, 254 - theta_indices, theta_indices - 127
+        ).to(tl.uint8)
+        tl.store(pt_ptr + offs, packed)
+
+
+@triton.jit
+def _ccdl_bwd_2d(
+    g_ptr,
+    th_ptr,
+    thl_ptr,
+    thg_ptr,
+    kt_ptr,
+    t_ordinal,
+    q_ptr,
+    QS,
+    ql_ptr,
+    qg_ptr,
+    kq_ptr,
+    q_ordinal,
+    ps_ptr,
+    PSS,
+    al_ptr,
+    dth_ptr,
+    dq_ptr,
+    part_ptr,
+    H,
+    K,
+    NB_R,
+    NB_C,
+    TPB: tl.constexpr,
+    TN: tl.constexpr,
+    TOPK: tl.constexpr,
+    QN: tl.constexpr,
+    QT: tl.constexpr,
+    SCALE_BIAS: tl.constexpr,
+    NEED_DQ: tl.constexpr,
+    NEED_DKT: tl.constexpr,
+    NEED_DKQ: tl.constexpr,
+    NEED_DAL: tl.constexpr,
+):
+    tid = tl.program_id(0)
+    tiles_per_m = NB_R * NB_C
+    m_idx = (tid // tiles_per_m).to(tl.int64)
+    rem = tid % tiles_per_m
+    br = (rem // NB_C).to(tl.int64)
+    bc = (rem % NB_C).to(tl.int64)
+
+    kt = tl.load(kt_ptr)
+    kq = tl.load(kq_ptr)
+    al = tl.load(al_ptr)
+
+    qi = tl.load(ps_ptr + m_idx * PSS + br * NB_C + bc).to(tl.int32)
+    if SCALE_BIAS != 0:
+        qi = tl.maximum(qi - SCALE_BIAS, 0)
+    q_hat = tl.load(ql_ptr + qi).to(tl.float32)
+    s = q_hat * al
+
+    row_offs = m_idx * H + br * TPB + tl.arange(0, TPB)
+    col_offs = bc * TPB + tl.arange(0, TPB)
+    offs = row_offs[:, None] * K + col_offs[None, :]
+    g = tl.load(g_ptr + offs).to(tl.float32)
+    raw = tl.load(th_ptr + offs)
+    v = raw.to(tl.float32) / s
+
+    dth_coeff, ds_coeff, dk_term = cdl_proxy_coeffs(
+        v, thl_ptr, thg_ptr, kt, TN, TOPK, t_ordinal
+    )
+    dth = g * dth_coeff
+    tl.store(dth_ptr + offs, dth.to(dth_ptr.dtype.element_ty))
+
+    ds = g * ds_coeff
+
+    if NEED_DKT:
+        dkt = tl.sum(g * s * dk_term)
+    else:
+        dkt = 0.0
+    if NEED_DAL:
+        dal = tl.sum(ds * q_hat)
+    else:
+        dal = 0.0
+
+    if NEED_DQ or NEED_DKQ:
+        qv = tl.load(q_ptr + m_idx * QS + br * NB_C + bc).to(tl.float32)
+        dq_coeff, _, dkq_term = cdl_proxy_coeffs_truncated(
+            qv, ql_ptr, qg_ptr, kq, QN, QT, q_ordinal
+        )
+        gq = al * tl.sum(ds)
+        if NEED_DQ:
+            tl.store(dq_ptr + tid, gq * dq_coeff)
+        if NEED_DKQ:
+            dkq = gq * dkq_term
+        else:
+            dkq = 0.0
+    else:
+        dkq = 0.0
+
+    if NEED_DKT or NEED_DKQ or NEED_DAL:
+        pbase = tid.to(tl.int64) * 3
+        tl.store(part_ptr + pbase + 0, dkt)
+        tl.store(part_ptr + pbase + 1, dkq)
+        tl.store(part_ptr + pbase + 2, dal)
