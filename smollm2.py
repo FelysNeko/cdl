@@ -20,7 +20,10 @@ from typing import Literal
 
 import torch
 import tqdm
-from liger_kernel.transformers.functional import liger_fused_linear_cross_entropy
+from liger_kernel.transformers.functional import (
+    liger_fused_linear_cross_entropy,
+    liger_fused_linear_jsd,
+)
 from omegaconf import OmegaConf
 from torch import nn
 from torch.utils.data import DataLoader
@@ -306,6 +309,7 @@ class TrainingConfig:
     lr_decay: str = "cosine"
     min_lr_ratio: float = 0.1
     save_every_iters: int = 500
+    kl_distill: bool = False
 
     def validate(self) -> None:
         if self.grad_accum_steps < 1:
@@ -854,6 +858,27 @@ def lm_loss(model: nn.Module, input_ids: torch.Tensor) -> torch.Tensor:
     )
 
 
+def kl_lm_loss(
+    student: nn.Module, teacher: nn.Module, input_ids: torch.Tensor
+) -> torch.Tensor:
+    """Fused lm_head forward KL(teacher || student) via Liger JSD(beta=0)."""
+    student_hidden = student.model(
+        input_ids=input_ids, use_cache=False
+    ).last_hidden_state[:, :-1]
+    with torch.no_grad():
+        teacher_hidden = teacher.model(
+            input_ids=input_ids, use_cache=False
+        ).last_hidden_state[:, :-1]
+    return liger_fused_linear_jsd(
+        student_hidden.reshape(-1, student_hidden.shape[-1]),
+        student.lm_head.weight,
+        teacher_hidden.reshape(-1, teacher_hidden.shape[-1]),
+        teacher.lm_head.weight,
+        jsd_beta=0.0,
+        temperature=1.0,
+    )
+
+
 @torch.no_grad()
 def evaluate(model: nn.Module, loader: DataLoader, device: torch.device) -> float:
     was_training = model.training
@@ -981,6 +1006,7 @@ def run_training(
     output_dir: Path,
     start_step: int,
     master_pairs: MasterPairs | None = None,
+    teacher_model: nn.Module | None = None,
 ) -> int:
     trainable = [p for p in controller.model.parameters() if p.requires_grad]
     pairs = master_pairs or []
@@ -1033,7 +1059,12 @@ def run_training(
                 accum_loss = None
 
             torch.compiler.cudagraph_mark_step_begin()
-            loss = lm_loss(run_model, input_ids.to(device))
+            batch_ids = input_ids.to(device)
+            loss = (
+                kl_lm_loss(run_model, teacher_model, batch_ids)
+                if teacher_model is not None
+                else lm_loss(run_model, batch_ids)
+            )
             step_loss = (
                 loss.detach() / window_steps if window_steps > 1 else loss.detach()
             )
@@ -1183,6 +1214,19 @@ def training_pipeline() -> None:
         if master_pairs:
             _sync_master_from_model(master_pairs)
 
+    teacher_model: nn.Module | None = None
+    if cfg.train.kl_distill:
+        if model.lm_head.bias is not None:
+            raise ValueError("kl_distill requires lm_head without bias")
+        teacher_model = AutoModelForCausalLM.from_pretrained(
+            cfg.model.model_id, dtype=MODEL_DTYPE
+        )
+        untie_and_freeze(teacher_model, freeze_all=True, train_head=False)
+        teacher_model.eval().to(device)
+        if args.compile:
+            for layer in teacher_model.model.layers:
+                layer.compile(dynamic=False, mode="default")
+
     writer = SummaryWriter(log_dir=str(output_dir / "tensorboard"))
     run_model = compile_model(controller.model) if args.compile else controller.model
     run_training(
@@ -1198,6 +1242,7 @@ def training_pipeline() -> None:
         output_dir,
         start_step,
         master_pairs=master_pairs,
+        teacher_model=teacher_model,
     )
 
     logger.info("training finished")
