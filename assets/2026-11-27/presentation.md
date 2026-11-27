@@ -85,9 +85,9 @@ Weights, activations, KV caches, and gradients are all in NVFP4 (trained with pu
 | STE-STE        |        14.02        |      19.61      |        50.09         |        62.84        |      69.75      |
 | STE-ECDL       |        13.92        |      19.55      |        49.88         |        64.73        |      69.86      |
 | ECDL-STE       |        13.92        |      19.53      |        50.04         |        63.76        |      69.48      |
-| ECDL-ECDL      |        13.85        |      19.48      |        50.48         |        64.98        |      70.46      |
-| CCDL-STE       |        13.82        |      19.56      |        50.14         |        65.53        |      70.18      |
-| CCDL-ECDL      |        13.82        |      19.43      |        50.29         |        64.81        |      70.24      |
+| ECDL-ECDL      |        13.85        |      19.48      |        50.48         |        64.98        |    **70.46**    |
+| CCDL-STE       |      **13.82**      |      19.56      |        50.14         |      **65.53**      |      70.18      |
+| CCDL-ECDL      |      **13.82**      |    **19.43**    |      **50.29**       |        64.81        |      70.24      |
 
 ---
 
@@ -108,3 +108,22 @@ Ordered from easiest to hardest, at the finest possible granularity (trained wit
 ## Caveat
 
 We cannot conclude much things at the moment. Pre-training is more sensitive to the accumulated error during training, but also has more flexibility adjust the weights.
+
+---
+
+## Training Performance
+
+We report tokens per second on a single RTX PRO 6000. Higher is better.
+
+| Variants  |    135M     |    360M    |    1.7B    |
+| --------- | :---------: | :--------: | :--------: |
+| BF16      | **190,556** | **91,693** |   28,118   |
+| STE-STE   |   143,760   |   82,097   | **32,359** |
+| CCDL-STE  |   141,137   |   79,069   |   30,220   |
+| CCDL-ECDL |   115,068   |   64,915   |   26,132   |
+
+---
+
+## Next Move
+
+Finalize the pre-training settings and optimize the kernels a bit more. Verify the full-precision baseline on the lab machines.
