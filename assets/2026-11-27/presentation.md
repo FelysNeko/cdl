@@ -46,11 +46,11 @@ Only NVFP4 on SmolLM2-360M is reported for this week unless specified.
 
 | Variants | $\downarrow$ Wiki-2 | $\downarrow$ C4 | $\uparrow$ HellaSwag | $\uparrow$ ARC-Easy | $\uparrow$ PIQA |
 | -------- | :-----------------: | :-------------: | :------------------: | :-----------------: | :-------------: |
-| STE-1D   |
+| STE-1D   |        13.54        |      19.20      |        50.93         |        64.06        |      70.29      |
 | STE-2D   |
-| ECDL-1D  |
+| ECDL-1D  |        13.54        |      19.20      |        50.73         |        63.26        |      69.64      |
 | ECDL-2D  |
-| CCDL-1D  |
+| CCDL-1D  |        13.45        |      19.15      |        50.91         |        64.23        |      70.62      |
 | CCDL-2D  |
 
 ---
@@ -98,9 +98,9 @@ Ordered from easiest to hardest, at the finest possible granularity (trained wit
 | Variants            | $\downarrow$ Wiki-2 | $\downarrow$ C4 | $\uparrow$ HellaSwag | $\uparrow$ ARC-Easy | $\uparrow$ PIQA |
 | ------------------- | :-----------------: | :-------------: | :------------------: | :-----------------: | :-------------: |
 | W16-A16-G16-KV16    |        11.47        |      16.98      |        54.47         |        69.49        |      71.82      |
-| W4(1D)-A16-G16-KV16 |
-| W4(1D)-A4-G16-KV16  |
-| W4(1D)-A4-G16-KV4   |
+| W4(1D)-A16-G16-KV16 |        12.07        |      17.66      |        53.05         |        67.42        |      72.14      |
+| W4(1D)-A4-G16-KV16  |        13.07        |      18.75      |        51.26         |        64.81        |      71.06      |
+| W4(1D)-A4-G16-KV4   |        13.45        |      19.15      |        50.91         |        64.23        |      70.62      |
 | W4(2D)-A4-G4-KV4    |        13.82        |      19.56      |        50.14         |        65.53        |      70.18      |
 
 ---
