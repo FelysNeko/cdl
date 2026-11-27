@@ -42,25 +42,25 @@ Only NVFP4 on SmolLM2-360M is reported for this week unless specified.
 
 ## Weight Block Scaling
 
-2D means each $16 \times 16$ block shares one scale, versus $1 \times 16$ for 1D. Activation and KV caches are proxied by STE for simplicity. We focus on the weights only (trained with pure forward KL distillation).
+2D means each $16 \times 16$ block shares one scale, versus $1 \times 16$ for 1D. Activation and KV caches are proxied by STE for simplicity. We focus on the weights only.
 
 | Variants | $\downarrow$ Wiki-2 | $\downarrow$ C4 | $\uparrow$ HellaSwag | $\uparrow$ ARC-Easy | $\uparrow$ PIQA |
 | -------- | :-----------------: | :-------------: | :------------------: | :-----------------: | :-------------: |
-| STE-1D   |        13.54        |      19.20      |        50.93         |        64.06        |      70.29      |
-| STE-2D   |
-| ECDL-1D  |        13.54        |      19.20      |        50.73         |        63.26        |      69.64      |
-| ECDL-2D  |
-| CCDL-1D  |        13.45        |      19.15      |        50.91         |        64.23        |      70.62      |
-| CCDL-2D  |
+| STE-1D   |        14.13        |      19.49      |        50.99         |        64.31        |      70.08      |
+| STE-2D   |        14.61        |      19.91      |        49.75         |        61.20        |      69.31      |
+| ECDL-1D  |        14.05        |      19.51      |        50.11         |        61.32        |      69.59      |
+| ECDL-2D  |        14.45        |      19.83      |        50.26         |        61.07        |      70.13      |
+| CCDL-1D  |        14.02        |      19.42      |        50.47         |        62.37        |      69.91      |
+| CCDL-2D  |        14.26        |      19.75      |        49.76         |        61.07        |      70.18      |
 
 ---
 
 ## NVFP4 Backward Ablation
 
-Same, acitvation and KV caches are proxied by STE for simplicity.
+Same but gradients are in NVFP4. Acitvation and KV caches are proxied by STE for simplicity. We report the test perplexity every 500 iterations.
 
-| Step     | 500 | 1000 | 1500 | 2000 | 2500 | 3000 | 3500 | 4000 |
-| -------- | :-: | :--: | :--: | :--: | :--: | :--: | :--: | :--: |
+| Step     |  500  | 1000  | 1500  | 2000  | 2500  | 3000  | 3500  | 4000  |
+| -------- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
 | STE-G16  | 15.93 | 15.84 | 15.72 | 15.57 | 15.47 | 15.26 | 15.10 | 15.04 |
 | STE-G4   | 15.93 | 15.87 | 15.76 | 15.58 | 15.41 | 15.25 | 15.16 | 15.11 |
 | ECDL-G16 | 16.01 | 15.79 | 15.71 | 15.48 | 15.34 | 15.21 | 15.08 | 15.01 |
@@ -102,21 +102,6 @@ Ordered from easiest to hardest, at the finest possible granularity (trained wit
 | W4(1D)-A4-G16-KV16  |        13.07        |      18.75      |        51.26         |        64.81        |      71.06      |
 | W4(1D)-A4-G16-KV4   |        13.45        |      19.15      |        50.91         |        64.23        |      70.62      |
 | W4(2D)-A4-G4-KV4    |        13.82        |      19.56      |        50.14         |        65.53        |      70.18      |
-
----
-
-## Different Model Sizes
-
-Given that CCDL-STE is the best variant, we compare it againt STE-STE baseline only.
-
-| Variants      | $\downarrow$ Wiki-2 | $\downarrow$ C4 | $\uparrow$ HellaSwag | $\uparrow$ ARC-Easy | $\uparrow$ PIQA |
-| ------------- | :-----------------: | :-------------: | :------------------: | :-----------------: | :-------------: |
-| 135M-STE-STE  |
-| 135M-CCDL-STE |
-| 360M-STE-STE  |
-| 360M-CCDL-STE |
-| 1.7B-STE-STE  |
-| 1.7B-CCDL-STE |
 
 ---
 
